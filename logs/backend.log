@@ -1,0 +1,9 @@
+INFO:     Started server process [27480]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:8846 - "GET /api/status HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:59067 - "POST /api/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59067 - "GET /api/admin/users HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59067 - "GET /api/files HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59067 - "GET /api/status HTTP/1.1" 200 OK
