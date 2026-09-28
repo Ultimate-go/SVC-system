@@ -1,0 +1,24 @@
+{
+  "name": "vds-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VDS 前端 —— 基于增量聚合向量承诺的可验证分布式存储与可控共享系统",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "axios": "^1.20.0",
+    "element-plus": "^2.14.6",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "vite": "^8.3.1"
+  }
+}

@@ -1,0 +1,12 @@
+# 前端依赖与构建产物
+node_modules/
+dist/
+
+# 本地环境
+*.local
+.env
+.env.*
+
+# 日志
+*.log
+npm-debug.log*
