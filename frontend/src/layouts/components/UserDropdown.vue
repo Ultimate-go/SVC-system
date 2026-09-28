@@ -2,13 +2,14 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
+import { usePermission } from '../../composables/usePermission'
 import Icon from '../../components/icons/Icon.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
 
 const display = computed(() => auth.user?.display_name || auth.user?.username || '用户')
-const isAdmin = computed(() => auth.user?.role === 'admin')
+const { isAdmin } = usePermission()
 
 function go(path) {
   router.push(path)

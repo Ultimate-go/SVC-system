@@ -2,10 +2,11 @@
 /**
  * 内联 SVG 图标集。全部自己写 <svg>，不引外部字体或 sprite。
  *
- * 用法：<Icon name="dashboard" /> 或直接 import { IconDashboard }。
- * 统一定义在一个文件里，避免十几个 .vue 文件重复。
+ * 用法只有一种：<Icon name="dashboard" :size="14" />（图标名见下面的 ICONS 表）。
+ * 图标表通过 defineExpose 暴露，方便别处读名字，但**没有** IconDashboard 这类
+ * 具名导出 —— 别去 import 它们。
  */
-import { computed, h } from 'vue'
+import { computed } from 'vue'
 
 const ICONS = {
   dashboard: 'M4 4h6v16H4zM14 4h6v7h-6zM14 15h6v5h-6z',

@@ -6,7 +6,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { useAuthStore } from '../../../stores/auth'
+import { usePermission } from '../../../composables/usePermission'
 import { systemApi } from '../../../api/system'
 import { devicesApi } from '../../../api/devices'
 import { hexFp } from '../../../utils/format'
@@ -16,7 +16,7 @@ import ProcessingFlow from '../../../components/chart/ProcessingFlow.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
-const auth = useAuthStore()
+const { isAdmin } = usePermission()
 const router = useRouter()
 
 const loading = ref(true)
@@ -25,8 +25,6 @@ const status = ref(null)
 const pending = ref(null)
 const checking = ref(false)
 const checkResult = ref(null)
-
-const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const delta = computed(() => status.value?.delta || {})
 const crs = computed(() => status.value?.crs || {})

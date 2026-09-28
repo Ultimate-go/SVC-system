@@ -5,16 +5,13 @@
  * ★ 前端不做安全判断：菜单隐藏只是「看不见」，真正的权限在 meta + 后端。
  *   普通用户看不到管理员菜单项（requiresAdmin）。
  */
-import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useAuthStore } from '../../stores/auth'
+import { usePermission } from '../../composables/usePermission'
 import Icon from '../../components/icons/Icon.vue'
 
-const auth = useAuthStore()
+const { isAdmin } = usePermission()
 const route = useRoute()
 const router = useRouter()
-
-const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const groups = [
   {

@@ -1,13 +1,30 @@
 /* 覆写 Element Plus 的 CSS 变量，让 el-table / el-dialog / el-input 适配深浅主题。 */
 
+/* 主色阶的混合方向随主题反转 —— 这是 Element Plus 自己的约定：
+   浅色主题下的 light-N 是「往白混」，深色主题下的 light-N 其实是「往黑混」。
+   （参照它自带的 html.dark 定义：--el-color-primary-light-9 在深色下是一个很暗的蓝。） */
+html[data-theme='dark'] {
+  --ep-mix: #000;
+  --ep-mix-inv: #fff;
+}
+html[data-theme='light'] {
+  --ep-mix: #fff;
+  --ep-mix-inv: #000;
+}
+
 :root {
   --el-color-primary: var(--accent);
-  --el-color-primary-light-3: var(--accent);
-  --el-color-primary-light-5: var(--accent);
-  --el-color-primary-light-7: var(--accent);
-  --el-color-primary-light-8: var(--accent);
-  --el-color-primary-light-9: var(--accent);
-  --el-color-primary-dark-2: var(--accent);
+  /* ★ 这一组必须是「真的一档一档算出来」的，不能全塞同一个 accent。
+     全塞同一个值时，hover（用 light-3）、active（light-5）、disabled（light-5）、
+     plain 按钮底色（light-9）全部等于 accent —— 表现就是想改的全都改不动：
+     主按钮 hover 不变色、禁用态不淡化、plain 按钮变成一块饱和色。
+     color-mix 需要 Chrome/Edge 111+、Safari 16.2+、Firefox 113+（2023 年起的浏览器）。 */
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent), var(--ep-mix) 30%);
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent), var(--ep-mix) 50%);
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent), var(--ep-mix) 70%);
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent), var(--ep-mix) 80%);
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent), var(--ep-mix) 90%);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--accent), var(--ep-mix-inv) 20%);
   --el-bg-color: var(--bg-panel);
   --el-bg-color-overlay: var(--bg-panel);
   --el-bg-color-page: var(--bg-page);
