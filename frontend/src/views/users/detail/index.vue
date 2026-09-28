@@ -104,13 +104,6 @@ onMounted(load)
         </el-form>
       </div>
 
-      <el-alert
-        type="warning"
-        :closable="false"
-        class="mt-3"
-        title="管理员改不了别人的口令"
-        description="他的私钥是用他自己的口令包的，替他改 = 把他手里的私钥永久弄丢（以前的文件会全部解不开）。让他自己在「个人中心」改；管理员能做的只有停用。"
-      />
     </div>
   </div>
 </template>
