@@ -1,21 +1,16 @@
 <script setup>
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
-import Icon from '../../components/icons/Icon.vue'
 import UserDropdown from './UserDropdown.vue'
 import KeyStatusTag from '../../components/security/KeyStatusTag.vue'
+import AppBreadcrumb from './AppBreadcrumb.vue'
 
 const auth = useAuthStore()
-const route = useRoute()
-
-const title = computed(() => route.meta?.title || '')
 </script>
 
 <template>
   <header class="topbar">
     <div class="left">
-      <span class="page-title">{{ title }}</span>
+      <AppBreadcrumb />
     </div>
     <div class="right">
       <KeyStatusTag v-if="auth.user" :user="auth.user" />
@@ -40,15 +35,12 @@ const title = computed(() => route.meta?.title || '')
   display: flex;
   align-items: center;
   gap: 12px;
-}
-.page-title {
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--text-1);
+  min-width: 0;
 }
 .right {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-shrink: 0;
 }
 </style>

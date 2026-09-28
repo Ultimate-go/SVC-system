@@ -5,6 +5,8 @@
  *  - public         免登录（只有 /login）
  *  - requiresAdmin  管理员才能进
  *  - title          页面标题（顶栏 + document.title）
+ *  - parent         可选，{ title, path } —— 详情/新增类页面的回退目标，
+ *                   由顶栏的 AppBreadcrumb 渲染成可点的父级。
  *
  * ★ 业务红线：前端不做任何安全判断。菜单隐藏只是「看不见」，
  *   真正的权限在 meta + 后端。路由守卫只有一套（见 guard.js）。
@@ -62,7 +64,7 @@ export const routes = [
         path: 'devices/add',
         name: 'devices-add',
         component: () => import('../views/devices/add/index.vue'),
-        meta: { title: '新增节点' },
+        meta: { title: '新增节点', parent: { title: '设备', path: '/devices' } },
       },
       {
         path: 'devices/:id',

@@ -1,21 +1,10 @@
 <script setup>
-/**
- * 登录页 —— 左右分栏。
- *
- * 左侧：项目介绍（标题 + 科技感动态背景 + 漂浮的英文单词）。
- * 右侧：登录面板（登录系统 / 请输入账号与密码进入平台 / 账号 / 密码 / 登录确认）。
- *
- * 演示账号不再写在面板上（按修改意见移除）。
- * 移动端（窄屏）下左右分栏自动堆叠。
- *
- * ★ 背景用纯 CSS 营造深色科技感（渐变 + 网格 + 光斑 + 漂浮单词），
- *   不引外部图片、不引新依赖；动效只用 transform / opacity，性能友好。
- */
 import { ref, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
 import Icon from '../../components/icons/Icon.vue'
+import VideoBackdrop from '../../components/media/VideoBackdrop.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -47,10 +36,11 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 
 <template>
   <div class="login-page">
-    <!-- 深色科技感动态背景 -->
+    <!-- 深色科技感背景：CSS 底座 + 半透明视频叠层 -->
     <div class="backdrop" aria-hidden="true">
       <div class="bg-glow" />
       <div class="bg-grid" />
+      <VideoBackdrop />
       <span
         v-for="(w, i) in FLOATING_WORDS"
         :key="w"
@@ -66,13 +56,15 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
           <h1 class="intro-title">基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h1>
           <p class="intro-sub">
-            全系统的所有文件共享同一条全局向量 —— 一张证据横跨多个文件与用户；
-            验证对所有人开放，解密只有文件所有者能做到。
+            一套基于增量聚合向量承诺的可验证分布式存储与查询系统。
+            <br />把文件交给别人保管，怎么放心？
+            <br />我们给出的答案不是「请相信我们」，而是一份任何人都能自己验证的密码学证据。
+
           </p>
           <ul class="intro-points">
-            <li><span class="pt-dot" />常量摘要 —— 与文件大小、个数都无关</li>
-            <li><span class="pt-dot" />常量证据 —— 恒为两个群元素</li>
-            <li><span class="pt-dot" />验证不受限 · 解密受限</li>
+            <li><span class="pt-dot" />公开可验证，且非所有者无法解密 </li>
+            <li><span class="pt-dot" />不靠承诺，靠可验证 </li>
+            <li><span class="pt-dot" />384个算法核回归测试钉住密码学</li>
           </ul>
         </div>
       </section>

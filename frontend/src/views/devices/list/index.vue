@@ -12,8 +12,8 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { devicesApi } from '../../../api/devices'
 import { systemApi } from '../../../api/system'
-import { useAuthStore } from '../../../stores/auth'
-import { nodeSelfCheck, span } from '../../../utils/format'
+import { usePermission } from '../../../composables/usePermission'
+import { nodeSelfCheck } from '../../../utils/format'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import StatCard from '../../../components/common/StatCard.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
@@ -21,7 +21,7 @@ import EmptyState from '../../../components/common/EmptyState.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
-const auth = useAuthStore()
+const { isAdmin } = usePermission()
 
 const loading = ref(false)
 const error = ref('')
@@ -35,10 +35,7 @@ const porResult = ref(null)
 
 const retrying = ref(false)
 
-const isAdmin = computed(() => auth.user?.role === 'admin')
-
 const onlineCount = computed(() => nodes.value.filter((n) => !n.unreachable && !n.fresh).length)
-const downList = computed(() => nodes.value.filter((n) => n.unreachable).map((n) => n.node_id))
 
 const hasPending = computed(() => !!(pending.value?.pending || pending.value?.persist_pending))
 

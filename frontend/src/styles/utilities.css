@@ -44,6 +44,28 @@
   opacity: 0;
 }
 
+/* ---------- 界面偏好（stores/theme.js 往 <html> 上挂的类）----------
+   这三段是「界面偏好」页那几个开关的落点。它们必须存在 ——
+   类被挂上但没有对应规则，开关就是个空壳（点下去什么都不发生）。 */
+
+html.no-motion *,
+html.no-motion *::before,
+html.no-motion *::after {
+  animation-duration: 0.001ms !important;
+  transition-duration: 0.001ms !important;
+}
+
+/* 表格密度「紧」：只压表格与面板的内边距，不改变字号体系。 */
+html.compact .el-table .el-table__cell {
+  padding: 3px 0;
+}
+html.compact .el-table .cell {
+  line-height: 18px;
+}
+html.compact .panel {
+  padding: 12px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
