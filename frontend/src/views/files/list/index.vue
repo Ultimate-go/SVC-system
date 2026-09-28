@@ -154,7 +154,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="文件与块" subtitle="验证不受限（谁都能验），解密受限（只有所有者）" />
+    <PageHeader title="文件与块" subtitle="所有人可验证，但仅所有者能解密" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>
@@ -175,7 +175,7 @@ onMounted(load)
           </el-upload>
 
           <div class="upload-form">
-            <el-input v-model="uploadForm.fileKey" placeholder="文件标识 file_key（如 病历A）" />
+            <el-input v-model="uploadForm.fileKey" placeholder="请输入文件标识" />
             <el-radio-group v-model="uploadForm.splitMode">
               <el-radio-button v-for="m in SPLIT_MODES" :key="m.value" :value="m.value">{{ m.label }}</el-radio-button>
             </el-radio-group>
@@ -189,7 +189,7 @@ onMounted(load)
             </div>
 
             <div class="nodes-pick">
-              <span class="text-2">存到哪几台：</span>
+              <span class="text-2">存储位置：</span>
               <el-checkbox-group v-model="uploadForm.pickedNodes">
                 <el-checkbox v-for="n in nodes" :key="n.node_id" :value="n.node_id" :disabled="n.unreachable">
                   <span class="mono">{{ n.node_id }}</span>
@@ -198,7 +198,7 @@ onMounted(load)
             </div>
 
             <div class="actions">
-              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">问顾问</el-button>
+              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">寻求建议</el-button>
               <el-button type="primary" :disabled="!canUpload" :loading="uploading" @click="doUpload">上传</el-button>
               <span v-if="uploading" class="mono elapsed">已用 {{ (uploadElapsed / 1000).toFixed(1) }} s</span>
             </div>

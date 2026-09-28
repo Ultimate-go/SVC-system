@@ -111,7 +111,7 @@ onMounted(() => {
     </div>
 
     <div class="panel">
-      <h4 class="sec-title">改自己的口令</h4>
+      <h4 class="sec-title">更改口令</h4>
       <el-form label-width="90px" class="pwd-form" @submit.prevent>
         <el-form-item label="新口令">
           <el-input v-model="pwdForm.password" type="password" show-password />
@@ -123,7 +123,7 @@ onMounted(() => {
           <el-button type="primary" :loading="changing" @click="changePassword">改口令</el-button>
         </el-form-item>
       </el-form>
-      <p class="note">改口令会重新封装私钥，所以后端会慢几百毫秒。</p>
+      <p class="note">改口令会重新封装私钥，所以会略有延迟。</p>
       <StageTimeline v-if="changeTimings" :timings="changeTimings" class="mt-3" />
     </div>
   </div>

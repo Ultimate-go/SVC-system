@@ -47,18 +47,15 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="审计流水" subtitle="只记元数据，永远不含明文 / 密钥 / 密文" />
+    <PageHeader title="审计流水" subtitle="可追溯、可回放，仅存元数据，不涉敏感内容" />
 
     <div class="panel filter">
-      <el-input v-model="target" placeholder="按对象回放（所有者/文件标识，精确匹配）" clearable style="width: 300px" @keyup.enter="load" />
-      <el-input v-model="actor" placeholder="按操作者回放（精确匹配）" clearable style="width: 240px" @keyup.enter="load" />
+      <el-input v-model="target" placeholder="按对象（文件标识）回放" clearable style="width: 300px" @keyup.enter="load" />
+      <el-input v-model="actor" placeholder="按操作者回放" clearable style="width: 240px" @keyup.enter="load" />
       <el-button type="primary" @click="load">查询</el-button>
       <el-button @click="target = ''; actor = ''; load()">重置</el-button>
     </div>
 
-    <p class="replay-note">
-      查询类动作（query / verify / por）只能按操作者（actor）捞 —— 它们按全局下标记，不落在具体文件上。
-    </p>
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <div v-else class="panel">
