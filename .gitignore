@@ -21,9 +21,7 @@ vds.db
 vds.db-wal
 vds.db-shm
 
-nodes/node-*/
-
-nodes/token.txt
+nodes/
 
 logs/
 *.log
@@ -61,3 +59,6 @@ $RECYCLE.BIN/
 .env.*
 !.env.example
 *.local
+
+.workbuddy/
+
