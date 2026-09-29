@@ -14,13 +14,38 @@ r"""一键启动：若干台存储节点 + 后端 + 前端，然后打开浏览�
     python scripts/start_all.py --demo       # 顺带灌 5 个演示文件（会真的推到节点上）
     python scripts/start_all.py --stop       # 把这几样全停掉
     python scripts/start_all.py --no-browser # 不自动开浏览器
+    python scripts/start_all.py --nodes 6    # 明确按 6 台起（并写回部署配置）
 
 **默认不带演示文件** —— 文件、切成几块、怎么切，都由你在界面上自己选。
 
+台数从哪来
+----------
+**这里不再问使用者**（以前双击 .cmd 会弹一句"起几台"）。规则就三条：
+
+============================  ==========================================
+``--nodes N``                 用 N，**并且写回部署配置**（命令行是显式覆盖）
+``--reset``（没给 ``--nodes``）  台数**复位成 4**，再按 4 台起
+以上都没有                    读部署配置 ``nodes/deploy.json``
+============================  ==========================================
+
+所以"改台数"这件事只有一个入口：**管理员界面**。它写的就是那个 JSON 文件，
+于是「改它 → 提示重启 → 重启时按新台数起节点和后端」这条链路里，
+那个"改"和这个"读"是同一份数据，不存在两处配置对不上的可能。
+
+``--nodes`` 会写回配置，是为了不让它变成一个"只在这一次生效、界面却看不出来"
+的隐形开关 —— 命令行改过之后，管理员界面显示的就是你刚起的那几台。
+
 幂等
 ----
-已经在跑的东西**不会再起一个**：脚本先探活（节点 9101-9104 / 后端 8000 /
-前端 5173），活的就跳过。所以"点两下"是安全的。
+已经在跑的东西**不会再起一个**：脚本先探活（各存储节点 / 后端 / 前端，端口都
+取自部署配置 ``nodes/deploy.json``），活的就跳过。所以"点两下"是安全的。
+
+端口从哪里来
+------------
+与台数**同一个文件、同一个模型**（``nodes/deploy.json`` 的 ``ports``）：
+后端、前端、以及**每一台存储节点各自的端口**都可以在管理员界面里改，
+改完点「立刻重启」生效。默认分别是 8000 / 5173 / 9101,9102,…（连号）。
+``scripts/start_all.py`` 自己**不写死任何端口** —— 它是这套配置的读取方。
 
 令牌
 ----
@@ -38,6 +63,16 @@ r"""一键启动：若干台存储节点 + 后端 + 前端，然后打开浏览�
 ----------------------------------
 它删的是：``vds.db``（协调者库）、``nodes/node-*/``（各节点库）、
 ``logs/*.log``。**不动** ``nodes/token.txt``。
+
+★ 它还会把**服务器台数复位成默认值**（``nodes/deploy.json`` → 4 台）——
+这是"重置"该有的样子：一切回到出厂状态。想保留台数就别加 ``--reset``，
+或者显式 ``--reset --nodes 6``。
+
+★ 清理节点目录用的是 **``nodes/node-*`` 通配**，而不是"当前这几台"。
+为什么：上一次可能是 ``--nodes 6`` 起的，那 6 个目录都在；按当前台数
+（比如 2）去删就会漏掉 4 个 —— 而漏掉的那些**会让下次启动被启动闸拒掉**
+（协调者库被清了、节点库却还留着旧状态），报错看起来像"数据坏了"，
+其实只是没删干净。
 
 ``--reset`` 之后节点是空的、协调者也是空的（n = 0），两边一致，所以启动闸放行。
 反过来，**只清库不清节点**一定会被启动闸拒掉 —— 这就是为什么它俩必须一起清。
@@ -63,6 +98,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Iterable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,19 +106,71 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 PY = sys.executable
-#: 默认节点名。``--nodes N`` 会把它换成 node-1..node-N（全脚本共用这一份）。
-#: ★ 后端与前端**不写死台数** —— 后端从 ``VDS_NODE_URLS`` 读，前端从 ``/api/nodes`` 取，
-#:   所以改这里就够了。
-NODES: tuple[str, ...] = ("node-1", "node-2", "node-3", "node-4")
-#: ``--nodes`` 的默认值。单独抽出来，因为 argparse 在 main() 里读它时
-#: 那句 ``global NODES`` 还没生效（用了会 SyntaxError）。
-DEFAULT_NODE_COUNT = len(NODES)
-BASE_PORT = 9101
-BACKEND_PORT = 8000
-FRONTEND_PORT = 5173
-URL = f"http://127.0.0.1:{FRONTEND_PORT}"
+
+#: ★★ 台数的**唯一真源**是 ``backend/config.py``（落在 ``nodes/deploy.json``）。
+#: 这个脚本不再自己写死一个 4，也不再问使用者 —— 规则见文件头「台数从哪来」。
+from backend.config import (  # noqa: E402
+    DEFAULT_BACKEND_PORT,
+    DEFAULT_FRONTEND_PORT,
+    DEFAULT_NODE_BASE_PORT,
+    DEFAULT_NODE_COUNT,
+    MAX_NODE_COUNT,
+    MIN_NODE_COUNT,
+    DeployPorts,
+    clamp_node_count,
+    effective_ports,
+    read_deploy_node_count,
+    read_deploy_ports,
+    read_deploy_stop_ports,
+    reset_deploy_node_count,
+    reset_deploy_ports,
+    write_deploy_node_count,
+)
+
+#: 默认节点名。``--nodes N`` 或部署配置会把它换成 node-1..node-N（全脚本共用这一份）。
+#: ★ 后端与前端**不写死台数** —— 后端从 ``VDS_NODE_URLS`` 读，前端从
+#:   ``/api/admin/deploy``（管理员）与 ``/api/nodes`` 取，所以改这里就够了。
+NODES: tuple[str, ...] = tuple(
+    f"node-{i}" for i in range(1, DEFAULT_NODE_COUNT + 1)
+)
+
+#: 三个端口**不再写死在这里**：真源是 ``nodes/deploy.json``（管理员界面写的就是它），
+#: 由 :func:`backend.config.effective_ports` 算出来。下面这三个只当
+#: "配置文件坏了 / 没见过这个文件"时的兜底，而在 :func:`stop_port_list` 里
+#: 那一整段默认区间也始终会被扫到 —— 老的残留靠它收尾。
+BASE_PORT = DEFAULT_NODE_BASE_PORT
+BACKEND_PORT = DEFAULT_BACKEND_PORT
+FRONTEND_PORT = DEFAULT_FRONTEND_PORT
+
+#: ★★ 本次要用的那一套端口。
+#:
+#: 为什么用模块级变量而不是一路传参：这里十几个函数都要问端口
+#: （起节点、探活、停止、banner、轮询、收尾），逐个改签名会把它们搞乱；
+#: 而这个脚本是**一次性进程**，全局态没有第二个使用者。
+#:
+#: ★ 导入时就先算一遍（不是留个空字典）：``scripts/restart.py`` 会 import 本模块
+#: 并直接调 :func:`stop_port_list`，而那个函数要按**配置里**的端口去扫 ——
+#: 如果这里只是个空壳，它就只能靠默认那一段，改过端口的残留就收不着了。
+#: :func:`main` 里还会按**这一次的**台数再算一遍（``--nodes`` 会改台数）。
+PORTS: DeployPorts = effective_ports()[0]
 TOKEN_FILE = ROOT / "nodes" / "token.txt"
 LOG_DIR = ROOT / "logs"
+
+#: 「立刻重启」用的**交接标记**。
+#:
+#: ★★ 为什么非有它不可：启动器除了起东西，还有一个职责 —— 盯着自己的子进程，
+#:   谁退出了就收尾（**按端口扫一遍**，把节点收干净）。
+#:   而「立刻重启」做的恰好是“先把后端杀掉、再按新台数起一遍”：
+#:   后端一死，旧启动器就会去扫 9101..9164 ——
+#:   而重启器这时已经把**新节点**起在那个区间上了，于是被一起收走。
+#:   表现就是“点了立刻重启，然后新的起不来 / 起来又没了”。
+#:
+#:   所以重启器在**停任何东西之前**先写下这个标记；启动器看到它就
+#:   **主动交出控制权**：不报错、不扫端口、退出码 0 ——
+#:   ``一键启动.cmd`` 收到 0 会直接把它那个窗口关掉（不用人去关）。
+#:   标记的生死由重启器管：它收完尾、起新栈之前删掉（同时兜底地由本脚本
+#:   启动时清一次，免得重启器半路挂了留下一个过期标记）。
+RESTART_MARKER = LOG_DIR / "restart.pending"
 
 #: 与 :mod:`scripts.seed` 里那份保持一致。这里是**只读引用**，
 #: 改口令请改 ``scripts/seed.py`` 的 ``DEMO_PASSWORD``（它才是权威）。
@@ -170,15 +258,141 @@ def listener_pids(port: int) -> list[int]:
     return listening_map().get(int(port), [])
 
 
-def kill_port(port: int) -> list[int]:
-    """停掉占用该端口的进程树（``/T`` 连子进程一起，否则 npm 底下那个 node 会留下）。"""
+def kill_port(port: int, *, tree: bool = True) -> list[int]:
+    """停掉占用该端口的进程。
+
+    :param tree: 是否连子进程一起（``/T``）。默认是 —— 前端的 npm 底下那个 node、
+        节点托管进程底下那几台，不连根拔掉就会留着端口。
+
+        ★ ``scripts/restart.py`` 对**后端**那一发传 ``False``：它自己就是后端
+        进程的子进程（"立刻重启"按钮由后端拉起的），``/T`` 会把整棵树杀掉 ——
+        包括它自己，于是"重启完成之后"的步骤永远跑不到，表现是
+        **点了立刻重启，然后什么都没发生**。后端没有别的子进程
+        （uvicorn 没开 ``--reload``），所以只杀它自己是安全的。
+    """
     killed = []
     for pid in listener_pids(port):
         subprocess.run(
-            ["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True, text=True
+            ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else []),
+            capture_output=True,
+            text=True,
         )
         killed.append(pid)
     return killed
+
+
+def process_table(name_like: str | None = "%python%") -> list[tuple[int, str]]:
+    """**一次**问出进程的 ``(PID, 命令行)``。
+
+    :param name_like: 进程名过滤（WQL 的 ``like``）。``None`` = **全部进程**。
+        ★ 为什么得能关掉：:func:`ours_like` 判"这是不是本系统的进程"时
+        **必须看得见 node.exe** —— 前端（vite）就是一个 node 进程，
+        而它不在 ``%python%`` 里。只查 python 的后果是：停止流程拿不到它的
+        命令行，于是把前端当成"别人的程序"**静默跳过** —— 表现为
+        「停止」/「重置并启动」停不掉前端（而它还占着 ``logs/frontend.log``）。
+
+    ★ 成批问的理由与 :func:`listening_map` 一模一样：每起一个 PowerShell 进程
+      在 Windows 上要 0.5--1 s，逐个问就会卡成"像是死了"。
+
+    它用来找**不在端口上听**的监护进程：节点托管进程 ``run_nodes.py``、
+    上一次的启动器 ``start_all.py``。这两个按端口扫**扫不到**，
+    而它们不死，端口就还会被重新占上 —— 或者更糟，
+    旧启动器会去扫端口，把新起的那套一并收走（见 :data:`RESTART_MARKER`）。
+    """
+    if name_like:
+        ps = (
+            f"Get-CimInstance Win32_Process -Filter \"Name like '{name_like}'\" | "
+            "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+        )
+    else:
+        ps = (
+            "Get-CimInstance Win32_Process | "
+            "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+        )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    rows: list[tuple[int, str]] = []
+    for line in out.splitlines():
+        head, _, cmd = line.partition("\t")
+        if head.strip().isdigit() and cmd.strip():
+            rows.append((int(head), cmd.strip()))
+    return rows
+
+
+def find_by_cmdline(needle: str, *, exclude: set[int] | frozenset[int] = frozenset()) -> list[int]:
+    """命令行里含 ``needle`` 的进程 PID（跳过 ``exclude``）。大小写不敏感。"""
+    low = needle.lower()
+    return [
+        pid
+        for pid, cmd in process_table()
+        if low in cmd.lower() and pid not in exclude
+    ]
+
+
+def kill_by_cmdline(
+    needle: str,
+    *,
+    tree: bool = False,
+    exclude: set[int] | frozenset[int] = frozenset(),
+) -> list[int]:
+    """按命令行关键字收进程。**默认不带 ``/T``** —— 要不要连树由调用方说清楚。
+
+    ★ 为什么不能只用 :func:`kill_port`：它只能收"正在监听某个端口"的进程，
+      而 ``run_nodes.py`` / ``start_all.py`` 都不监听任何端口
+      （它们只是"看着"子进程）。要收干净这两类，必须按命令行找。
+    """
+    killed: list[int] = []
+    for pid in find_by_cmdline(needle, exclude=exclude):
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else []),
+            capture_output=True,
+            text=True,
+        )
+        killed.append(pid)
+    return killed
+
+
+def pid_alive(pid: int) -> bool:
+    """这个 PID 还活着吗。**微秒级，不起任何子进程** —— 轮询用它。
+
+    ★★ 为什么非有它不可（实测踩到）：``find_by_cmdline`` / ``listening_map``
+      每次都要起一个 PowerShell 进程（本机实测 **1.2--2.7 秒**）。把它们写进
+      "每隔 0.3 秒看一眼"的循环里，一轮就是一秒多，几十轮下来就是
+      **76 秒的静默** —— 窗口停在 ``[1/3]`` 一动不动，看跟卡死一模一样。
+      而"某个 PID 还在不在"只要一次 ``OpenProcess``。
+
+    判据用 ``GetExitCodeProcess == STILL_ACTIVE(259)``：
+    拿不到句柄（进程没了 / 权限不够）= 当作它已经走了。
+    """
+    if os.name != "nt":  # pragma: no cover - 本脚本只在 Windows 上用
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except OSError:
+            return False
+
+    import ctypes  # noqa: PLC0415 - Windows 专用，放在这里就不弄脏非 Windows 路径
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = k32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        k32.CloseHandle(handle)
 
 
 def http_code(url: str, token: str | None = None, timeout: float = 1.5) -> int | None:
@@ -246,47 +460,6 @@ def load_token() -> str:
     return fresh
 
 
-def _ask_node_count() -> int | None:
-    """双击启动时问一句“起几台”。回车 = 默认；``q`` = 放弃。
-
-    返回 ``None`` 表示使用者放弃（调用方直接退 0 —— 那不是失败，别报错）。
-
-    ★★ 为什么这段逻辑在这里、而不在 ``一键启动.cmd`` 里：
-    cmd.exe 在 ``chcp 65001`` 下读含**多字节字符**的 .cmd 会**丢失行位置** ——
-    它会把一个 ``rem`` 注释劈成两半、把后半段当命令去执行。实测双击时报的是
-
-        '的延迟展开写法（set' is not recognized as an internal or external command
-
-    然后 cmd 从错位的地方接着跑（流程还能走完，但那两行错误会一直刷在屏幕上，
-    而且下次未必这么幸运）。所以：**.cmd 保持纯 ASCII**，中文交互一律交给 Python。
-    """
-    say()
-    say(f"  起几台存储节点？（直接回车 = {DEFAULT_NODE_COUNT} 台）")
-    say("    2 台 —— 最小可跑：每块要存 2 份副本，而副本必须落在不同的机器上")
-    say(f"    {DEFAULT_NODE_COUNT} 台 —— 答辩默认，块会摊在这几台上")
-    say("    6 台及以上 —— 演示“加机器也不会把老块搬过去，新块才开始用上新机器”")
-    say("  注：改台数后新节点上暂时没有块（旧块仍在原来那几台）—— 想干净重来请配 --reset")
-    try:
-        raw = input(f"  台数（回车 = {DEFAULT_NODE_COUNT}，q = 取消）: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        say("  （没读到输入）—— 用默认值")
-        return DEFAULT_NODE_COUNT
-    if raw in ("q", "Q", "quit", "exit"):
-        return None
-    if not raw:
-        return DEFAULT_NODE_COUNT
-    try:
-        n = int(raw)
-    except ValueError:
-        # 从宽处理：启动器不该因为多打了一个字就罢工
-        say(f"  “{raw}”不是数字 —— 用默认值 {DEFAULT_NODE_COUNT}")
-        return DEFAULT_NODE_COUNT
-    if n < 1:
-        say(f"  台数至少是 1 —— 用默认值 {DEFAULT_NODE_COUNT}")
-        return DEFAULT_NODE_COUNT
-    return n
-
-
 # ---------------------------------------------------------------- 各步骤
 
 
@@ -300,37 +473,262 @@ def _ask_node_count() -> int | None:
 STOP_PORT_SPAN = 64
 
 
-def stop_everything(quiet: bool = False) -> None:
+def process_cmdlines() -> dict[int, str]:
+    """**一次**问出**全部**进程的 ``PID → 命令行``。
+
+    ★★ 必须包含非 python 进程（所以传 ``None``）：本系统三个角色里，前端是
+      **node.exe**（vite），而 :func:`process_table` 默认只查 python ——
+      漏了它，:func:`ours_like` 就认不出前端，于是"停止"会**静默跳过我自己的前端**
+      （它占着端口与 ``logs/frontend.log``，紧接着的重置就会栽在"文件被占用"上）。
+      这一条是实测踩出来的：前端的进程表查不到 ⇒ 停止停不掉 ⇒ 重置报
+      ``PermissionError: [WinError 32] logs/frontend.log``。
+    """
+    return {pid: cmd for pid, cmd in process_table(None)}
+
+
+#: 本系统进程在命令行里的特征。**认不出来就当不是本系统的，一律不动。**
+#:
+#: ★ 刻意**不**收 "vite" / "npm" 这种通用词：别的项目在前面那个 5173 上跑一个
+#:   vite 是完全可能的事（5173 就是 vite 的默认端口），把它们当自己人就会误杀
+#:   —— 而"端口可配"这个功能本来就是冲着"与别人的程序撞上"来的。
+#:   前端的进程靠上面那句"命令行里带着本工程路径"认出来就够了：vite 跑的是
+#:   ``node <本工程>\frontend\node_modules\vite\bin\vite.js``（npm 那条路也是
+#:   跑 ``<本工程>\frontend\node_modules\.bin\vite`` 这个夹子）。
+OUR_CMDLINE_MARKERS = (
+    "backend.main",  # 后端：python -m uvicorn backend.main:app --port N
+    "node_service",  # 存储节点：python -m node_service --node-id node-1 ...
+    "start_all.py",  # 启动器（不监听端口，但按命令行收进程时用得上）
+    "restart.py",  # 重启器
+)
+
+
+def ours_like(cmdline: str) -> bool:
+    """这个进程是不是**本系统**的（按命令行判）。
+
+    ★★ 为什么必须判：端口号人人都可能用（9101 也一样）。不判就 ``taskkill /F``
+      会把别人正在跑的东西打掉 —— 而"把端口做成可配"这件事的意义恰恰是
+      与别人的程序错开；一边提供这个能力、一边在停止时误杀别人的进程，
+      是自相矛盾的（使用者担心的正是"跟别的程序撞上"这件事）。
+
+    ★ 宁可留下一个孤儿进程（看得见、能手动收），也不要错杀一个陌生的进程
+      （赔不起）。认不出来时 :func:`stop_everything` 会在控制台说一声。
+    """
+    low = (cmdline or "").lower()
+    if not low:
+        return False
+    if str(ROOT).lower() in low:  # 命令行里带着本工程路径的，一定是我们的
+        return True
+    return any(m.lower() in low for m in OUR_CMDLINE_MARKERS)
+
+
+def node_port(i: int) -> int:
+    """第 ``i`` 台（0 基，对应 ``NODES[i]``）的端口。"""
+    return int(PORTS.nodes[NODES[i]])
+
+
+def node_urls_arg() -> str:
+    """``node-1=http://127.0.0.1:9101,node-2=http://127.0.0.1:9200``。
+
+    ★ 两个地方要用同一份：给后端/种数据的环境变量 ``VDS_NODE_URLS``，
+      以及 ``run_nodes.py --urls``。写成一个函数就不会两边分叉。
+    """
+    return ",".join(f"{nid}=http://127.0.0.1:{PORTS.nodes[nid]}" for nid in NODES)
+
+
+def frontend_url() -> str:
+    """前端地址（跟着配置走，不再是写死的 5173）。"""
+    return f"http://127.0.0.1:{PORTS.frontend}"
+
+
+def stop_port_list() -> list[int]:
+    """停止/等释放时要扫的**全部**端口（去重、升序）。
+
+    三处来源，缺一不可：
+
+    * **部署配置里那一套**（:func:`~backend.config.effective_ports`）：下一轮要用的；
+    * **配置里记过的所有节点端口**（含已经被摘掉的那几台留下的记录）：
+      台数调小之后，旧那几台还在它们各自的端口上跑着；
+    * **``stop_ports``（历史上用过的全部端口）与默认那一段**（8000 / 5173 / 9101-9164）：
+      "配置改过了，但跑着的还是上一套"这条路上唯一的线索。
+
+    ★ 为什么不直接扫一段：每台节点的端口现在可以**各自不同**，没有"一段"可扫。
+      而默认那一段仍然留着当兜底 —— 老配置（或配置文件被删）时全靠它。
+    ★ 真正要不要杀，还要过一遍 :func:`ours_like`（见那里的理由）。
+    """
+    ports: set[int] = {PORTS.backend, PORTS.frontend, *PORTS.nodes.values()}
+    eff, _ = effective_ports()  # 从**部署配置**再读一遍（重启器也会调本函数）
+    ports |= {eff.backend, eff.frontend, *eff.nodes.values()}
+    ports |= set(read_deploy_ports().all_ports())
+    ports |= read_deploy_stop_ports()
+    ports |= {BACKEND_PORT, FRONTEND_PORT}
+    ports |= {BASE_PORT + i for i in range(STOP_PORT_SPAN)}
+    return sorted(p for p in ports if 0 < p <= 65535)
+
+
+def stop_everything(
+    quiet: bool = False,
+    *,
+    backend_tree: bool = True,
+    self_ports: Iterable[int] = (),
+) -> None:
+    """把后端、前端、以及所有本系统的节点进程停掉。
+
+    :param backend_tree: 后端那一发是否连子进程一起杀。见 :func:`kill_port` ——
+        ``scripts/restart.py`` 传 ``False``（它自己挂在后端下面）。
+        节点与前端**照旧**用 ``/T``：它们底下确实有子进程要一起收走，
+        而且它们都不是"调用者自己的祖先"。
+    :param self_ports: **调用者自己所在的那棵进程树**正在听的端口。这些端口一律
+        **不**带 ``/T``。
+
+        ★★ 为什么非有它不可（这是"改端口之后重启就没了"的根因，真踩到过）：
+          改端口时，配置里写的已经是**新**端口，而正在跑的后端还在**旧**端口上
+          （就是调用者自己所在的那棵树！）。于是"按端口号判断要不要 ``/T``"这条
+          规则失效 —— 旧端口 != 配置里的后端端口 ⇒ 被当成"别人的端口" ⇒ 带上
+          ``/T`` ⇒ 把 ``restart.py`` 自己一起杀掉。表现是
+          **点了「立刻重启」，旧的那套停了，新的那套再也没起来**
+          （只剩一个窗口一闪而过）。
+          所以判据必须与端口号无关：**调用者自己所在的那棵树，绝不 ``/T``**。
+    """
+    self_set = {int(p) for p in self_ports}
     # ★ 端口表**只查一次**（见 :func:`listening_map` 里的理由）。
     #   原来是 `for p in ports: kill_port(p)`，每个端口都起一个 PowerShell ——
     #   4 个端口时看不出来，扫 65 个端口时就变成卡几分钟。
     table = listening_map()
-    for p in [BACKEND_PORT, FRONTEND_PORT] + [
-        BASE_PORT + i for i in range(STOP_PORT_SPAN)
-    ]:
+    # ★★ 只收**本系统的**进程（:func:`ours_like`）：端口号人人都可能用，
+    #    不区分就把别人正在跑的东西打掉了 —— 而"端口可配"这个功能的意义
+    #    正是与别人的程序错开。进程表**只在真需要判定时才问**（它要起一个
+    #    PowerShell，实测 1-2 秒）；一旦问了就复用（见下面那个 ``cmds`` 缓存）。
+    cmds: dict[int, str] | None = None
+    skipped: list[int] = []
+    for p in stop_port_list():
         got = sorted(set(table.get(p, ())))
+        if not got:
+            continue
+        # 规则就两条，顺序不能反：① 调用者自己那棵树绝不 /T；② 其余按旧规则。
+        tree = p not in self_set and (backend_tree or p != PORTS.backend)
+        killed: list[int] = []
         for pid in got:
+            if cmds is None:
+                cmds = process_cmdlines()
+            if not ours_like(cmds.get(pid, "")):
+                # 命令行里认不出本系统的特征 —— 不动它。宁可留个孤儿，
+                # 也不要错杀一个陌生进程（那个赔不起）。
+                skipped.append(p)
+                continue
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F", "/T"],
+                ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else []),
                 capture_output=True,
                 text=True,
             )
-        if got and not quiet:
-            say(f"  停掉 {p}（PID {', '.join(map(str, got))}）")
+            killed.append(pid)
+        if killed and not quiet:
+            say(f"  停掉 {p}（PID {', '.join(map(str, killed))}）")
+    if skipped and not quiet:
+        uniq = ", ".join(str(x) for x in sorted(set(skipped)))
+        say(f"  {uniq} 上有别的程序在占着 —— 没有动它（要停它请自行处理）。")
+        say("     如果那确实是你以前留下的 VDS 进程，就去任务管理器里结束它，")
+        say("     或者换成别的端口（管理员界面 → 设备页 → 端口）。")
 
 
-def reset_data() -> None:
-    """清协调者库 + 各节点库 + 日志。**令牌文件不动**（省得每次都要重配）。"""
+def my_tree_ports() -> list[int]:
+    """**当前进程自己所在的那棵树**可能正在听的端口（给 :func:`stop_everything` 用）。
+
+    ★ 谁需要它：``scripts/restart.py`` —— 它是**后端进程的子进程**（「立刻重启」
+      按钮由后端拉起来的），而它要停的东西里就包括后端自己。判断"哪几个端口上
+      的进程是我爹"，不能只看配置：改端口时配置里写的是新端口，跑着的却是旧的。
+
+    三个来源都收进来（宁可多算，绝不 ``/T`` 到自己的祖先）：
+    ``VDS_BACKEND_PORT`` / ``VDS_FRONTEND_PORT``（启动器注入给后端、本进程继承的
+    **真值**）、配置里那个、以及默认值。
+    """
+    ports: set[int] = set()
+    for raw in (os.environ.get("VDS_BACKEND_PORT", ""), os.environ.get("VDS_FRONTEND_PORT", "")):
+        try:
+            ports.add(int(str(raw).strip()))
+        except (TypeError, ValueError):
+            continue
+    ports.add(int(PORTS.backend))
+    ports.add(int(read_deploy_ports().backend))
+    ports.add(BACKEND_PORT)
+    return sorted(p for p in ports if 0 < p <= 65535)
+
+
+def reset_data() -> list[str]:
+    """清协调者库 + 各节点库 + 日志。**令牌文件与部署配置不动**。
+
+    返回**删不掉**的那几个文件名（空列表 = 全清干净了）。
+
+    ★ 节点目录按 ``nodes/node-*`` **通配**清，不是按"当前这几台"。
+    理由见文件头 ``--reset 的边界``：上一次可能是 6 台起的，
+    按当前台数删就会漏下几个旧目录，而它们会让**下一次启动被启动闸拒掉**。
+
+    ★★ 删不掉时**不能抛异常**：这个函数跑在 ``--reset`` 的中间，一个被占用的
+      文件（某个进程还没死透，或者用户自己拿编辑器开着日志）不该让整次重置
+      半途而废 —— 那会留下"库清了、节点还在"（或反过来）的分叉，
+      而分叉正是启动闸要拦的状态。能删的删，删不掉的报出来由调用方处置。
+    """
+    stuck: list[str] = []
     for name in ("vds.db", "vds.db-wal", "vds.db-shm"):
         f = ROOT / name
-        if f.exists():
+        if not f.exists():
+            continue
+        try:
             f.unlink()
-    for nid in NODES:
-        shutil.rmtree(ROOT / "nodes" / nid, ignore_errors=True)
+        except OSError:
+            stuck.append(name)
+    n_dirs = 0
+    nodes_dir = ROOT / "nodes"
+    for d in sorted(nodes_dir.glob("node-*")):
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            n_dirs += 1
     if LOG_DIR.exists():
         for f in LOG_DIR.glob("*.log"):
-            f.unlink()
-    say("  已清空：vds.db、nodes/node-*、logs/*.log")
+            try:
+                f.unlink()
+            except OSError:
+                stuck.append(f.name)
+    say(f"  已清空：vds.db、nodes/node-*（{n_dirs} 个节点目录）、logs/*.log")
+    if stuck:
+        say(f"  这几个没删掉（还被别的进程占着）：{'、'.join(stuck)}")
+    return stuck
+
+
+#: 回环地址一律绕过 HTTP 代理（给子进程用的 ``no_proxy``）。
+#:
+#: ★ 为什么需要（实机踩到，故障现象极具误导性）：这台机器上开着 Windows
+#:   **系统代理**（``HKCU\...\Internet Settings``，被 ProxyBridge / Clash 那类
+#:   工具改的就是它）。此时：
+#:
+#:   * ``urllib``（本脚本探活用它）会查 ``ProxyOverride`` 并**绕过回环** → 一切正常；
+#:   * ``httpx``（``node_service/client.py`` 用它）**不做这一步** → 把
+#:     ``http://127.0.0.1:9101/node/crs`` 送去那个代理端口 →
+#:     ``[WinError 10061] 目标计算机积极拒绝``，而报错里写的是 node-1。
+#:
+#:   于是一边报“4 台节点就绪”、另一边报“node-1 通信失败”，看起来像启动顺序
+#:   或数据坏了，其实全是代理。客户端那一侧已经用 ``trust_env=False`` 关掉了
+#:   这条路（那才是正解）；这里再显式设一遍 ``no_proxy``，是为了让子进程里
+#:   **任何**别的 HTTP 客户端（含 urllib）也一致绕过 —— 有些机器的
+#:   ``ProxyOverride`` 并不包含 127.0.0.1，那时 urllib 也会中招。
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1,0.0.0.0"
+
+
+def add_loopback_no_proxy(env: dict) -> dict:
+    """把回环地址**并进** ``no_proxy``（大小写各一份），保留调用方已有的值。
+
+    ★ 是"并进去"而不是"覆盖"：使用者自己设的 ``no_proxy`` 里可能有别的内网段，
+      抹掉它属于越权。这里只做加法 —— 保证回环一定会被绕过，别的原样保留。
+
+    ★ 大小写各写一份：``urllib`` 只认小写那份（``getproxies_environment`` 用小写
+      键做 ``no_proxy`` 匹配），``httpx`` 两份都认。干脆都写上，省得记这种细节。
+    """
+    for key in ("no_proxy", "NO_PROXY"):
+        items = [x.strip() for x in str(env.get(key, "") or "").split(",") if x.strip()]
+        for host in LOOPBACK_NO_PROXY.split(","):
+            if host not in items:
+                items.append(host)
+        env[key] = ",".join(items)
+    return env
 
 
 def node_env(token: str) -> dict:
@@ -344,11 +742,16 @@ def node_env(token: str) -> dict:
     那里被拒：“node_ids 多出 ['node-3', 'node-4']”。这个坑我实机踩过一次。
     """
     env = os.environ.copy()
-    env["VDS_NODE_URLS"] = ",".join(
-        f"{nid}=http://127.0.0.1:{BASE_PORT + i}" for i, nid in enumerate(NODES)
-    )
+    env["VDS_NODE_URLS"] = node_urls_arg()
     env["VDS_NODE_IDS"] = ",".join(NODES)
     env["VDS_NODE_TOKEN"] = token
+    # ★★ 告诉后端"你现在跑在哪个端口上"：uvicorn 的 ``--port`` 是命令行参数，
+    #    应用里看不到，而管理员界面必须回答得了「现在跑的是 X / 配置是 Y」。
+    #    同理把前端端口也告诉它（界面上"现在跑的是"那一行要用）。
+    env["VDS_BACKEND_PORT"] = str(PORTS.backend)
+    env["VDS_FRONTEND_PORT"] = str(PORTS.frontend)
+    # ★ 回环不走代理（理由见 LOOPBACK_NO_PROXY）。
+    add_loopback_no_proxy(env)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONWARNINGS"] = "ignore"
     return env
@@ -390,11 +793,22 @@ def seed_accounts(with_demo: bool, token: str) -> int:
     return r.returncode
 
 
+def node_ports_hint() -> str:
+    """节点端口的紧凑写法：连号时是 ``9101-9104``，散着时逐个列。
+
+    ★ 端口现在可以每台都不一样，所以不能再假定"一段区间"。
+    """
+    vals = [int(PORTS.nodes[n]) for n in NODES]
+    if len(vals) > 1 and vals == list(range(vals[0], vals[0] + len(vals))):
+        return f"{vals[0]}-{vals[-1]}"
+    return "、".join(str(v) for v in vals)
+
+
 def ensure_nodes(token: str) -> subprocess.Popen | None:
     """确保所有节点活着且用**这一份**令牌。已就绲就返回 None。"""
-    states = {i: node_state(BASE_PORT + i, token) for i in range(len(NODES))}
+    states = {i: node_state(node_port(i), token) for i in range(len(NODES))}
     if all(s == "up" for s in states.values()):
-        say(f"  {len(NODES)} 台节点都在（{BASE_PORT}-{BASE_PORT + len(NODES) - 1}），跳过")
+        say(f"  {len(NODES)} 台节点都在（端口 {node_ports_hint()}），跳过")
         return None
 
     # 不是“全好”就**全部重启**（数据目录不动，所以数据不丢）：
@@ -404,25 +818,29 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
     if bad:
         say(
             "  有节点活着但令牌不对（端口 "
-            + ", ".join(str(BASE_PORT + i) for i in bad)
+            + "、".join(str(node_port(i)) for i in bad)
             + "）—— 重启成这份令牌（数据保留）"
         )
     else:
         say("  节点没起齐 —— 全部重启（数据保留）")
     for i in range(len(NODES)):
-        kill_port(BASE_PORT + i)
+        kill_port(node_port(i))
     time.sleep(1.0)
 
     # 用 run_nodes.py 起，而不是在这里手写 4 次 Popen —— 等活、收子进程那套逻辑
     # 已经在那儿了，重复写一遍迟早会分叉。
+    # ★ 传 ``--urls`` 而不是 ``--nodes`` + ``--base-port``：
+    #   端口可以每台都不一样（管理员界面上就是一个个填的），而 run_nodes 起进程时
+    #   用的端口本来就是从 URL 里取出来的（见那边的 ``url.rsplit``）。
     cmd = [
         PY,
         str(ROOT / "scripts" / "run_nodes.py"),
-        "--nodes", ",".join(NODES),
-        "--base-port", str(BASE_PORT),
-        "--token", token,
+        "--urls",
+        node_urls_arg(),
+        "--token",
+        token,
     ]
-    say("  起 4 台节点…")
+    say(f"  起 {len(NODES)} 台节点…")
     # ★ 把节点组的输出**落到文件**而不是丢进 DEVNULL：
     #   丢了的话，“某一台为什么死了”就永远找不回来了。
     #   （那个子进程平时很安静，出问题时它的报错就是唯一线索。）
@@ -440,8 +858,8 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
     )
     deadline = time.time() + 40
     while time.time() < deadline:
-        if all(node_state(BASE_PORT + i, token) == "up" for i in range(len(NODES))):
-            say(f"  {len(NODES)} 台节点就绪（{BASE_PORT}-{BASE_PORT + len(NODES) - 1}）")
+        if all(node_state(node_port(i), token) == "up" for i in range(len(NODES))):
+            say(f"  {len(NODES)} 台节点就绪（端口 {node_ports_hint()}）")
             return proc
         if proc.poll() is not None:
             say("  节点进程提前退了 —— 单独跑一次看看：")
@@ -454,15 +872,15 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
 
 
 def start_backend(token: str) -> subprocess.Popen | None:
-    if alive(BACKEND_PORT):
-        say(f"  后端已经在 {BACKEND_PORT} 上，跳过")
+    if alive(PORTS.backend):
+        say(f"  后端已经在 {PORTS.backend} 上，跳过")
         return None
     env = node_env(token)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = (LOG_DIR / "backend.log").open("wb")
     say("  起后端…（日志 logs/backend.log）")
     proc = subprocess.Popen(
-        [PY, "-m", "uvicorn", "backend.main:app", "--port", str(BACKEND_PORT)],
+        [PY, "-m", "uvicorn", "backend.main:app", "--port", str(PORTS.backend)],
         cwd=str(ROOT),
         env=env,
         stdout=log,
@@ -471,8 +889,8 @@ def start_backend(token: str) -> subprocess.Popen | None:
     deadline = time.time() + 90
     while time.time() < deadline:
         # 200 或 401 都算活着（401 = 服务起来了，只是没带令牌）
-        if http_code(f"http://127.0.0.1:{BACKEND_PORT}/api/status") in (200, 401):
-            say(f"  后端就绪（{BACKEND_PORT}，跨进程模式）")
+        if http_code(f"http://127.0.0.1:{PORTS.backend}/api/status") in (200, 401):
+            say(f"  后端就绪（{PORTS.backend}，跨进程模式）")
             return proc
         if proc.poll() is not None:
             say("  后端启动失败，日志尾巴：")
@@ -486,20 +904,25 @@ def start_backend(token: str) -> subprocess.Popen | None:
 
 def frontend_command() -> list[str] | None:
     """优先直接跑 vite（这样只剩一个 node 进程，好管也好停）；
-    没有 node_modules/vite 才退回 ``npm run dev``。"""
+    没有 node_modules/vite 才退回 ``npm run dev``。
+
+    ★ 端口一律用 ``--port`` **显式传**：vite.config.js 里那个 5173 只是
+      "手动跑 npm run dev"时的默认值，而以本脚本起的一律按部署配置来。
+    """
     vite = ROOT / "frontend" / "node_modules" / "vite" / "bin" / "vite.js"
     node = shutil.which("node")
     if vite.exists() and node:
-        return [node, str(vite)]
+        return [node, str(vite), "--port", str(PORTS.frontend)]
     npm = shutil.which("npm")
     if npm:
-        return ["cmd", "/c", npm, "run", "dev"]
+        # npm 那条路要用 ``--`` 才能把参数转给 vite。
+        return ["cmd", "/c", npm, "run", "dev", "--", "--port", str(PORTS.frontend)]
     return None
 
 
 def start_frontend() -> subprocess.Popen | None:
-    if alive(FRONTEND_PORT):
-        say(f"  前端已经在 {FRONTEND_PORT} 上，跳过")
+    if alive(PORTS.frontend):
+        say(f"  前端已经在 {PORTS.frontend} 上，跳过")
         return None
     frontend = ROOT / "frontend"
     if not (frontend / "node_modules").exists():
@@ -523,13 +946,20 @@ def start_frontend() -> subprocess.Popen | None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = (LOG_DIR / "frontend.log").open("wb")
     say("  起前端…（日志 logs/frontend.log）")
+    # ★★ 前端到后端的地址必须**跟着配置走**：vite 的 proxy 默认打 8000
+    #    （见 frontend/vite.config.js 里的 VDS_API_TARGET），后端端口一改，
+    #    不把新地址告诉它就会变成"页面能开、每个请求都失败"——
+    #    而那个现象看起来像后端坏了，不像前端 proxy 指错地方了。
+    env = os.environ.copy()
+    env["VDS_API_TARGET"] = f"http://127.0.0.1:{PORTS.backend}"
+    env["VDS_FRONTEND_PORT"] = str(PORTS.frontend)
     proc = subprocess.Popen(
-        cmd, cwd=str(frontend), stdout=log, stderr=subprocess.STDOUT
+        cmd, cwd=str(frontend), env=env, stdout=log, stderr=subprocess.STDOUT
     )
     deadline = time.time() + 60
     while time.time() < deadline:
-        if alive(FRONTEND_PORT):
-            say(f"  前端就绪（{URL}）")
+        if alive(PORTS.frontend):
+            say(f"  前端就绪（{frontend_url()}）")
             return proc
         if proc.poll() is not None:
             say("  前端启动失败，日志尾巴：")
@@ -544,14 +974,18 @@ def start_frontend() -> subprocess.Popen | None:
 def banner() -> None:
     say()
     say("=" * 62)
-    say(f"  打开： {URL}")
+    say(f"  打开： {frontend_url()}")
+    say()
+    say(f"  存储节点 {len(NODES)} 台（端口 {node_ports_hint()}）")
+    say(f"  后端 {PORTS.backend} / 前端 {PORTS.frontend}")
+    say("  改台数与端口：管理员界面 → 设备（存储节点）→ 服务器台数 / 端口 → 「立刻重启」")
     say()
     say(f"  演示账号（口令统一 {DEMO_PASSWORD}）：")
     for username, role, display in USERS:
         tag = "管理员（能看审计与用户管理）" if role == "admin" else "普通用户"
         say(f"    {username:10s} {display:6s} {tag}")
     say()
-    say("  登录页下方有这 5 个按钮，点一下就自动填好账号与口令。")
+    say("  登录页不列演示账号：用上面这些账号 + 统一口令登录。")
     say("  默认没有任何预设文件 —— 「文件与块」页里自己选文件、自己决定切成几块。")
     say()
     say("  日志： logs/backend.log、logs/frontend.log")
@@ -564,9 +998,15 @@ def banner() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global NODES  # noqa: PLW0603 - 全脚本只此一处改它，见文件头 NODES 的注释
+    global NODES, PORTS  # noqa: PLW0603 - 全脚本只此两处改它，见文件头注释
 
     _force_utf8_console()
+    # ★ 回环不走代理。这一句管的是**本进程**的探活（``node_state`` / ``http_code``
+    #   走 urllib，靠 Windows 的 ``ProxyOverride`` 绕回环；但那项设置是**机器上
+    #   可变的**，有的机器不含 127.0.0.1）。:func:`node_env` 那一份管子进程。
+    #   两边都要设 —— 这正是那次故障的教训：一边绕过、一边没绕过，
+    #   于是"一边报节点就绪、一边报 node-1 连不上"，看着像启动顺序的问题。
+    add_loopback_no_proxy(os.environ)
     ap = argparse.ArgumentParser(description="一键启动 VDS 演示环境")
     ap.add_argument("--reset", action="store_true", help="清空库与节点数据（账号保留重建）")
     ap.add_argument("--demo", action="store_true", help="顺带灌 5 个演示文件（默认不灌）")
@@ -582,37 +1022,65 @@ def main(argv: list[str] | None = None) -> int:
         "--nodes",
         type=int,
         default=None,
-        help="起几台存储节点（不传且是双击/真控制台时，启动器会问你一句）。"
-        "改台数意味着无块可用的空节点会加入，旧块仍然只在原来那几台上 ——"
-        "所以改台数后建议 --reset",
+        help=f"起几台存储节点（{MIN_NODE_COUNT}..{MAX_NODE_COUNT}）。"
+        "不传就读部署配置 nodes/deploy.json（管理员界面上改的就是它），"
+        "文件不存在时用默认值。传了会**写回**配置 —— 免得命令行改完界面还显示旧值",
     )
     args = ap.parse_args(argv)
 
-    if args.nodes is not None and args.nodes < 1:
-        say("--nodes 至少是 1")
-        return 2
+    # 清理上一次「立刻重启」可能留下的交接标记（见 :data:`RESTART_MARKER`）。
+    # 正常路径上重启器在起新栈之前已经删过了；这里兵底是为了
+    # “重启器半路挂了”那种情况 —— 否则一个过期标记会让**下一次**启动
+    # 在子进程退出时报“交棒”，把真正的原因（后端崩了）盖掉。
+    if RESTART_MARKER.exists():
+        RESTART_MARKER.unlink(missing_ok=True)
+        say("  清掉上一次留下的重启交接标记（重启器没走完？）")
 
-    # ★ 台数由使用者决定（需求 #2）——问话放这里而不是 .cmd 里，理由见 _ask_node_count。
+    # ★★ 台数从哪来（需求 #2）。**这里不再提问** —— 一键启动与重置并启动
+    #   都是"直接启动"，台数只有管理员界面一个改动入口（写的就是下面这个文件）。
     #
-    #   只在“没给 --nodes”**且**“stdin 是真控制台”时才问：
-    #   双击 .cmd 满足后者；管道 / 重定向 / 被别的脚本调用都不满足，
-    #   于是它们不会被一个没人回答的提问卡住（直接按默认值走）。
-    count = args.nodes
-    if count is None:
-        if args.stop or not (sys.stdin and sys.stdin.isatty()):
-            count = DEFAULT_NODE_COUNT
-        else:
-            asked = _ask_node_count()
-            if asked is None:
-                say("好，什么都不做。")
-                return 0
-            count = asked
+    #   三条规则（文件头「台数从哪来」那张表）：
+    #     * --nodes N          → 用 N，并写回配置；
+    #     * --reset（没给 N）   → 台数**复位成 4**，再按 4 台起；
+    #     * 都没有             → 读配置。
+    #
+    #   ★ 顺序：复位必须发生在"读配置"**之前**，否则重置之后还是按旧台数起。
+    if args.reset and args.nodes is None:
+        was = read_deploy_node_count()
+        reset_deploy_node_count()
+        if was != DEFAULT_NODE_COUNT:
+            say(
+                f"  重置：服务器台数 {was} → {DEFAULT_NODE_COUNT} 台"
+                f"（部署配置已复位）"
+            )
 
-    if count < 1:
-        say("节点台数至少是 1")
-        return 2
+    explicit_nodes = args.nodes is not None
+    count = args.nodes if explicit_nodes else read_deploy_node_count()
+    count = clamp_node_count(count)
+    if explicit_nodes and count != args.nodes:
+        say(
+            f"  --nodes {args.nodes} 超出台数范围 —— 取 {count} 台"
+            f"（{MIN_NODE_COUNT}..{MAX_NODE_COUNT}）"
+        )
     if count != len(NODES):
         NODES = tuple(f"node-{i}" for i in range(1, count + 1))
+    if explicit_nodes and count != read_deploy_node_count(default=-1):
+        # 命令行是显式覆盖：写回配置，让管理员界面显示的就是你刚起的那几台。
+        #
+        # ★ 台数**没变**时一个字都不写。``write_deploy_node_count(..., prev=None)``
+        #   的语义是“这次不是一次改动”，它会顺手把上一次的记录（``prev_count``
+        #   与那句“服务器数量减少，文件块已重新分配”）一起抹掉。
+        #   而「立刻重启」正是用 ``--nodes N`` 把控制权交回本脚本的 ——
+        #   重启一完成就把那句话抹掉，恰好抹在用户最想看它的时刻（重启之后）。
+        write_deploy_node_count(count, prev=None)
+
+    # ★★ 端口从哪里来（与台数同一个文件、同一个模型）：
+    #    读 ``nodes/deploy.json`` 的 ``ports``，缺的按规则补全。
+    #    ``--nodes`` 改了台数时，新增的那几台也会在这里拿到各自默认端口。
+    #    ★ 改了就必须说出来：手改坏过的配置会被"修好"，但静默改配置比报错更难查。
+    PORTS, port_notes = effective_ports(NODES)
+    for note in port_notes:
+        say(f"  [端口] {note}（部署配置里那个值用不了）")
 
     if args.stop:
         say("停掉节点 / 后端 / 前端：")
@@ -632,9 +1100,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.reset:
         say("\n[0/4] 重置")
+        # ★★ 顺序不能反：**先**按当前配置（也就是还在跑的那一套）停干净，
+        #    **再**把端口复位。反过来停的就是默认端口，而进程还在自定义端口上
+        #    —— 一个都停不掉，全变成占着端口的孤儿进程。
         stop_everything(quiet=True)
         time.sleep(1.0)
+        reset_deploy_ports(NODES)
+        PORTS = effective_ports(NODES)[0]
+        say(f"  端口已复位成默认值（后端 {PORTS.backend} / 前端 {PORTS.frontend} / "
+            f"节点 {node_ports_hint()}）")
         reset_data()
+        # ★ 库没清掉就别起了：那会拿着旧数据接着跑，与"重置"不是一个意思
+        #   （而且节点目录已被清，两边正好对不上，启动闸一定会拒）。
+        #   停下来把原因说清楚，好过去撞一个看不懂的启动错误。
+        if (ROOT / "vds.db").exists():
+            say("  库还在（被占用，没删掉）—— 先把占着它的进程停掉，再跑一次重置。")
+            say("  这次不启动：否则会拿着旧数据接着跑，而节点数据已经清过了，两边对不上。")
+            return 1
 
     say("\n[1/5] 库的清理判定")
     got_db = (ROOT / "vds.db").exists()
@@ -648,10 +1130,10 @@ def main(argv: list[str] | None = None) -> int:
         say("  没有 vds.db —— 节点数据也一并清掉（否则两边对不上）")
         reset_data()
 
-    say("\n[2/5] 存储节点")
+    say(f"\n[2/5] 存储节点（{len(NODES)} 台）")
     nodes_proc = ensure_nodes(token)
     if nodes_proc is None and not all(
-        node_state(BASE_PORT + i, token) == "up" for i in range(len(NODES))
+        node_state(node_port(i), token) == "up" for i in range(len(NODES))
     ):
         return 1
 
@@ -666,14 +1148,14 @@ def main(argv: list[str] | None = None) -> int:
 
     say("\n[4/5] 后端")
     backend_proc = start_backend(token)
-    if backend_proc is None and not alive(BACKEND_PORT):
+    if backend_proc is None and not alive(PORTS.backend):
         return 1
 
     say("\n[5/5] 前端")
     frontend_proc = start_frontend()
 
-    if not args.no_browser and alive(FRONTEND_PORT):
-        webbrowser.open(URL)
+    if not args.no_browser and alive(PORTS.frontend):
+        webbrowser.open(frontend_url())
 
     banner()
 
@@ -712,6 +1194,9 @@ def main(argv: list[str] | None = None) -> int:
             say("    想恢复旧行为（一有退出就整体停下）加 --strict）")
 
     nodes_warned = False
+    #: 是不是把控制权交给了「立刻重启」（见 :data:`RESTART_MARKER`）。
+    #: 它决定 finally 里**能不能**收尾 —— 交棒了就不能。
+    handed_over = False
 
     # ★★ 光看 ``nodes_kid.poll()`` 是**看不出“某一台掉了”**的：
     #   4 台节点是 run_nodes.py **一个**子进程托管的，死一台它自己不会退出
@@ -728,6 +1213,19 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(0.5)
             for name, p in fatal_kids:
                 if p.poll() is not None:
+                    if RESTART_MARKER.exists():
+                        # ★★ 「立刻重启」正在接管（见 RESTART_MARKER）。
+                        #   这里**必须什么都别做**：不报错，而且 finally 里也不能扫端口 ——
+                        #   重启器马上就要把新的一套起来（同样的 9101.. 区间），
+                        #   扫端口会把它们一并收走，表现就是“重启后新的起来了又没了”。
+                        #
+                        #   退出码 **0** 是刻意的：一键启动.cmd 收到 0 会直接关掉
+                        #   它那个窗口 —— 用户不必再去关一个已经交棒的旧控制台。
+                        say(f"\n{name}已交给「立刻重启」（检测到交接标记）——")
+                        say("  本次启动到此交棒：不在这个窗口里收尾（收尾由重启器做）。")
+                        say("  这个窗口可以关了，新的控制台在重启器那个窗口里。")
+                        handed_over = True
+                        return 0
                     log_name = "backend.log" if name == "后端" else "frontend.log"
                     say(
                         f"\n{name}退出了（退出码 {p.returncode}）——"
@@ -764,12 +1262,12 @@ def main(argv: list[str] | None = None) -> int:
             if time.time() >= next_probe:
                 next_probe = time.time() + POLL_EVERY
                 for i in range(len(NODES)):
-                    st = node_state(BASE_PORT + i, token)
+                    st = node_state(node_port(i), token)
                     was = node_seen.get(i, "up")
                     if st != "up" and was == "up":
                         why = "令牌对不上（401）" if st == "401" else "连不上"
                         say(
-                            f"\n[注意] {NODES[i]}（端口 {BASE_PORT + i}）{why} ——"
+                            f"\n[注意] {NODES[i]}（端口 {node_port(i)}）{why} ——"
                             "后端与前端继续跑，页面上它会显示为掉线。"
                         )
                         say(
@@ -779,25 +1277,30 @@ def main(argv: list[str] | None = None) -> int:
                         say(f"       节点组日志尾巴（logs/nodes.log）：")
                         say(tail(LOG_DIR / "nodes.log", 5))
                     elif st == "up" and was != "up":
-                        say(f"\n[恢复] {NODES[i]}（端口 {BASE_PORT + i}）又答话了。")
+                        say(f"\n[恢复] {NODES[i]}（端口 {node_port(i)}）又答话了。")
                     node_seen[i] = st
     except KeyboardInterrupt:
         say("\n收工，停掉本次启动的进程…")
     finally:
-        for p in kids:
-            if p.poll() is None:
-                p.terminate()
-        for p in kids:
-            try:
-                p.wait(timeout=10)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                p.kill()
-        # ★ Windows 上结束父进程**不会**带走子进程（没有 Job Object 那回事）。
-        #   ``run_nodes.py`` 自己会收它的 4 个子进程，但它被 terminate 时收不了 ——
-        #   所以在带宽内部再按端口扫一遍，别留 4 个孤儿占着 9101-9104。
-        if nodes_proc is not None:
-            for i in range(len(NODES)):
-                kill_port(BASE_PORT + i)
+        if handed_over:
+            # 交棒：收尾归重启器（它停干净之后自己会再按端口扫一遍），
+            # 这里一件都不能做 —— 尤其**不能**扫端口（会把新节点收走）。
+            say("（本窗口不做收尾：重启器负责停干净并重建新的一套。）")
+        else:
+            for p in kids:
+                if p.poll() is None:
+                    p.terminate()
+            for p in kids:
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:  # pragma: no cover
+                    p.kill()
+            # ★ Windows 上结束父进程**不会**带走子进程（没有 Job Object 那回事）。
+            #   ``run_nodes.py`` 自己会收它的 4 个子进程，但它被 terminate 时收不了 ——
+            #   所以在带宽内部再按端口扫一遍，别留 4 个孤儿占着 9101-9104。
+            if nodes_proc is not None:
+                for i in range(len(NODES)):
+                    kill_port(node_port(i))
     say("已停。")
     return 0
 

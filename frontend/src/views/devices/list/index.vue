@@ -7,6 +7,10 @@
  * - 块分布矩阵（BlockMatrix）：行=全局下标，列=节点。
  * - PoR 挑战卡：lambda_pos 可调 → POST /api/por，逐台 asked:answered。
  * - 待补推横幅 + 补推按钮（仅管理员）。
+ * - **服务器台数卡片（仅管理员）**：改台数 → 保存 → 「立刻重启」。
+ *   它是这一页最上面那块，因为"几台机器"就是这一页在讲的东西。
+ * - **端口卡片（仅管理员）**：后端 / 前端 / 每一台节点各自的端口 ——
+ *   与台数同一套模型（改 → 保存 → 重启生效），紧挨着台数卡。
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -16,6 +20,8 @@ import { usePermission } from '../../../composables/usePermission'
 import { nodeSelfCheck } from '../../../utils/format'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import StatCard from '../../../components/common/StatCard.vue'
+import NodeCountCard from '../../../components/common/NodeCountCard.vue'
+import PortsCard from '../../../components/common/PortsCard.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
@@ -28,6 +34,10 @@ const error = ref('')
 const nodes = ref([])
 const status = ref(null)
 const pending = ref(null)
+
+/** 两张卡片各自管自己的加载；「刷新」时一起刷一下它们。 */
+const deployCard = ref(null)
+const portsCard = ref(null)
 
 const lambdaPos = ref(8)
 const porRunning = ref(false)
@@ -76,7 +86,7 @@ async function retryPush() {
   try {
     const { data } = await devicesApi.retryPush()
     if (data.ok) ElMessage.success('补推完成，全网已收敛')
-    else ElMessage.warning('补推了，但还有几台没通 —— 把机器弄活再点一次')
+      else ElMessage.warning('补推完成，但还有几台没通；起来后再点一次')
     await load()
   } catch {
     // 错误已由拦截器弹出
@@ -86,13 +96,27 @@ async function retryPush() {
 }
 
 onMounted(load)
+
+/** 页头那个「刷新」：本页的节点现状 + 两张部署卡片一起刷。 */
+async function refreshAll() {
+  await load()
+  deployCard.value?.refresh?.()
+  portsCard.value?.refresh?.()
+}
 </script>
 
 <template>
   <div>
-    <PageHeader title="设备（存储节点）" subtitle="一台服务器 = 一个独立进程 + 一个独立 SQLite">
-      <el-button @click="load"><Icon name="refresh" :size="14" style="margin-right: 6px" />刷新</el-button>
+    <PageHeader title="设备（存储节点）" subtitle="每台服务器一个进程，各自一份 SQLite">
+      <el-button @click="refreshAll"><Icon name="refresh" :size="14" style="margin-right: 6px" />刷新</el-button>
     </PageHeader>
+
+    <!-- ★ 仅管理员：改集群规模。放在最上面 —— 这个页面在讲的就是"几台机器"。 -->
+    <NodeCountCard v-if="isAdmin" ref="deployCard" />
+
+    <!-- ★ 紧跟台数卡："几台"与"各自在哪个端口"是同一件事的两面，
+         改台数之后端口那几行也要跟着变（两张卡片靠 deployBus 通信）。 -->
+    <PortsCard v-if="isAdmin" ref="portsCard" />
 
     <el-alert
       v-if="hasPending"
@@ -100,7 +124,7 @@ onMounted(load)
       :closable="false"
       class="mb-3"
       title="有写推未完成"
-      description="不要重新上传 —— 登记表已经分配过那批下标，重传会拿到新下标。把没通的机器弄活，点「补推」即可收敛。"
+      description="别重新上传（那批下标已经分配过）。把机器弄活，点「补推」即可。"
     >
       <template #default>
         <el-button v-if="isAdmin" size="small" :loading="retrying" @click="retryPush">补推</el-button>

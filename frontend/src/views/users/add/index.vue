@@ -46,7 +46,7 @@ async function submit() {
       password: form.password,
     })
     timings.value = data.timings
-    ElMessage.success('用户已创建，密钥对已生成并封好')
+    ElMessage.success('用户已创建，密钥对已生成')
   } catch {
     // 409 等错误已由拦截器弹出
   } finally {
@@ -57,14 +57,14 @@ async function submit() {
 
 <template>
   <div class="add-user">
-    <PageHeader title="添加用户" subtitle="创建用户时生成密钥对，口令只在这里用来包装私钥">
+    <PageHeader title="添加用户" subtitle="建用户时生成密钥对；口令只用来包私钥，不存库">
       <el-button @click="router.push('/users')">返回列表</el-button>
     </PageHeader>
 
     <div class="panel form-panel">
       <el-form :model="form" label-width="90px" @submit.prevent>
         <el-form-item label="用户名">
-          <el-input v-model="form.username" placeholder="请输入用户名" />
+          <el-input v-model="form.username" placeholder="字母 / 数字 / _ . -" />
         </el-form-item>
         <el-form-item label="显示名">
           <el-input v-model="form.display_name" placeholder="可选，默认同用户名" />
@@ -88,10 +88,10 @@ async function submit() {
     </div>
 
     <div v-if="timings" class="panel mt-3">
-      <h4 class="sec-title">创建进度</h4>
+      <h4 class="sec-title">耗时（后端实测）</h4>
       <StageTimeline :timings="timings" />
       <p class="note text-2">
-        生成 SM2 密钥对，并用刚输入的口令封装私钥（20万次 PBKDF2）。
+        生成 SM2 密钥对 + 用口令封装私钥（20 万次 PBKDF2），慢一点是正常的。
       </p>
     </div>
   </div>

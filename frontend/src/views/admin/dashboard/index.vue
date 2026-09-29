@@ -60,7 +60,10 @@ async function runCheck() {
   try {
     const { data } = await systemApi.check()
     checkResult.value = data
-    ElMessage.success('自检通过')
+    // ★ 自检可能带 notes：那是**提示**（例如“被摘掉的机器在重启前还留着旧副本”），
+    //   不是失败。用 warning 说一句，别把它混进那句绿色的“自检通过”里。
+    if (data.notes?.length) ElMessage.warning('自检通过（附一条提示）')
+    else ElMessage.success('自检通过')
   } catch (e) {
     checkResult.value = { ok: false, message: e?.response?.data?.detail || '自检失败' }
   } finally {
@@ -89,8 +92,8 @@ onMounted(() => {
       type="warning"
       :closable="false"
       class="mb-3"
-      title="有写推未完成 —— 全网摘要暂时不一致"
-      description="不要重新上传（登记表已分配过那批下标，重传会拿到新下标）。请到「设备」页点「补推」。"
+      title="有写推没完成，摘要暂不一致"
+      description="别重新上传（那批下标已经分配过了）。到「设备」页点「补推」即可。"
     >
       <template #default>
         <el-button size="small" @click="router.push('/devices')">去补推</el-button>
@@ -135,7 +138,7 @@ onMounted(() => {
       <StatCard
         label="副本不足"
         :value="status.under_replicated"
-        :hint="status.under_replicated ? '开副本之前传的老数据，重传可补齐' : '当前无缺口'"
+        :hint="status.under_replicated ? '开副本前传的老数据，重传可补齐' : '当前无缺口'"
       />
     </div>
 
@@ -201,6 +204,15 @@ onMounted(() => {
           <el-button :loading="checking" @click="runCheck"><Icon name="refresh" :size="14" style="margin-right: 6px" />启动自检</el-button>
           <div v-if="checkResult" class="mt-3">
             <el-alert :type="checkResult.ok ? 'success' : 'error'" :closable="false" :title="checkResult.message" />
+            <el-alert
+              v-for="(note, i) in checkResult.notes || []"
+              :key="i"
+              type="info"
+              :closable="false"
+              class="mt-3"
+              title="另外一条提示"
+              :description="note"
+            />
             <StageTimeline v-if="checkResult.timings" :timings="checkResult.timings" class="mt-3" />
           </div>
         </div>

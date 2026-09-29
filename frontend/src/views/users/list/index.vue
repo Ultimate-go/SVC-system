@@ -98,7 +98,7 @@ async function removeUser(u) {
   // 删除成功后把返回的 warning 原样弹出来。
   try {
     await ElMessageBox.confirm(
-      `确定删除用户 ${u.username} 吗？他名下的文件将转为墓碑名，此后无人能解密。`,
+      `确定删除用户 ${u.username} 吗？他名下的文件会改挂在「已删号」的名字下，之后谁也解不开。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )

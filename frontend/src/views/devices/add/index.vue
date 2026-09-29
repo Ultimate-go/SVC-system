@@ -43,9 +43,9 @@ async function copy(text) {
 
 <template>
   <div>
-    <PageHeader title="新增存储节点" subtitle="这一页不保存任何东西 —— 它只生成正确的命令" />
+    <PageHeader title="新增存储节点" subtitle="这一页不保存设置，只生成命令" />
 
-    <el-alert type="info" :closable="false" class="mb-3" title="后端没有「新增节点」接口。节点是独立进程，地址与令牌写在环境变量里，改台数还要求 --reset 重建库。" />
+    <el-alert type="info" :closable="false" class="mb-3" title="后端没有「新增节点」接口：节点是独立进程，地址与令牌写在环境变量里；改台数需要 --reset 重建库。" />
 
     <div class="panel form-panel">
       <el-form :model="form" label-width="110px">

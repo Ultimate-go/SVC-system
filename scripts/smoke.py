@@ -37,7 +37,12 @@ PASSWORD = "vds12345"
 class Smoke:
     def __init__(self, base: str) -> None:
         self.base = base.rstrip("/")
-        self.client = httpx.Client(base_url=self.base, timeout=60.0)
+        # ★ trust_env=False：同 node_service/client.py 里那段理由 —— 后端就在
+        #   本机回环上，别让 Windows 的系统代理（httpx 在环境变量为空时会回落到
+        #   urllib.getproxies()，那会读注册表里的 IE 代理设置）把它接管走。
+        #   否则机器上开着系统代理而代理没在跑时，冒烟脚本会报“后端连不上”，
+        #   而后端其实好好地听着。
+        self.client = httpx.Client(base_url=self.base, timeout=60.0, trust_env=False)
         self.failures: list[str] = []
 
     # -- 小工具 -------------------------------------------------------------

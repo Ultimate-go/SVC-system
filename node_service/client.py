@@ -65,7 +65,29 @@ class HttpTransport:
         self.base_urls = {k: v.rstrip("/") for k, v in base_urls.items()}
         self.node_ids: tuple[str, ...] = tuple(base_urls)
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=timeout)
+        # ★★★ ``trust_env=False`` 是**必须的**，不是洁癖 —— 它挡掉一整类
+        #    “节点明明起好了，后端却说连不上”的假故障。实机踩到过，记录如下。
+        #
+        #    httpx 默认 ``trust_env=True``：除了读 ``HTTP_PROXY`` / ``HTTPS_PROXY``
+        #    这些环境变量，**在环境变量为空时它还会回落到
+        #    ``urllib.request.getproxies()``** —— 而在 Windows 上那个函数会去读
+        #    **系统代理**（``HKCU\...\Internet Settings``，也就是 IE/设置面板里那
+        #    一项，被 Clash / ProxyBridge / 各种 VPN 客户端改的就是它）。
+        #
+        #    于是：机器上开着系统代理 ``127.0.0.1:12450`` 而它没在跑时，
+        #    连 ``http://127.0.0.1:9101/node/crs`` 都会被送去 12450 →
+        #    ``[WinError 10061] 由于目标计算机积极拒绝``。
+        #    报错里写的却是 node-1 —— 看起来像“节点没起来”，
+        #    而 ``scripts/start_all.py`` 的探活（走 urllib）同时一切正常，
+        #    因为 Windows 的 ``urllib`` 会查 ``ProxyOverride`` 并**绕过回环地址**，
+        #    httpx 不做这一步。两边结论相反，排查方向直接带偏。
+        #
+        #    为什么正解是“不信任环境”而不是“加 no_proxy”：节点地址来自
+        #    ``VDS_NODE_URLS``，是一份**显式给定**的清单 —— 协调者要说的就是
+        #    那个地址，**任何情况下都不该把给节点的请求交给一个 HTTP 代理**。
+        #    ``no_proxy`` 只挡得住环境变量那一路，挡不住上面那条注册表回落；
+        #    ``trust_env=False`` 把两路一起关掉。本地回环也不需要 .netrc / 证书环境。
+        self._client = client or httpx.Client(timeout=timeout, trust_env=False)
         self._headers = {NODE_TOKEN_HEADER: token}
         self._last_report: dict[str, dict] = {}
         self.retries = max(0, int(retries))
@@ -292,6 +314,43 @@ class HttpTransport:
             int(raw["S_I"]), int(raw["Lambda_I"]), tuple(int(i) for i in raw["I"])
         )
         return PoSProof(Q=want, F_Q=values, pi_Q=pi)
+
+    def adopt(
+        self,
+        node_id: str,
+        *,
+        positions: Sequence[int],
+        values: Sequence[int],
+        proof: Opening,
+        blobs: Mapping[int, bytes] | None = None,
+    ) -> None:
+        """让一台节点**接收**一批已经承诺过的位置（``StrgNode.AddStorage``）。
+
+        与 :meth:`apply_append` 不是同一条路：那边送的是"本次追加刚产生的新位置"
+        （证据就是旧摘要本身），这边送的是一份**来自另一台节点的检索凭证**
+        :math:`(Q, F_Q, \\pi_Q)`，节点自己验过才合并。
+
+        ★ 只发一台、失败就直接抛 ``TransportError``，而且**不建补推现场**：
+        这不是一次全网状态推进（``δ`` 一个字节都不动），失败只影响"这一批块
+        有没有搬成功"。调用方（``StoreManager.redistribute``）会把它如实记进
+        ``lost`` 里汇报，而不是留一份需要人工补推的现场 ——
+        补推机制是给"δ 已经推进、但有台没跟上"那种真正的不一致用的。
+
+        :param blobs: ``下标 -> 密文段``（协调者刚从源节点取回来的）
+        """
+        if not positions:
+            return
+        payload = {
+            "positions": [int(i) for i in positions],
+            "values": [str(int(v)) for v in values],
+            "proof": {
+                "S_I": str(proof.S_I),
+                "Lambda_I": str(proof.Lambda_I),
+                "I": [int(i) for i in proof.I],
+            },
+            "blobs": {str(int(k)): bytes(v).hex() for k, v in (blobs or {}).items()},
+        }
+        self._post(node_id, "/node/adopt", payload)
 
     def apply_append(
         self,

@@ -8,8 +8,11 @@ r"""一次起 4 台存储节点（各自独立进程 + 独立 SQLite）。
     # 只看看在不在
     python scripts/run_nodes.py --check
 
-    # 换端口 / 换节点名单
+    # 换端口 / 换节点名单（**连号**，一个基址决定全部）
     python scripts/run_nodes.py --base-port 9201 --nodes node-1,node-2
+
+    # 每台**各自一个**端口（管理员界面存下来的就是这种形式）
+    python scripts/run_nodes.py --urls "node-1=http://127.0.0.1:9201,node-2=http://127.0.0.1:19301"
 
 起好后它会打印一行 ``VDS_NODE_URLS``，把它设到**另开的一个终端**里再起后端，
 后端就进入跨进程模式::
@@ -43,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from backend.config import parse_node_urls  # noqa: E402
 from node_service import NODE_TOKEN_HEADER  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -114,6 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="起一组 VDS 存储节点")
     ap.add_argument("--nodes", default=",".join(DEFAULT_NODES))
     ap.add_argument("--base-port", type=int, default=DEFAULT_BASE_PORT)
+    ap.add_argument(
+        "--urls",
+        default="",
+        help="直接给出每台节点的地址（node-1=http://127.0.0.1:9201,...），"
+        "每台端口可以不同。给了它就忽略 --nodes / --base-port。"
+        "管理员界面存下来的就是这种形式（见 nodes/deploy.json 的 ports）",
+    )
     ap.add_argument("--data-root", default=str(ROOT / "nodes"))
     ap.add_argument("--check", action="store_true", help="只检查在不在，不起")
     ap.add_argument("--fresh", action="store_true", help="先把各节点的数据目录删掉")
@@ -130,11 +141,26 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     nodes = tuple(x.strip() for x in args.nodes.split(",") if x.strip())
-    if not nodes:
-        print("节点名单不能为空", file=sys.stderr)
-        return 2
-    urls = node_urls(nodes, args.base_port)
     token = args.token or secrets.token_urlsafe(24)
+    if args.urls.strip():
+        # ★ ``--urls`` 优先：每台节点的端口可以**各不相同**（管理员界面上就是
+        #   一个个填的，见 backend/config.py 的 ``DeployPorts``）。
+        #   起进程时用的端口本来就是从 URL 里取出来的（下面 ``url.rsplit``），
+        #   所以这里只要把 urls 换成解析结果，其余一律不动。
+        try:
+            urls = parse_node_urls(args.urls)
+        except ValueError as exc:
+            print(f"--urls 解析失败：{exc}", file=sys.stderr)
+            return 2
+        if not urls:
+            print("--urls 里一个节点都没有", file=sys.stderr)
+            return 2
+        nodes = tuple(urls)
+    else:
+        if not nodes:
+            print("节点名单不能为空", file=sys.stderr)
+            return 2
+        urls = node_urls(nodes, args.base_port)
 
     if args.check:
         return check(urls, args.token)

@@ -45,7 +45,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Collection, Mapping, Sequence
 
 from svc import commit, specialize
 from svc.types import Opening, VerifyReport, as_index_set
@@ -303,6 +303,35 @@ class VectorStore:
         if one is None:
             raise KeyError(f"不知道全局下标 {global_index} 的副本") from None
         return (one,)
+
+    def set_replicas(self, global_index: int, replicas: Sequence[str]) -> None:
+        """改写一个下标**全部**持有者（主副本取第一项）。
+
+        ★ 只有"改服务器台数"这一条路会调它。**它是记账，不是数据搬运** ——
+        调用方必须已经把内容真的搬到了目标机器上（见
+        ``backend.manager.StoreManager.redistribute``）。单改这一张表
+        只会得到一个"账上有人、实际没人"的状态，而那种状态要等到**读**的时候
+        才暴露（``_pick_holders`` 报"每一份副本都拿不到"），归因很难。
+
+        **顺序有意义**：第一项就是主副本（``holder_of`` 取它）。台数变小时
+        调用方必须把"留下来的"排在前面 —— 否则重启后
+        ``manager._reload`` 会以"副本列表与主副本不一致"直接拒绝启动。
+
+        :raises ValueError: 空列表、有重复、或名字不在本集群里
+        """
+        got = tuple(replicas)
+        if not got:
+            raise ValueError(f"下标 {global_index} 的副本列表不能为空")
+        if len(set(got)) != len(got):
+            raise ValueError(f"下标 {global_index} 的副本列表有重复：{list(got)}")
+        unknown = [n for n in got if n not in self.node_ids]
+        if unknown:
+            raise ValueError(
+                f"下标 {global_index} 的副本里有不在本集群的机器 {unknown}"
+                f"（本集群是 {list(self.node_ids)}）"
+            )
+        self._replicas[global_index] = got
+        self._holder[global_index] = got[0]
 
     def file_indices(self, owner: str, file_key: str) -> tuple[int, ...]:
         """一个文件占用的全局下标。"""
@@ -1573,8 +1602,17 @@ class VectorStore:
             com = commit(crs_n, [self.values[i] for i in range(n)])
         return Digest(U=crs_n.U_n, C=com.C, n=n)
 
-    def check(self) -> None:
+    def check(self, *, leaving: Collection[str] = ()) -> list[str]:
         """全面自检。任何一处不对就抛异常。
+
+        :param leaving: **即将退出集群、但进程还在跑**的那几台机器
+            （缩容保存之后、重启之前那一段窗口）。它们手里还留着旧副本，
+            而且那几份副本**结构上删不掉** —— :meth:`truncate` 只能删向量末尾，
+            搬块时没法让一台机器吐出它中间的某个下标。所以多出来的副本
+            **只允许来自这个名单**；来自名单之外的机器，仍然是账实不符。
+
+        :returns: 这次自检的**提示**（不是错误），空列表 = 没什么可说的。
+            目前只有一种：被摘掉的机器在重启前仍持有旧副本。
 
         查六件事：
 
@@ -1623,15 +1661,32 @@ class VectorStore:
         if set(self._holder) != want or set(self._replicas) != want:
             raise ValueError("持有者映射与向量长度不一致")
 
+        #: 「即将退出集群」的那几台 —— 只有它们多持有副本是被允许的。
+        leaving_set = set(leaving)
+        #: ``node_id -> 它还多留着的下标``（只记合法的那些）。
+        surplus: dict[str, list[int]] = {}
+
         for i in range(self.delta.n):
             mine = set(self.replicas_of(i))
             if not mine:
                 raise ValueError(f"下标 {i} 一份副本都没有")
-            if mine != held_by[i]:
+            extra = held_by[i] - mine
+            # 少持有 = 真的缺数据，任何情况下都拦。
+            if mine - held_by[i]:
+                raise ValueError(
+                    f"下标 {i} 记的副本是 {sorted(mine)}，实际持有的是 "
+                    f"{sorted(held_by[i])} —— 少了 {sorted(mine - held_by[i])}"
+                )
+            # 多持有：只准来自「即将退出集群」的那几台。
+            if extra and not extra <= leaving_set:
                 raise ValueError(
                     f"下标 {i} 记的副本是 {sorted(mine)}，实际持有的是 "
                     f"{sorted(held_by[i])}"
+                    f"（多出来的 {sorted(extra - leaving_set)} 不在"
+                    f"「即将退出集群」的名单里）"
                 )
+            for nid in extra:
+                surplus.setdefault(nid, []).append(i)
             # ★ 这里**不断言**副本数恰好等于配置值。因为“副本数不足”还可能是
             #   一个**合法**的历史状态：开副本之前传的文件就只有一份。
             #   该报的是“账实不符”（上面那条），而副本不足单独用
@@ -1642,6 +1697,22 @@ class VectorStore:
             raise ValueError(
                 f"增量摘要与一次性承诺不一致：\n  {ref!r}\n  {self.delta!r}"
             )
+
+        notes: list[str] = []
+        if surplus:
+            head = "；".join(
+                f"{nid} 还留着 {len(v)} 块（下标 {v[:8]}"
+                f"{'…' if len(v) > 8 else ''}）"
+                for nid, v in sorted(surplus.items())
+            )
+            notes.append(
+                "被摘掉的机器在重启前仍持有旧副本："
+                + head
+                + "。它们已经不参与分发与检索（账目以留下的那几台为准），"
+                "但 VDS 只能删向量的末尾，所以这几份副本要等它们下线才会消失 —— "
+                "重启之后自检就是干净的，这不是数据错误。"
+            )
+        return notes
 
     def under_replicated(self) -> list[int]:
         """副本数**少于配置值**的下标。

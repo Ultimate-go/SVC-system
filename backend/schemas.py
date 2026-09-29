@@ -20,7 +20,68 @@ __all__ = [
     "DecryptIn",
     "DisaggIn",
     "FilePatchIn",
+    "DeployIn",
+    "PortsIn",
+    "RestartIn",
 ]
+
+
+class DeployIn(BaseModel):
+    """改**服务器台数**（``PUT /api/admin/deploy``）。
+
+    ★ 这里的两端刻意**放得很宽**（0..4096），而不是照抄
+    :data:`~backend.config.MAX_NODE_COUNT`：真正的边界只该在
+    ``backend.config`` 里写一份，让越界走到那条会明确说
+    「必须在 1..32 之间」的分支上。
+    pydantic 这里的作用只有一条 —— 拦住"根本不是个整数"的输入，
+    免得它一路走到业务代码才炸成 500。
+    """
+
+    #: 想改成几台。**这是"下一次重启"要用的台数**，不是当前的。
+    node_count: int = Field(ge=0, le=4096)
+    #: 台数变小（或搬不动）时的**二次确认**。
+    #:
+    #: * 有块搬不动（``lost`` 非空）却没确认 → 409，因为那是唯一一条真会丢数据的路；
+    #: * 只是要搬（``orphan`` 非空）却没确认 → 409，因为搬块会**动到布局**，
+    #:   使用者该先看一眼"要搬多少块"再点头。
+    confirm_shrink: bool = False
+
+
+class RestartIn(BaseModel):
+    """一键重启（``POST /api/admin/deploy/restart``）—— **请求体可以整个不给**。
+
+    为什么不复用 :class:`DeployIn`：那个的 ``node_count`` 是必填的，而"重启"
+    这个动作绝大多数时候**不需要**再指定台数 —— 台数已经在保存那一步写进
+    部署配置了，重启只需要照着它起一遍。硬要求传一个台数，会让人以为
+    "重启的时候还得再说一次起几台"，那是两件事。
+
+    :param node_count: 给了就**顺带把台数也改了**（等价于先保存再重启）。
+        界面上那个「立刻重启」按钮走的就是"不带台数"这一路。
+    :param confirm_shrink: 与 :class:`DeployIn` 同义（缩容时如果发现还没搬块，
+        这里会补搬一次；补搬之前同样要这道确认）。
+    """
+
+    node_count: int | None = Field(default=None, ge=0, le=4096)
+    confirm_shrink: bool = False
+
+
+class PortsIn(BaseModel):
+    """改**端口**（``PUT /api/admin/ports``；``POST /api/admin/ports/plan`` 同构）。
+
+    ★ 两端故意**放得很宽**（``0..70000``）：真正的边界只该在 ``backend.config``
+    里写一份，让越界走到那条会明确说「端口必须在 1024..65535 之间」的分支上（400）。
+    pydantic 在这里只负责一件事 —— 拦住"根本不是个整数"的输入，
+    免得它一路走到业务代码才炸成 500（与 :class:`DeployIn` 同一个口径）。
+
+    :param backend: 后端端口（重启后生效）
+    :param frontend: 前端端口（重启后生效）
+    :param nodes: 每台存储节点的端口，键是节点 id（``node-1``）。
+        给 ``None`` = 这一轮不动节点端口（只改前后端）
+    """
+
+    backend: int = Field(ge=0, le=70000)
+    frontend: int = Field(ge=0, le=70000)
+    nodes: dict[str, int] | None = None
 
 
 class LoginIn(BaseModel):

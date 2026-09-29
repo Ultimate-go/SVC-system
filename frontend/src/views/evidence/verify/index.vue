@@ -202,7 +202,7 @@ async function runRegistry() {
 
 <template>
   <div>
-    <PageHeader title="完整性验证" subtitle="验证不受限 —— 登录即可，不做任何权限判断" />
+    <PageHeader title="完整性验证" subtitle="谁都能验证，登录即可" />
 
     <div class="panel mb-3">
       <h4 class="sec-title">按全局下标验证</h4>
@@ -249,9 +249,9 @@ async function runRegistry() {
         <el-button type="primary" :loading="fileListingRunning" @click="listFiles">查询</el-button>
       </div>
       <p class="note">
-        只填所有者 = 查他名下所有文件；只填文件标识 = 查所有叫这个名字的文件（可能跨用户）；
-        两个都填 = 精确到那一个。<strong>查询只列出文件，不取证据也不验证</strong>——
-        勾选之后点下面的按钮，才把勾中的那几个一起取回、合成一份证据来验。
+        只填所有者：查他名下全部文件；只填文件标识：查所有叫这个名字的文件（可能跨用户）；
+        两个都填：只查那一份。<strong>查询只列出文件，不取证据、不验证</strong>；
+        勾选后再点下面的按钮，才把选中的一起取回来验证。
       </p>
 
       <div v-if="fileQueryError" class="file-error">{{ fileQueryError }}</div>

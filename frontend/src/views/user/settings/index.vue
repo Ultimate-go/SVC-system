@@ -13,9 +13,9 @@ const isDark = computed(() => theme.theme === 'dark')
 
 <template>
   <div>
-    <PageHeader title="界面偏好" subtitle="这些只是界面偏好，不影响后端任何行为" />
+    <PageHeader title="界面偏好" subtitle="只管界面，不动后端" />
 
-    <el-alert type="info" :closable="false" class="mb-3" title="所有偏好只存浏览器 localStorage，与后端无关。" />
+    <el-alert type="info" :closable="false" class="mb-3" title="偏好存在浏览器本地，换台机器就没了。" />
 
     <div class="panel">
       <div class="setting-row">

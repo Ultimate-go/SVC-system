@@ -56,7 +56,7 @@ from vds.client_node import ClientNode
 from vds.digest import Digest
 from vds.pos import DEFAULT_LAMBDA_POS
 
-from .config import Settings
+from .config import Settings, read_deploy_node_count
 from .db import Database
 from .models import (
     BlockRow,
@@ -64,6 +64,7 @@ from .models import (
     FileRow,
     GlobalRow,
     NodeBlobRow,
+    NodeRegistryRow,
     NodeStateRow,
     UserRow,
 )
@@ -172,6 +173,18 @@ class StoreManager:
         self._auto_thread: threading.Thread | None = None
         self._auto_attempts: int = 0
         self._auto_note: str = ""
+        #: 最近一次「改台数 → 搬块」的交代（见 :meth:`redistribute`）。
+        #:
+        #: ★ 只在内存里：它要回答的是"刚刚那次操作搬了什么"，而重启之后
+        #:   这个问题已经由 ``nodes/deploy.json`` 里那几行回答了
+        #:   （台数从几改到几、给界面看的那句话）—— 两边分工不重叠。
+        self._last_redistribute: dict | None = None
+        #: **本次启动才加入**的机器（登记表里以前没有它们）。
+        #:
+        #: ★ 界面上"新节点一开始是空的"那句话靠它说 —— 而不是靠
+        #:   "这个节点现在持有了几块"：一个老节点完全可能因为轮转而一块都没有，
+        #:   那与"新加入"是两回事，混起来会给出一句错的解释。
+        self._joined_now: list[str] = []
 
     # -------------------------------------------------------------------
     # 启动 / 重建
@@ -219,7 +232,8 @@ class StoreManager:
                         f"  （节点没全部起来？或者某台节点已经存了另一套 N、g？）"
                     ) from exc
                 self._reload(store, db)
-                self._verify_nodes_at_startup(store)
+                self._joined_now = self._register_nodes(db)
+                self._verify_nodes_at_startup(store, db)
 
             self.session, self.store = sess, store
 
@@ -428,7 +442,42 @@ class StoreManager:
             backoff=self.settings.node_retry_backoff,
         )
 
-    def _verify_nodes_at_startup(self, store: VectorStore) -> None:
+    def _register_nodes(self, db) -> list[str]:
+        """把本次启动的节点名单补登进 ``node_registry``，返回**这次才加入的**。
+
+        **新面孔**（表里没有的）= 这一次才加入的节点，``received_n`` 记 0 ——
+        它天然是空的，闸门据此放行（见 :meth:`_verify_nodes_at_startup`）。
+        以前登记过、后来被摘掉的，重新出现时当作重新加入（数据目录必须是干净的，
+        否则下面的闸门会按 ``received_n`` 认出它并对不上）。
+
+        .. important::
+
+           ★ **摘掉一台机器时不会把它从登记表里删掉**（``retired`` 保持 False）。
+           为什么：它的数据目录还在、``received_n`` 也还记着"我推到过第几块" ——
+           过一会儿把它加回来（比如 4 → 2 → 6 这种来回调），它手里的东西
+           仍然是有效的，闸门一比对就放行，**不用重传**。
+           把它标成 retired/删掉反而会让那台机器回来时"被当成新的"，
+           而它其实有数据 —— 那种状态会被闸门以"停在 n=4、协调者也是 n=4"放行，
+           但登记表说它是新节点，界面上就会显示一句错的"新节点"。保持 False 更简单也更准。
+        """
+        joined: list[str] = []
+        for nid in self.settings.node_ids:
+            row = db.get(NodeRegistryRow, nid)
+            if row is None:
+                db.add(NodeRegistryRow(node_id=nid, received_n=0))
+                joined.append(nid)
+            elif row.retired:
+                row.retired = False
+                row.received_n = 0
+                joined.append(nid)
+        db.commit()
+        return joined
+
+    def joined_now(self) -> list[str]:
+        """本次启动才加入的机器（见 :attr:`_joined_now`）。"""
+        return list(self._joined_now)
+
+    def _verify_nodes_at_startup(self, store: VectorStore, db) -> None:
         """启动时确认各节点与协调者停在同一个 ``n`` —— **两种模式都要查**。
 
         两种混用都必须拦住，而且**反方向那种更隐蔽**：
@@ -439,20 +488,45 @@ class StoreManager:
 
         后者的表现是"能登录、能看到文件列表、一查询才 400" ——
         最难查的那种半死不活。宁可启动就拒，并且把原因说清楚。
+
+        ★★ **新加入的空节点要放行**（这是"台数可调"的前提）：
+
+        一台刚加入的节点天然停在 ``n = 0``，而一台**数据目录被删掉**的老节点
+        也是 ``n = 0`` —— 在节点那一侧这两件事长得一模一样。区分它们靠登记表里的
+        ``received_n``（协调者上次把它推到第几块）：
+
+        * 新节点：``received_n = 0``，它自己也是 ``0`` ⇒ 一致，放行；
+        * 老节点丢数据：``received_n = 10``，它却报 ``0`` ⇒ 不一致，**照旧拒绝**。
+
+        所以放行不等于放宽：真正"少了数据"的机器仍然过不去。
         """
         if store.n == 0:
             return
 
         bad: list[str] = []
         down: list[str] = []
+        #: 与协调者对齐的节点 —— 通过之后要把它们的 ``received_n`` 刷成当前 n。
+        in_sync: list[str] = []
         for row in store.transport.report():
+            nid = row["node_id"]
             if row.get("unreachable"):
-                down.append(row["node_id"])
+                down.append(nid)
                 continue
-            if row["n"] != store.n:
-                bad.append(f"{row['node_id']} 停在 n={row['n']}，协调者在 n={store.n}")
-            elif not row["valid"]:
-                bad.append(f"{row['node_id']} 声称持有的下标与实际密文对不上")
+            reg = db.get(NodeRegistryRow, nid)
+            expect = reg.received_n if reg is not None else 0
+            if row["n"] == store.n:
+                in_sync.append(nid)
+            elif row["n"] == expect:
+                # 新加入、还没分到任何块 —— 合法。块照样只落在它加入之后写入的那些上。
+                continue
+            else:
+                bad.append(
+                    f"{nid} 停在 n={row['n']}，协调者在 n={store.n}"
+                    f"（登记表记的是 n={expect}）"
+                )
+                continue
+            if not row["valid"]:
+                bad.append(f"{nid} 声称持有的下标与实际密文对不上")
 
         if not bad and len(down) == len(store.node_ids):
             # 一台都没联系上 ⇒ 根本没东西可查，而且**令牌配错也是这个表现**
@@ -463,6 +537,13 @@ class StoreManager:
                 + "）—— 节点没起来？端口写错？或者 VDS_NODE_TOKEN 不一致？"
             )
         if not bad:
+            # ★ 刷新"我推到第几块"。只刷**真正对齐**的那些：新加入的空节点
+            #   保持 ``received_n = 0``，否则它下次启动就会被自己的登记表拒掉。
+            for nid in in_sync:
+                reg = db.get(NodeRegistryRow, nid)
+                if reg is not None and reg.received_n != store.n:
+                    reg.received_n = store.n
+            db.commit()
             # 部分节点掉线**不再拒绝启动**：开了副本时这是应当被容忍的状态，
             # 而“哪台掉了”在界面的存储节点页上有体现（unreachable）。
             return
@@ -620,6 +701,215 @@ class StoreManager:
                     )
                 else:
                     row.ciphertext = ct
+
+    # -------------------------------------------------------------------
+    # 改服务器台数 —— 缩容前的块重分发
+    #
+    # ★★ 时机是这条需求里最关键的一件事：**必须在重启之前搬**。
+    #
+    #    台数改小之后、重启之前，被摘掉的那几台**还活着**，它们手里的密文
+    #    还能读出来，而它们持有的证据也还能拆出 π_Q。一旦重启，那些进程就没了
+    #    —— 那时再想搬，源已经下线，"搬到哪儿"根本无从谈起，块就是真丢了。
+    #
+    #    所以在 save/restart 那两个路由里都是「**先搬块、再写配置**」。
+    # -------------------------------------------------------------------
+
+    def _live_node_ids(self, store: VectorStore) -> set[str]:
+        """现在**真的答得上话**的机器（读过 ``report``，不重试）。"""
+        return {
+            row["node_id"]
+            for row in store.transport.report()
+            if not row.get("unreachable")
+        }
+
+    def plan_redistribute(self, keep: Sequence[str] | None = None) -> dict:
+        """**只算不动**：台数变小时，哪些块要搬、哪些块搬不动。
+
+        :param keep: 块最终要落在哪几台。``None`` = 当前全部机器
+            （那是一次"原地重排"，正常用不到）。
+
+        ``orphan`` 与 ``lost`` 的区别是这次需求的全部意义所在，别混：
+
+        * ``orphan`` —— 留在 ``keep`` 里的副本不够 ``replica_factor`` 份，
+          **但至少有一个持有者现在活着**，所以从它那儿取一份搬过去就好。
+          块内容、全局下标、承诺 **一个字节都不变**；
+        * ``lost`` —— 这些块**每一份副本都在联系不上的机器上**，
+          搬不动。这时候正确的做法是**先把那几台起起来**，而不是硬收缩。
+
+        两者都要如实报出来：``lost`` 非空时外壳会拦一次（除非使用者确认
+        "我知道会丢"），因为那是唯一一条真会丢数据的路。
+        """
+        store = self._require()
+        pool = tuple(keep) if keep else tuple(store.node_ids)
+        pool_set = set(pool)
+        alive = self._live_node_ids(store)
+        #: 一台都不剩的话就没有"副本"可言 —— 退化成一个"能不能读到"。
+        wanted = min(store.replica_factor, len(pool))
+
+        orphan: list[int] = []
+        lost: list[int] = []
+        for i in range(store.n):
+            holders = store.replicas_of(i)
+            kept = [h for h in holders if h in pool_set]
+            if len(kept) >= wanted:
+                continue
+            need = wanted - len(kept)
+            sources = [h for h in holders if h in alive]
+            cands = [x for x in pool if x in alive and x not in holders]
+            if not sources or len(cands) < need:
+                lost.append(i)
+            else:
+                orphan.append(i)
+
+        return {
+            "keep": list(pool),
+            "remove": [n for n in store.node_ids if n not in pool_set],
+            "alive": sorted(alive),
+            "down": [n for n in store.node_ids if n not in alive],
+            "replica_factor": store.replica_factor,
+            "wanted": wanted,
+            "blocks": store.n,
+            "orphan": orphan,
+            "lost": lost,
+            "safe": not lost,
+        }
+
+    def redistribute(
+        self,
+        *,
+        reason: str = "",
+        keep: Sequence[str] | None = None,
+    ) -> dict:
+        """把块重新铺到 ``keep`` 那几台上 —— **一块都不丢**（除非真的搬不动）。
+
+        走的原语链（每一步都是论文里现成的，没有新造算法）：
+
+        1. 向**当前持有者**（它现在还活着）要 :math:`(F_Q, \\pi_Q, \\text{密文})`
+           —— 就是一次普通的 :meth:`~core.transport.NodeTransport.retrieve`；
+        2. 交给目标节点做 ``AddStorage``
+           （:meth:`~core.transport.NodeTransport.adopt`）—— **由目标节点自己
+           验一遍凭证再合并**，协调者只是搬运工。
+
+        ★ 为什么不走 :meth:`~core.node_state.NodeState.absorb`：那一条要求
+        ``assigned ⊆ K``（只收"本次追加刚产生的"位置），而这些位置早就承诺过了，
+        旧摘要里根本没有它们 —— 两条路的**前置材料**不一样，不是实现上的偏好。
+
+        ★ 这里**不动** ``δ``：``n`` 不变、``C`` 不变，变的只是"谁持有哪些下标"。
+        所以全局承诺、所有已发出的证据、所有文件的块哈希 **全部继续有效** ——
+        这正是"搬块"与"重传文件"的根本区别。
+
+        :returns: ``{"moved_blocks", "moved_copies", "lost", "keep", "plan", ...}``
+        """
+        store = self._require()
+        pool = tuple(keep) if keep else tuple(store.node_ids)
+        pool_set = set(pool)
+        alive = self._live_node_ids(store)
+        wanted = min(store.replica_factor, len(pool))
+
+        # -- 1) 决定搬什么：按「来源 → 目标」分组，一次搬运一批 ------------
+        groups: dict[tuple[str, str], list[int]] = {}
+        lost: list[int] = []
+        for i in range(store.n):
+            holders = store.replicas_of(i)
+            kept = [h for h in holders if h in pool_set]
+            need = wanted - len(kept)
+            if need <= 0:
+                continue
+            sources = [h for h in holders if h in alive]
+            cands = [
+                x for x in pool if x in alive and x not in holders and x not in kept
+            ]
+            if not sources or len(cands) < need:
+                lost.append(i)
+                continue
+            src = sources[0]
+            for tgt in cands[:need]:
+                groups.setdefault((src, tgt), []).append(i)
+
+        # -- 2) 真搬：取凭证 → 交给目标节点自己验、自己合并 ----------------
+        moved_copies = 0
+        failed: list[dict] = []
+        for (src, tgt), idxs in sorted(groups.items()):
+            Q = tuple(sorted(idxs))
+            try:
+                values, proof, cts = store.transport.retrieve(src, Q)
+                store.transport.adopt(
+                    tgt,
+                    positions=Q,
+                    values=values,
+                    proof=proof,
+                    blobs=dict(zip(Q, cts, strict=True)),
+                )
+            except (TransportError, ValueError) as exc:
+                # 搬失败**不留补推现场**：δ 一个字节都没动，所以这不是
+                # "全网不一致"，只是"这批块没搬成" —— 如实记进 lost 就好
+                # （补推机制是给"δ 已推进、但有台没跟上"用的）。
+                failed.append({"from": src, "to": tgt, "indices": list(Q), "why": str(exc)})
+                lost.extend(Q)
+                continue
+            moved_copies += len(Q)
+            for i in Q:
+                store.set_replicas(i, tuple(store.replicas_of(i)) + (tgt,))
+
+        # -- 3) 目的一侧清场：把已经不在集群里的名字从副本表里摘掉 ----------
+        #    两种都做：① 搬成功但列表里还夹着旧名字；② 那份副本本来就够，
+        #    但主人是要被摘掉的机器。摘完之后才知道"哪些块真的没救"。
+        retargeted: list[int] = []
+        for i in range(store.n):
+            reps = tuple(store.replicas_of(i))
+            pruned = tuple(h for h in reps if h in pool_set)
+            if not pruned:
+                # 一份都没留下 —— plan 里已经把它记进 lost 了，这里保持原样，
+                # 免得把"还有一份在掉线机器上"抹成"谁都不持有"。
+                continue
+            if pruned != reps:
+                store.set_replicas(i, pruned)
+                retargeted.append(i)
+
+        moved_blocks = sorted({i for idxs in groups.values() for i in idxs})
+        result = {
+            "reason": reason,
+            "keep": list(pool),
+            "remove": [n for n in store.node_ids if n not in pool_set],
+            "wanted": wanted,
+            "blocks": store.n,
+            "moved_blocks": len(moved_blocks),
+            "moved_copies": moved_copies,
+            "retargeted": len(retargeted),
+            "lost": sorted(set(lost)),
+            "failed": failed,
+            "indices": moved_blocks,
+        }
+
+        # -- 4) 落库：协调者这边的账必须与上面改的内存逐字一致 --------------
+        if moved_blocks or retargeted:
+            with self.db.session() as db:
+                for b in db.execute(select(BlockRow)).scalars():
+                    reps = tuple(store.replicas_of(b.global_index))
+                    # ★ ``_reload`` 有一条不变式：``holder`` 必须等于
+                    #   ``replicas`` 的**第一项**，否则下次启动直接抛
+                    #   "副本列表与主副本不一致"。所以这两列必须一起写。
+                    b.replicas = json.dumps(list(reps))
+                    if reps:
+                        b.holder = reps[0]
+                # ★ 光改内存不够：**节点自己的状态也要落盘**。
+                #   单进程模式里节点状态存在协调者库里（``node_states`` /
+                #   ``node_blobs``），只改内存的话重启后目标节点又是空的，
+                #   而协调者却以为它存着 —— 读的时候才会炸。
+                self._persist_nodes(db, sorted(set(moved_blocks) | set(retargeted)))
+                # ★★ ``commit`` 必须在 ``with`` **里面**。
+                #    ``Database.session()`` 是个 ``sessionmaker``，不是
+                #    ``@contextmanager`` —— 退出 ``with`` 时它会关闭 session，
+                #    未提交的改动当场回滚。这个坑踩过一次，"搬到一半的账"
+                #    就是这么静默丢掉的。
+                db.commit()
+        if reason:
+            self._last_redistribute = result
+        return result
+
+    def last_redistribute(self) -> dict | None:
+        """最近一次重分发的交代（进程内的；界面上显示一次就够）。"""
+        return self._last_redistribute
 
     # -------------------------------------------------------------------
     # 上传
@@ -1702,8 +1992,25 @@ class StoreManager:
         out.sort(key=lambda d: d["first_index"])
         return out
 
-    def check(self) -> None:
-        self._require().check()
+    def _leaving_nodes(self) -> tuple[str, ...]:
+        """**配置里已经摘掉、但进程还在跑**的那几台（缩容保存后、重启前的窗口）。
+
+        ``nodes/deploy.json`` 说的是“重启后按几台跑”，``settings.node_ids``
+        说的是“现在跑着几台”。前者比后者小时，多出来的那几台就是正在收拾东西的
+        机器：块已经搬到留下的机器上了，但它们**自己手里还留着一份**，
+        而且那份删不掉（VDS 只能删向量末尾）—— 详见
+        :meth:`core.store.VectorStore.check` 的 ``leaving``。
+
+        口径必须与 ``routers/admin._deploy_keep`` 保持一致：**都取前 N 台**。
+        配置读不到时（文件被删/写坏）当作“没有要退出的”，不去凭空怀疑。
+        """
+        ids = tuple(self.settings.node_ids)
+        saved = read_deploy_node_count(default=len(ids))
+        return ids[saved:] if saved < len(ids) else ()
+
+    def check(self) -> list[str]:
+        """全面自检。抛出 = 真的不对；返回的 **提示** 不是错误（见 :meth:`_leaving_nodes`）。"""
+        return self._require().check(leaving=self._leaving_nodes())
     def _require(self) -> VectorStore:
         if self.store is None:
             raise RuntimeError("StoreManager 还没 bootstrap()")

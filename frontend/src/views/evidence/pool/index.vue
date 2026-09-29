@@ -179,7 +179,7 @@ onMounted(() => syncDelta())
 
 <template>
   <div>
-    <PageHeader title="证据池" subtitle="取证据，并可跨文件聚合成一份" />
+    <PageHeader title="证据池" subtitle="取证据，也能跨文件聚合成一份" />
 
     <div class="panel mb-3">
       <div class="toolbar">
@@ -195,7 +195,7 @@ onMounted(() => syncDelta())
         <el-button :disabled="!pool.selectedCards.length" @click="runDisagg" :loading="disaggRunning">分解</el-button>
         <el-button v-if="pool.cards.length" link type="danger" @click="pool.clear()">清空</el-button>
       </div>
-      <p class="note">证据池存储 sessionStorage。判断是否作废用 δ 指纹，不用 n。</p>
+      <p class="note">只存在当前标签页（sessionStorage），关掉就没了。是否作废看 δ 指纹。</p>
     </div>
 
     <div v-if="!pool.cards.length">
@@ -233,19 +233,19 @@ onMounted(() => syncDelta())
         <span class="sep">·</span>
         <span>逐份 {{ batchResult.ms_separate }} ms</span>
       </div>
-      <p class="note">批量验证比逐份慢（实测约 1.68 倍）—— 它值钱的地方是「一次结论」，不是速度。</p>
-      <el-alert v-if="batchResult.agree === false" type="error" :closable="false" class="mt-2" title="两套结论不一致 —— 这通常说明实现有 bug，需要显著报警" />
+      <p class="note">批量验证比逐份慢（实测约 1.68 倍），换来的是一次结论。</p>
+      <el-alert v-if="batchResult.agree === false" type="error" :closable="false" class="mt-2" title="两套结论不一致（这通常意味着实现有 bug）" />
       <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" class="mt-2" />
     </div>
 
     <div class="panel mt-3">
       <h4 class="sec-title">故障演练</h4>
       <div class="flex items-center gap-3">
-        <span class="text-2">把要发出去的那一份副本改坏一个值再验（不动池子、更不动服务器数据）</span>
+        <span class="text-2">把要发出去的那一份副本改坏一个值再验（不动池子，也不动服务器数据）</span>
         <el-button :disabled="!pool.selectedCards.length" :loading="corruptRunning" @click="corruptVerify">演练</el-button>
       </div>
       <div v-if="corruptResult" class="mt-2">
-        <el-alert :type="corruptResult.ok ? 'error' : 'error'" :closable="false" :title="corruptResult.ok ? '意外：竟然通过了' : `被抓住：${corruptResult.code_name || corruptResult.message}`" />
+        <el-alert :type="corruptResult.ok ? 'error' : 'error'" :closable="false" :title="corruptResult.ok ? '异常：改坏了却仍然通过' : `被抓住：${corruptResult.code_name || corruptResult.message}`" />
       </div>
     </div>
 
@@ -255,7 +255,7 @@ onMounted(() => syncDelta())
         从 {{ span(disaggResult.source_indices || []) }} 拆出 {{ span(disaggResult.indices || []) }}，
         丢弃 {{ span(disaggResult.dropped || []) }}
       </div>
-      <p class="note">第 3 步不能省：K ⊆ I 是硬约束，含新下标的证据光靠这一份永远拆不出来。</p>
+      <p class="note">第 3 步不能省：要拆出新下标，得先把它取回来。</p>
     </div>
   </div>
 </template>

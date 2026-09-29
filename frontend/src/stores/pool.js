@@ -95,6 +95,14 @@ export const usePoolStore = defineStore('pool', {
     },
 
     isEmpty: (s) => s.cards.length === 0,
+
+    /**
+     * 池子里已有的**下标集合**（拼成字符串便于查找）。
+     *
+     * ★ 判据必须与 :meth:`addCard` 的去重**完全一致** —— 文件列表页的「已入池」
+     *   标记就是拿它判的；两边口径不一致会出现“标着已入池，点下去却又新增了一张卡”。
+     */
+    indexKeys: (s) => new Set(s.cards.map((c) => c.indices.join(','))),
   },
 
   actions: {

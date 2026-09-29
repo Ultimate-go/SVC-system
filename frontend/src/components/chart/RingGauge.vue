@@ -42,7 +42,6 @@ const tone = computed(() => {
         :stroke-width="stroke"
         stroke-linecap="round"
         :stroke-dasharray="dash"
-        transform="rotate(-90 ${size / 2} ${size / 2})"
         :style="{ transform: `rotate(-90deg)`, transformOrigin: 'center' }"
       />
     </svg>

@@ -118,6 +118,40 @@ class NodeTransport(Protocol):
             由聚合阶段跳过。空份额**不能**直接拿去验证。
         """
 
+    def adopt(
+        self,
+        node_id: str,
+        *,
+        positions: Sequence[int],
+        values: Sequence[int],
+        proof: Opening,
+        blobs: Mapping[int, bytes] | None = None,
+    ) -> None:
+        """让一台节点**接收**一批已经承诺过的位置（``StrgNode.AddStorage``）。
+
+        这是本协议里唯一一个「往节点里塞东西」的方法，所以它的定位要讲清楚：
+        它塞的是**一份来自另一台节点的检索凭证** :math:`(Q, F_Q, \\pi_Q)`，
+        节点会自己验一遍再合并 —— 协调者**不**（也无法）直接指定节点的新状态。
+
+        为什么需要它（而不是复用 :meth:`apply_append`）：
+        :meth:`apply_append` 处理的是**本次追加刚产生的新位置**，那批位置的
+        证据恰好就是旧摘要本身；而这里搬的是**已经承诺过的**位置，
+        「旧摘要」那条近路早就失效了，必须由当前持有者拆出一份 :math:`\\pi_Q`。
+        两者在代数上都需要 :func:`~svc.agg`，但**前置材料完全不同** ——
+        硬合成一个方法就得在里面按「这批位置是不是新产生的」分支，那等于把
+        两条语义塞进同一个函数名里。
+
+        用途只有一个：**台数变小**时，把即将被摘掉的机器上的块搬到留下的机器上
+        （见 ``backend.manager.StoreManager.redistribute``）。
+        时机很关键 —— 必须在那些机器**还活着**的时候搬，重启之后就来不及了。
+
+        :param positions: 要接收的下标
+        :param values: 与 ``positions`` 一一对应的分量
+        :param proof: :math:`\\pi_Q`
+        :param blobs: ``下标 -> 密文段``。节点要用它满足
+            "声称持有的下标 == 实际存着的密文"这条不变式
+        """
+
     def apply_append(
         self,
         *,
@@ -284,6 +318,31 @@ class LocalTransport:
             raise TransportError("挑战下标不能为空")
         # Challenge.n 只是记账（pos_prove 不看它），所以用节点自己的 n。
         return pos_prove(state.node(), Challenge(indices=want, n=state.delta.n))
+
+    def adopt(
+        self,
+        node_id: str,
+        *,
+        positions: Sequence[int],
+        values: Sequence[int],
+        proof: Opening,
+        blobs: Mapping[int, bytes] | None = None,
+    ) -> None:
+        """本地模式：直接调 :meth:`~core.node_state.NodeState.adopt`。
+
+        与跨进程模式跑的是**同一份** ``NodeState`` 逻辑 —— 这里不做任何简化，
+        否则两条路径会悄悄分叉（见类文档）。
+        """
+        state = self.states.get(node_id)
+        if state is None:
+            raise TransportError(f"节点 {node_id} 不存在")
+        try:
+            state.adopt(positions, values, proof, blobs=blobs)
+        except NodeRejected as exc:
+            raise TransportError(f"{node_id} 拒绝接收：{exc}") from exc
+        if not state.check():
+            raise TransportError(f"{node_id} 接收后本地视图不合法")
+        self.states[node_id] = state
 
     # -- 写 -----------------------------------------------------------------
 

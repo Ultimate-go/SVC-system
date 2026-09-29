@@ -3,17 +3,21 @@
  * 文件与块。
  *
  * - 上传卡：选文件 + file_key + 切法三档（自动/按块大小/按块数）+ 存到哪几台。
- * - 上传前先问 /api/plan，把 why 与 alternatives 显示出来；ok:false 显著提示。
- * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 全局下标(span) / 两把锁 / 试解密。
+ * - 上传前先问 /api/plan（两档口径一起问），把候选切法摆成一张表；ok:false 显著提示。
+ * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 全局下标(span) / 两把锁；
+ *   行级操作直接摆在「操作」列：**详情 / 入池（已在池子里就是刷新）/ 试解密**。
+ *   —— 「详情」「入池」不信**点文件标识**去猜（太隐蔽）。
  * - 「试解密」不置灰：点下去才看到后端真的拒了你（演示亮点）。
  */
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
 import { devicesApi } from '../../../api/devices'
 import { systemApi } from '../../../api/system'
+import { evidenceApi } from '../../../api/evidence'
 import { useAuthStore } from '../../../stores/auth'
+import { usePoolStore } from '../../../stores/pool'
 import { span, fmtBytes, hexPreview } from '../../../utils/format'
 import { SPLIT_MODES } from '../../../utils/constants'
 import PageHeader from '../../../components/common/PageHeader.vue'
@@ -23,6 +27,7 @@ import EmptyState from '../../../components/common/EmptyState.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
 const auth = useAuthStore()
+const pool = usePoolStore()
 const router = useRouter()
 
 const loading = ref(false)
@@ -41,11 +46,14 @@ const uploadForm = reactive({
   pickedNodes: [],
 })
 
-const plan = ref(null)
+const planAdvice = ref(null)
 const askingPlan = ref(false)
 const uploading = ref(false)
 const uploadElapsed = ref(0)
 const uploadTimings = ref(null)
+//: 行级「入池」的忙碌状态与它的分步耗时（与上传那条共用同一个时间线组件）。
+const poolBusy = ref(false)
+const poolTimings = ref(null)
 let elapsedTimer = null
 
 const selectedFile = ref(null)
@@ -53,22 +61,155 @@ const selectedFile = ref(null)
 const canUpload = computed(() => selectedFile.value && uploadForm.fileKey.trim())
 
 const maxBytes = computed(() => status.value?.segment_bytes_max || 1048576)
+const minBytes = computed(() => status.value?.segment_bytes_min || 64)
+const defaultBytes = computed(() => status.value?.segment_bytes || 1024)
+
+/**
+ * 本次上传会按多大的块切 —— **必须能看见**。
+ *
+ * ★★ 它就是「点过一次问顾问之后，无论怎么传都只切一块」那个 bug 的另一半：
+ *   顾问只出**建议**，采纳要显式点建议卡里的按钮（见 :func:`applyPlan`）；
+ *   不点，「自动」档永远等于**后端部署默认值**，与问没问过顾问无关。
+ */
+const effectiveSplit = computed(() => {
+  const size = selectedFile.value?.size || 0
+  const seg =
+    uploadForm.splitMode === 'by_size'
+      ? uploadForm.segmentBytes
+      : uploadForm.splitMode === 'by_count'
+        ? Math.max(1, Math.ceil(size / Math.max(1, uploadForm.blockCount)))
+        : defaultBytes.value
+  return { seg: Math.max(1, Math.round(seg || 0)) }
+})
+
+/** 按当前切法大约几块（与后端 split_segments 同一条口径：向上取整）。 */
+const effectiveBlocks = computed(() => {
+  const size = selectedFile.value?.size || 0
+  if (!size) return null
+  return Math.ceil(size / effectiveSplit.value.seg)
+})
 
 function onFileChange(f) {
   selectedFile.value = f?.raw || null
+  // ★ 换文件就把上一份建议丢掉：那个候选表是**按上一个文件的大小**算的，
+  //   贴到新文件上给出的块数与估算都不是这个文件的。
+  planAdvice.value = null
 }
 
 async function askPlan() {
   if (!selectedFile.value) return
   askingPlan.value = true
-  plan.value = null
+  planAdvice.value = null
   try {
-    const { data } = await devicesApi.plan(selectedFile.value.size, 'fewest_blocks')
-    plan.value = data
+    const size = selectedFile.value.size
+    // ★ 同时问**两档口径**（接口里的 prefer）：顾问自己的规则只有「块数最少」
+    //   （对 ≤1 MiB 的文件必然建议 1 块）与「改块粒度最细」两条。
+    //   只问一条、再把那一句当圣旨摆出来，就是之前那个「建议共 1 块」的观感来源 ——
+    //   那不是错，是**单一口径被当成了结论**。两档一起给，取舍摆在用户面前。
+    const [fewest, finer] = await Promise.all([
+      devicesApi.plan(size, 'fewest_blocks'),
+      devicesApi.plan(size, 'finer_updates'),
+    ])
+    planAdvice.value = { size, fewest: fewest.data, finer: finer.data, defaultBytes: defaultBytes.value }
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || '顾问询问失败')
   } finally {
     askingPlan.value = false
+  }
+}
+
+/**
+ * 候选表：顾问给的 15 档金字塔 + 「部署默认」那一行（若不在金字塔里），
+ * 并标出哪几行是「最快 / 最细 / 默认」三个常用口径。
+ */
+const planRows = computed(() => {
+  const a = planAdvice.value
+  if (!a) return []
+  const rows = (a.fewest?.alternatives || []).map((r) => ({ ...r, tags: [] }))
+  const d = a.defaultBytes
+  if (d && !rows.some((r) => r.segment_bytes === d)) {
+    rows.push({
+      segment_bytes: d,
+      blocks: Math.ceil(a.size / d),
+      est_upload_ms: null,
+      est_verify_ms: null,
+      allowed: null,
+      note: '',
+      tags: [],
+    })
+  }
+  rows.sort((x, y) => x.segment_bytes - y.segment_bytes)
+  for (const r of rows) {
+    if (r.segment_bytes === a.fewest?.segment_bytes) r.tags.push('最快')
+    if (r.segment_bytes === a.finer?.segment_bytes) r.tags.push('最细')
+    if (r.segment_bytes === d) r.tags.push('默认')
+  }
+  return rows
+})
+
+/**
+ * 采纳某一档 —— **只有点了这里，建议才会变成上传参数**。
+ *
+ * 采纳方式刻意选「切到『按块大小』那一档 + 把这一档的值填进去」，而不是偷偷改
+ * 「自动」档的行为：这样档位与数字都摆在表单上，用户看得见、也随时能改回去。
+ */
+function applyPlan(seg) {
+  if (!seg) return
+  uploadForm.segmentBytes = Math.min(maxBytes.value, Math.max(minBytes.value, seg))
+  uploadForm.splitMode = 'by_size'
+  ElMessage.success(`已按这一档切：每块 ${uploadForm.segmentBytes} 字节`)
+}
+
+/** 这份文件是不是已经在池子里了（判据与 pool.addCard 的去重完全一致）。 */
+function inPool(row) {
+  return pool.indexKeys.has((row.indices || []).join(','))
+}
+
+/**
+ * 「入池」：把这份文件的块取一份证据，攒进证据池。
+ *
+ * ★ 池子按**下标集合**去重（``stores/pool.js`` 的 ``addCard``）：命中时不新增卡片，
+ *   而是用刚取到的最新证据**刷新**原来那张（δ 变过时这正好让它重新生效）。
+ *   这件事必须明说 —— 不说的话，用户会以为点了两次就是两份，或者以为第二次没生效。
+ */
+async function addToPool(row) {
+  const indices = row.indices || []
+  if (!indices.length) {
+    ElMessage.warning('这份文件没有块下标')
+    return
+  }
+  const already = inPool(row)
+  if (already) {
+    try {
+      await ElMessageBox.confirm(
+        `这 ${indices.length} 块已经在池子里了。\n\n` +
+          '继续只会用刚取到的证据刷新那张卡，不会新增。',
+        '这份已在池子里',
+        { type: 'warning', confirmButtonText: '刷新那一张', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  poolBusy.value = true
+  poolTimings.value = null
+  try {
+    const { data } = await evidenceApi.query(indices, false)
+    pool.addCard({
+      label: `${row.owner}/${row.file_key}`,
+      src: `来自文件列表 · ${row.block_count} 块`,
+      result: data,
+    })
+    poolTimings.value = data.timings || null
+    ElMessage.success(
+      already
+        ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}）`
+        : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`,
+    )
+  } catch {
+    // 403 / 409 的中文理由已由拦截器原样弹出（“只有所有者”那条同样适用）
+  } finally {
+    poolBusy.value = false
   }
 }
 
@@ -79,7 +220,15 @@ function buildFormData() {
   // 切法 → segment_bytes
   let seg = null
   if (uploadForm.splitMode === 'auto') {
-    seg = plan.value?.ok ? plan.value.segment_bytes : null
+    // ★★ 「自动」= **后端部署默认切法**：不传 segment_bytes，由后端用
+    //   Settings.segment_bytes（1024 字节/块）。
+    //
+    //   这里曾经写的是 ``seg = plan.value?.ok ? plan.value.segment_bytes : null``
+    //   —— 那正是「点过一次问顾问之后，无论怎么传都只切一块」的根源：
+    //   顾问的口径是「块数最少」，块上限 1 MiB，所以 ≤1 MiB 的文件它必然
+    //   建议 1 块；而 plan 不会自己失效，于是「自动」档被它永久劫持。
+    //   要采纳建议就走 applyPlan（显式切到「按块大小」档）。
+    seg = null
   } else if (uploadForm.splitMode === 'by_size') {
     seg = uploadForm.segmentBytes
   } else if (uploadForm.splitMode === 'by_count') {
@@ -115,7 +264,7 @@ async function doUpload() {
 function resetUpload() {
   selectedFile.value = null
   uploadForm.fileKey = ''
-  plan.value = null
+  planAdvice.value = null
   if (fileRef.value) fileRef.value.clearFiles()
 }
 
@@ -154,7 +303,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="文件与块" subtitle="所有人可验证，但仅所有者能解密" />
+    <PageHeader title="文件与块" subtitle="谁都能验证；只有所有者能解密" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>
@@ -175,7 +324,7 @@ onMounted(load)
           </el-upload>
 
           <div class="upload-form">
-            <el-input v-model="uploadForm.fileKey" placeholder="请输入文件标识" />
+            <el-input v-model="uploadForm.fileKey" placeholder="文件标识 file_key（如 病历A）" />
             <el-radio-group v-model="uploadForm.splitMode">
               <el-radio-button v-for="m in SPLIT_MODES" :key="m.value" :value="m.value">{{ m.label }}</el-radio-button>
             </el-radio-group>
@@ -188,8 +337,13 @@ onMounted(load)
               <el-input-number v-model="uploadForm.blockCount" :min="1" :max="1024" />
             </div>
 
+            <div v-if="selectedFile" class="effective mono">
+              本次切法：每块 {{ effectiveSplit.seg }} 字节<template v-if="effectiveBlocks"> · 约 {{ effectiveBlocks }} 块</template>
+              <span v-if="uploadForm.splitMode === 'auto'" class="text-3">（部署默认）</span>
+            </div>
+
             <div class="nodes-pick">
-              <span class="text-2">存储位置：</span>
+              <span class="text-2">存到哪几台：</span>
               <el-checkbox-group v-model="uploadForm.pickedNodes">
                 <el-checkbox v-for="n in nodes" :key="n.node_id" :value="n.node_id" :disabled="n.unreachable">
                   <span class="mono">{{ n.node_id }}</span>
@@ -198,29 +352,65 @@ onMounted(load)
             </div>
 
             <div class="actions">
-              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">寻求建议</el-button>
+              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">问顾问</el-button>
               <el-button type="primary" :disabled="!canUpload" :loading="uploading" @click="doUpload">上传</el-button>
               <span v-if="uploading" class="mono elapsed">已用 {{ (uploadElapsed / 1000).toFixed(1) }} s</span>
             </div>
           </div>
         </div>
 
-        <div v-if="plan" class="plan-box">
-          <template v-if="plan.ok">
-            <div class="text-ok">建议切 {{ plan.segment_bytes }} 字节一块，共 {{ plan.blocks }} 块</div>
-            <div class="text-2" style="font-size: 12px">{{ plan.why }}</div>
-            <div v-if="plan.alternatives?.length" class="alt">
-              <div v-for="a in plan.alternatives" :key="a.segment_bytes" class="alt-row">
-                <span class="mono">{{ a.segment_bytes }} B → {{ a.blocks }} 块</span>
-                <span class="text-3">{{ a.est_upload_ms }} ms 上传 / {{ a.est_verify_ms }} ms 验证</span>
-                <span v-if="a.note" class="text-3">{{ a.note }}</span>
-              </div>
+        <div v-if="planAdvice" class="plan-box">
+          <el-alert
+            v-if="!planAdvice.fewest.ok"
+            type="error"
+            :closable="false"
+            class="mb-2"
+            title="放不下"
+            :description="planAdvice.fewest.reason"
+          />
+          <div class="plan-head">
+            顾问给了 {{ planRows.length }} 种切法。<b>点某一行的「用这一档」才会采用</b>，
+            不点就按上面的「本次切法」走。带「最快 / 最细 / 默认」标签的是三种常见选择。
+          </div>
+          <div class="plan-table">
+            <div class="pt-row pt-head mono">
+              <span>每块</span><span>块数</span><span>估算（上传 / 验证）</span><span>说明</span><span></span>
             </div>
-            <p class="text-3" style="font-size: 11px">口径：est_* 是本地那几步的估算，不含分发到节点那一段。</p>
-          </template>
-          <template v-else>
-            <el-alert type="error" :closable="false" title="放不下" :description="plan.reason" />
-          </template>
+            <div
+              v-for="r in planRows"
+              :key="r.segment_bytes"
+              class="pt-row"
+              :class="{ 'is-bad': r.allowed === false }"
+            >
+              <span class="mono">{{ r.segment_bytes }} B</span>
+              <span class="mono">{{ r.blocks }} 块</span>
+              <span class="text-3 mono">{{ r.est_upload_ms == null ? '—' : `${r.est_upload_ms} / ${r.est_verify_ms} ms` }}</span>
+              <span>
+                <el-tag
+                  v-for="t in r.tags"
+                  :key="t"
+                  size="small"
+                  effect="plain"
+                  style="margin-right: 4px"
+                >{{ t }}</el-tag>
+                <span v-if="r.note" class="text-3" style="font-size: 11px">{{ r.note }}</span>
+              </span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                :disabled="r.allowed === false"
+                @click="applyPlan(r.segment_bytes)"
+              >用这一档</el-button>
+            </div>
+          </div>
+          <el-collapse class="why">
+            <el-collapse-item title="为什么这么建议" name="why">
+              <p class="text-2" style="font-size: 12px">【块数最少】{{ planAdvice.fewest.why }}</p>
+              <p class="text-2" style="font-size: 12px">【粒度最细】{{ planAdvice.finer.why }}</p>
+              <p class="text-3" style="font-size: 11px">估算来源：{{ planAdvice.fewest.measured_source }}</p>
+            </el-collapse-item>
+          </el-collapse>
         </div>
 
         <StageTimeline v-if="uploadTimings" :timings="uploadTimings" class="mt-3" />
@@ -232,9 +422,16 @@ onMounted(load)
           <el-table-column prop="owner" label="所有者" width="110">
             <template #default="{ row }"><span class="mono">{{ row.owner }}</span></template>
           </el-table-column>
-          <el-table-column label="文件标识" min-width="150">
+          <el-table-column label="文件标识" min-width="170">
             <template #default="{ row }">
               <el-link type="primary" @click="router.push(`/files/${row.id}`)">{{ row.file_key }}</el-link>
+              <el-tag
+                v-if="inPool(row)"
+                size="small"
+                type="success"
+                effect="plain"
+                style="margin-left: 6px"
+              >已入池</el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="block_count" label="块数" width="70" align="center" />
@@ -249,7 +446,7 @@ onMounted(load)
           </el-table-column>
           <el-table-column label="验证" width="80" align="center">
             <template #default>
-              <span class="text-accent" title="验证不受限，所有人都能验证">可验证</span>
+              <span class="text-accent" title="谁都能验证">可验证</span>
             </template>
           </el-table-column>
           <el-table-column label="解密" width="90" align="center">
@@ -257,15 +454,20 @@ onMounted(load)
               <LockTag :can-decrypt="row.can_decrypt" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="90" align="center">
+          <el-table-column label="操作" width="190" align="center">
             <template #default="{ row }">
+              <el-button link type="primary" @click="router.push(`/files/${row.id}`)">详情</el-button>
+              <el-button link type="primary" :loading="poolBusy" @click="addToPool(row)">
+                {{ inPool(row) ? '刷新' : '入池' }}
+              </el-button>
               <el-button link type="primary" @click="tryDecrypt(row)">试解密</el-button>
             </template>
           </el-table-column>
           <template #empty>
-            <EmptyState title="还没有文件" description="上传一个试试，切成几块、每块多大都由你决定" />
+            <EmptyState title="还没有文件" description="上传一份试试，切法随你选" />
           </template>
         </el-table>
+        <StageTimeline v-if="poolTimings" :timings="poolTimings" class="mt-3" />
       </div>
     </template>
   </div>
@@ -325,5 +527,48 @@ onMounted(load)
   display: flex;
   gap: 16px;
   font-size: 12px;
+}
+.effective {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.plan-head {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 10px;
+}
+.plan-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pt-row {
+  display: grid;
+  grid-template-columns: 92px 70px minmax(120px, 1fr) minmax(140px, 1.2fr) 84px;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.pt-row:not(.pt-head):hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.pt-head {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.pt-row.is-bad {
+  opacity: 0.55;
+}
+.why {
+  margin-top: 10px;
 }
 </style>

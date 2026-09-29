@@ -18,7 +18,9 @@ export const DEMO_PASSWORD = 'vds12345'
 
 /** 切法三档。 */
 export const SPLIT_MODES = [
-  { value: 'auto', label: '自动（推荐）' },
+  // ★ auto = **后端部署默认切法**（Settings.segment_bytes = 1024 字节/块），
+  //   它不查顾问 —— 顾问只给建议，采不采纳由用户在建议卡里点（见 files/list 的 applyPlan）。
+  { value: 'auto', label: '自动（后端默认）' },
   { value: 'by_size', label: '按块大小' },
   { value: 'by_count', label: '按块数' },
 ]

@@ -56,15 +56,13 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
           <h1 class="intro-title">基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h1>
           <p class="intro-sub">
-            一套基于增量聚合向量承诺的可验证分布式存储与查询系统。
-            <br />把文件交给别人保管，怎么放心？
-            <br />我们给出的答案不是「请相信我们」，而是一份任何人都能自己验证的密码学证据。
-
+            文件交给别人保管，凭什么放心？
+            <br />答案不是「请相信我们」，而是一份谁都能自己验证的密码学证据。
           </p>
           <ul class="intro-points">
-            <li><span class="pt-dot" />公开可验证，且非所有者无法解密 </li>
-            <li><span class="pt-dot" />不靠承诺，靠可验证 </li>
-            <li><span class="pt-dot" />384个算法核回归测试钉住密码学</li>
+            <li><span class="pt-dot" />谁都能验证，只有所有者能解密</li>
+            <li><span class="pt-dot" />不靠承诺，靠可验证</li>
+            <li><span class="pt-dot" />384 个算法回归测试钉住密码学</li>
           </ul>
         </div>
       </section>
@@ -72,8 +70,19 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
       <!-- 右：登录面板 -->
       <section class="login-side">
         <div class="login-card">
-          <h2 class="card-title">登录系统</h2>
-          <p class="card-sub">请输入账号与密码进入平台</p>
+          <h2 class="card-title">登录</h2>
+          <p class="card-sub">请输入账号与密码</p>
+
+          <!-- 被 401 兜底送回来时才会出现（见 main.js 的 expired 标记）。
+               用常驻提示而不是弹窗：掉线是“后端重启”的必然结果，不是错误。 -->
+          <el-alert
+            v-if="route.query.expired === '1'"
+            type="info"
+            :closable="false"
+            class="mb-3"
+            title="登录已过期，请重新登录"
+            description="后端重启会换掉签名密钥，重登一次就好。"
+          />
 
           <div class="form">
             <el-input
@@ -101,7 +110,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
               class="submit"
               @click="submit"
             >
-              登录确认
+              登录
             </el-button>
           </div>
         </div>

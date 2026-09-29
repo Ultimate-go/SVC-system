@@ -251,6 +251,34 @@ class NodeStateRow(Base):
         return json.loads(self.FI_json)
 
 
+class NodeRegistryRow(Base):
+    """**节点登记表** —— 这个集群一共有过哪些存储节点、各是什么时候加入的。
+
+    为什么要它（以前节点名单只活在环境变量里，库里查不到）：
+    :meth:`~backend.manager.StoreManager._verify_nodes_at_startup` 要求
+    "每台节点停在的 ``n`` 与协调者一致"。但**刚加入的新节点天然是空的**
+    （``n = 0``）——它和"数据目录被删掉的老节点"在节点那一侧看起来一模一样。
+    没有这张表就只能二选一：要么把新人一起拒掉（加机器必炸），要么把
+    "丢了数据的老节点"也放过去（**静默丢数据**）。
+
+    区分办法是 ``received_n``：**协调者记录"我上次成功推送到第几块"**。
+      * 新节点：``received_n = 0``，而它自己也是 ``n = 0`` → 一致 ⇒ 放行；
+      * 老节点丢数据：``received_n = 10``（推过 10 块），而它 ``n = 0`` → 不一致 ⇒ 拒绝。
+
+    ``received_n`` 在**每次 bootstrap 通过闸门之后**刷新为当时的 ``store.n``，
+    不需要在写路径上更新（那会给每次上传多加一次写库）。
+    """
+
+    __tablename__ = "node_registry"
+
+    node_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    #: 协调者上次成功推送到第几块。0 = 从没收到过（新加入还没分到块）。
+    received_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 已经从这个集群里摘掉了（缩容留下的历史记录，仅用于展示）。
+    retired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 # ---------------------------------------------------------------------------# 审计
 # ---------------------------------------------------------------------------
 

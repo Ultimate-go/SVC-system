@@ -73,15 +73,14 @@ MEASURED_PER_BLOCK_MS: dict[str, float] = {"upload": 13.3, "verify": 6.8}
 
 #: 上面那两个数从哪来的（界面上要标出来，不能把估算说成实测）。
 MEASURED_SOURCE = (
-    "scripts/bench_blocksize.py 实测（本机，2026-09-26；"
-    "单进程模式 —— 只含本地封装与承诺）"
+    "scripts/bench_blocksize.py 实测（本机，2026-09-26；单进程模式，只含本地封装与承诺）"
 )
 
 #: 这批系数的**口径**。界面必须原样带出来 ——
 #: 一份“只算了本地几步”的估算，被摆成“预计上传约 X ms”就是谎报。
 MEASURED_SCOPE = (
     "只含协调者本地几步（切块 / SM3 / SM4 / ECIES 封装 / 承诺）；"
-    "不含「把密文推给各存储节点的分发」—— 跨进程部署下分发才是大头"
+    "不含把密文推给各存储节点的分发（跨进程部署下分发才是大头）"
 )
 
 #: 候选档位：从最小块开始按 2 的幂往上翻，最后补上上限本身。
@@ -204,7 +203,7 @@ def recommend_plan(
     if prefer == "finer_updates":
         chosen = feasible[0]  # 允许范围内**最小**的块 ⇒ 改块粒度最细
         why = (
-            f"按你的选择（改块粒度细一点）：在允许范围内挑最小的可行块 "
+            f"粒度更细的一档：在允许范围内挑最小的可行块 "
             f"{chosen['segment_bytes']} 字节，切 {chosen['blocks']} 块。"
             f"代价是块数多、上传与验证更慢（本地那几步估算 {chosen['est_upload_ms']} ms / "
             f"{chosen['est_verify_ms']} ms），也更占全局位置。"
@@ -212,19 +211,15 @@ def recommend_plan(
     else:
         chosen = feasible[-1]  # 允许范围内**最大**的块 ⇒ 块数最少
         why = (
-            f"块数最少的一种切法：块越大，每块的固定开销摊得越薄 —— "
+            f"块数最少的一档：块越大，每块的固定开销摊得越薄。"
             f"{chosen['segment_bytes']} 字节一块，共 {chosen['blocks']} 块，"
             f"本地那几步估算上传 {chosen['est_upload_ms']} ms、一次全量验证 "
             f"{chosen['est_verify_ms']} ms（每块约 "
             f"{MEASURED_PER_BLOCK_MS['upload']} ms / "
             f"{MEASURED_PER_BLOCK_MS['verify']} ms，实测）。"
-            f"★ 这两个数不含「分发到存储节点」那一段 —— 跨进程部署下它才是大头"
-            f"（4 台节点、本机实测：一次 7 块的上传后端合计 2662 ms，"
-            f"其中 2351 ms 花在它上面，占 88%）。"
-            f"所以这几个数只能用来比较不同切法，不要当成“上传要多久”；"
-            f"真实耗时看上传完成后那条阶段耗时条。"
-            f"块大只影响「改一块」的粒度，不影响验证的正确性，"
-            f"证据大小也与块数无关。"
+            f"这几个数不含把密文推给各存储节点的分发，所以只适合比较切法；"
+            f"上传到底要多久，看上传完成后那条阶段耗时条。"
+            f"块大只影响改一块的粒度，不影响验证结果，证据大小也与块数无关。"
         )
 
     return {

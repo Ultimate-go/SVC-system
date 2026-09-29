@@ -4,7 +4,7 @@
 
     python -m node_service --node-id node-1 --port 9101 --data-dir nodes/node-1
 
-它对外只有五个接口，**没有一个是"把状态设成这样"**：
+它对外的接口很少，而且**没有一个是"把状态设成这样"**：
 
 ====================  ====================================================
 ``GET  /node/health``   活着吗，有没有状态
@@ -12,6 +12,7 @@
 ``GET  /node/report``   我持有哪些下标、在哪个 ``n`` 上、视图是否合法
 ``POST /node/retrieve`` 给你哪些下标的内容 + 证据 + 密文
 ``POST /node/append``   一次追加发生了，你负责这几个新位置，自己跟上
+``POST /node/adopt``    收下一份**别的节点**给的检索凭证（台数变小时搬块用）
 ====================  ====================================================
 
 最后一条是关键：协调者发的是"**发生了什么**"（:math:`\\Delta` 与
@@ -435,6 +436,77 @@ class NodeRuntime:
             removed = self.db.delete_blobs(out["dropped"])
             return {**out, "node_id": self.node_id, "removed": removed}
 
+    def adopt(self, payload: dict) -> dict:
+        """接收一批**已经承诺过**的位置（``StrgNode.AddStorage`` 的凭证入口）。
+
+        这是节点侧唯一一个「把非本次追加的数据收进来」的入口，用途只有一个：
+        **台数变小**时，把即将被摘掉的机器上的块搬到留下来的机器上。
+
+        与 :meth:`append` 的关键差别是**前置材料不同**：
+        ``append`` 收的是刚产生的新位置，那批位置的证据恰好是旧摘要本身；
+        这里收的位置早就承诺过了，必须由**当前持有者**拆出一份
+        :math:`\\pi_Q`（协调者去要、然后原样转交，它自己造不出来）。
+
+        ★ 本方法**自己验凭证**（``NodeState.adopt`` 里 ``verify_cert=True``）：
+        协调者是搬运工，不是权威 —— 一份来源不明的份额如果直接合并进来，
+        本节点会被悄悄毒掉，而 :meth:`check` 只比对下标集合、不比内容。
+
+        .. important::
+
+           这一步**不改变** ``δ``：``n`` 不变、``C`` 不变，变的只是
+           「谁持有哪些下标」。所以它不需要 :math:`\\Upsilon_\\Delta`，
+           也就与两段式更新那套机制完全正交。
+        """
+        with self._lock:
+            self._need_session()
+            if self.state is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "本节点还没有公开参数 —— 请先让协调者调用 POST /node/crs",
+                )
+            raw = payload.get("proof") or {}
+            if not raw:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少 proof（π_Q）")
+            proof = Opening(
+                int(raw["S_I"]),
+                int(raw["Lambda_I"]),
+                tuple(int(x) for x in raw["I"]),
+            )
+            positions = [int(x) for x in payload.get("positions", [])]
+            values = [int(x) for x in payload.get("values", [])]
+            blobs = {
+                int(k): bytes.fromhex(v) for k, v in payload.get("blobs", {}).items()
+            }
+            if not positions:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "要接收的下标不能为空")
+            try:
+                out = self.state.adopt(positions, values, proof, blobs=blobs)
+            except NodeRejected as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, f"接收失败：{exc}"
+                ) from exc
+            if not self.state.check():
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "接收后本地视图不合法 —— 拒绝落库",
+                )
+            # 状态整行覆写（I / F_I 都变大了），密文只写新收的这几段
+            self.db.save_state(
+                delta=self.state.delta,
+                st=self.state.st,
+                I=self.state.I,
+                FI=self.state.FI,
+            )
+            self.db.save_blobs(blobs)
+            return {
+                "ok": True,
+                "node_id": self.node_id,
+                "n": self.state.delta.n,
+                "adopted": out["adopted"],
+                "held": out["held"],
+                "span": out["span"],
+            }
+
     def delete(self, payload: dict) -> dict:
         """一次删除（``del``）：跟上新摘要，并把被删掉的那些密文**真删掉**。
 
@@ -638,6 +710,10 @@ def create_node_app(node_id: str, data_dir: str | Path, *, token: str) -> FastAP
     @app.post("/node/drop")
     def drop(payload: dict, request: Request):
         return rt(request).drop(payload)
+
+    @app.post("/node/adopt")
+    def adopt(payload: dict, request: Request):
+        return rt(request).adopt(payload)
 
     @app.post("/node/delete")
     def delete(payload: dict, request: Request):

@@ -166,7 +166,7 @@ onMounted(load)
         </div>
         <div class="digest text-2" style="font-size: 12px">
           上传时摘要（SHA-256）：<span class="mono">{{ hexFp(file.content_digest, 16) }}</span>
-          <span class="text-3">（它不会随改块更新 —— 协调者手里没有完整明文）</span>
+          <span class="text-3">（它不随改块更新，协调者手里没有完整明文）</span>
         </div>
       </div>
 
@@ -193,7 +193,7 @@ onMounted(load)
               <el-input v-model="appendText" type="textarea" :rows="3" placeholder="要追加到末尾的内容" />
               <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doAppend">追加</el-button>
               <p class="text-3" style="font-size: 12px">
-                追加不回头填上一块的空位，所以追加后的切法 ≠ 重新上传的切法。
+                追加不回头填上一块的空位，所以追加后的切法和重新上传不完全一样。
               </p>
             </div>
           </el-tab-pane>
@@ -206,7 +206,7 @@ onMounted(load)
               <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">截断</el-button>
               <el-alert type="warning" :closable="false" class="trunc-warn" title="只能删全局向量末尾">
                 <template #default>
-                  <p style="font-size: 12px">① 只能删全局向量末尾的连续区间，所以实际上只有最后写进向量的那份文件才删得动尾巴，别的会 400 并点明卡住的下标。</p>
+                  <p style="font-size: 12px">① 只能删全局向量末尾的连续一段，所以实际上只有最后写进向量的那份文件删得动尾巴；别的会报 400，并告诉你是哪个下标卡住了。</p>
                   <p style="font-size: 12px">② 不能删到一块不剩。此操作不可撤销。</p>
                 </template>
               </el-alert>
@@ -228,7 +228,7 @@ onMounted(load)
               :closable="false"
               class="mb-2"
               :title="`块边界有半截字符（head=${decodePreview.head}, tail=${decodePreview.tail}）`"
-              description="改写这一块会连带把相邻那个汉字弄坏。"
+              description="改这一块会连带弄坏相邻那个汉字。"
             />
             <el-alert
               v-if="hasBadBytes(decryptResult.data_hex)"

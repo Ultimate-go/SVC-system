@@ -480,6 +480,102 @@ class NodeState:
         if blobs:
             self._blobs.update({int(k): bytes(v) for k, v in blobs.items()})
 
+    def adopt(
+        self,
+        positions: Sequence[int],
+        values: Sequence[int],
+        proof: Opening,
+        blobs: Mapping[int, bytes] | None = None,
+    ) -> dict:
+        r"""从**一份检索凭证**接收若干位置（``StrgNode.AddStorage`` 的凭证入口）。
+
+        与 :meth:`absorb` 的分工必须说清楚，否则很容易用错：
+
+        * :meth:`absorb` 收的是**本次追加刚产生的新位置**。这些位置在旧文件里
+          没有成员见证，所以整块 :math:`\pi_K` 恰好就是**旧的摘要本身**
+          （见本模块文档里那个恒等式），一个模幂都不用做；
+        * 本方法收的是**已经承诺过的位置** —— 执行 ``AddStorage`` 时
+          那次追加早就提交完了，旧摘要里没有它们。所以「那一块的证据就是旧摘要」
+          这条近路**走不通**，必须由**当前持有者**给出 :math:`\pi_Q = d(v \setminus Q)`
+          （它手里有 :math:`I \supseteq Q`，一次 :func:`~svc.disagg` 就能拆出来）。
+
+        这正是论文 §7 那句「任何人拿到一份合法凭证都能成为存储节点」的落地点：
+        与本节点是否参与过当初那次追加**无关**。
+
+        .. important::
+
+           **这不是"协调者直接写节点状态"。** 凭证来自另一台**节点**的
+           :meth:`~core.node_state.NodeState.retrieve`，本节点拿它把
+           :func:`~svc.agg` 自己的 :math:`(S_I,\Lambda_I)` 长出新的一段 ——
+           决策权仍在节点这一侧（它会先自己验一遍凭证，见 ``verify_cert``）。
+
+        :param positions: 要接收的下标 ``Q``，必须与本节点**已有的**下标不相交
+            （:func:`~svc.agg` 的前提）
+        :param values: 与 ``positions`` 一一对应的分量
+        :param proof: :math:`\pi_Q`，一份对**当前摘要**合法的子向量打开证明
+        :param blobs: ``下标 -> 密文段``。**不给就会当场被 :meth:`check` 抓住**
+            （它要求"声称持有的下标 == 实际存着的密文"，那条不变式在这里
+            照样成立 —— 收了证据却没有内容，等于谎报）。
+        :raises NodeRejected: 下标重叠、长度不符、没有状态、凭证不合法、合并后视图不合法
+
+        :returns: 一行新的现状（``{"adopted", "held", "span"}`` 等）
+        """
+        Q = as_index_set(int(p) for p in positions)
+        if not Q:
+            return {"adopted": [], "held": len(self.I), "span": span(self.I)}
+        vals = tuple(int(v) for v in values)
+        if len(vals) != len(Q):
+            raise NodeRejected(
+                f"要接收的 {len(Q)} 个下标与 {len(vals)} 个值对不上"
+            )
+        if not self.has_state:
+            # 没有状态时连"合并进哪条视图"都没有 —— 必须先从别处拿到 δ。
+            # （正常流程里不会发生：任何一次追加都会给**每一台**节点
+            #    adopt_empty，所以只要 n>0，全集群的节点都有状态。）
+            raise NodeRejected(
+                f"{self.node_id} 还没有任何状态，无法接收迁移过来的位置"
+            )
+        overlap = sorted(set(Q) & set(self.I))
+        if overlap:
+            # AddStorage 要求两份存储不相交；重叠说明协调者的副本表与
+            # 本节点实际的持有集**已经对不上**了，那不是能"顺手修一下"的状态。
+            raise NodeRejected(
+                f"{self.node_id} 已经持有下标 {overlap}，不能再收一遍"
+                f"（AddStorage 要求两份存储不相交）"
+            )
+
+        current = self.node()
+        try:
+            # verify_cert=True：先按**本节点自己的**摘要验一遍凭证再合并。
+            # 不验就等于把一个来源不明的份额塞进本地视图，
+            # 而 :meth:`check` 只比对下标集合、不比内容 —— 会被悄悄毒掉。
+            merged = current.add_storage((Q, vals, proof), verify_cert=True)
+        except ValueError as exc:
+            raise NodeRejected(f"{self.node_id} 拒绝这份凭证：{exc}") from exc
+
+        # ★ 摘要必须**一个字节都不变**：这次操作不改变 n、不改变 C，
+        #   只是把"谁持有哪些下标"换了个分布。变了就说明凭证对错了版本。
+        if merged.view.delta != self._view.delta:
+            raise NodeRejected(
+                f"{self.node_id} 合并后摘要变了"
+                f"（{merged.view.delta!r} vs {self._view.delta!r}）—— 凭证对错了版本"
+            )
+
+        self._view = LocalView(
+            delta=merged.view.delta,
+            st=merged.view.st,
+            I=merged.view.I,
+            FI=merged.view.FI,
+        )
+        if blobs:
+            self._blobs.update({int(k): bytes(v) for k, v in blobs.items()})
+        return {
+            "adopted": list(Q),
+            "held": len(self.I),
+            "span": span(self.I),
+            "delta": (self.delta.U, self.delta.C, self.delta.n),
+        }
+
     # -------------------------------------------------------------------
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
