@@ -37,8 +37,29 @@ const disaggResult = ref(null)
 
 const isStale = (card) => pool.staleIds.has(card.id)
 
+/**
+ * 卡片标题 —— 下标在**显示时**折起来，不把 1, 2, 3, 4… 平铺出来。
+ *
+ * ★★ 压缩必须发生在显示这一层，而且拿 `card.indices` **现算** ——
+ *   不看 label 里当初是怎么写的。
+ *
+ *   理由：池子存在 sessionStorage 里，**已经取回来的卡**的 label 是写死的
+ *   字符串（「完整性验证」页当初用 indices.join(',') 拼的，长这样：
+ *   「查询：0, 1, 2, …, 100」）。只把那边的写法改对救不了这些旧卡 ——
+ *   只有显示时重算，同一批下标在池子里才永远长得一样。
+ *
+ *   label 从此只承担「这张卡从哪来 / 是哪个文件」：冒号前那截当前缀，
+ *   冒号后面那串历史下标直接丢掉。
+ *
+ * ★ 所以本改动**只落在这一个文件**：`verify/index.vue` 存进来的 label
+ *   仍然带着旧下标，但它显示时会被这里覆盖，那边不必动。
+ */
 function cardTitle(card) {
-  return card.label || span(card.indices)
+  const scope = span(card.indices)
+  const raw = String(card.label || '')
+  if (!raw) return scope
+  const cut = raw.search(/[：:]/)
+  return `${cut >= 0 ? raw.slice(0, cut) : raw}：${scope}`
 }
 
 async function syncDelta() {
