@@ -40,6 +40,10 @@ from core.keywrap import (
     unwrap_key,
     unwrap_private_key,
     wrap_key,
+    # ★ ``rewrap_user_key`` 要用它来重封用户私钥。以前漏了这一个名字，
+    #  于是「改自己的口令」每次都 NameError → 500，而且哈希已经先落库了
+    #  （见 ``admin.patch_user`` 的注释）——账号当场锁死。
+    wrap_private_key,
 )
 from core.store import proof_bytes
 from core.timing import stage
@@ -259,7 +263,14 @@ class StoreManager:
             db.commit()
             return True
 
-    def rewrap_user_key(self, username: str, old_sk: int, new_password: str) -> None:
+    def rewrap_user_key(
+        self,
+        username: str,
+        old_sk: int,
+        new_password: str,
+        *,
+        db: object | None = None,
+    ) -> None:
         """改口令时**重新封装**私钥（换口令不该让旧文件失效）。
 
         ★ 这正是“口令封装”相对“直接用口令派生私钥”的关键好处：
@@ -267,14 +278,28 @@ class StoreManager:
           一把都不用重传。
 
         :param old_sk: 调用方先前解封出来的私钥（应当来自 :meth:`unseal_user_key`）。
+        :param db: 给了就**只写不提交** —— 让调用方把「新哈希 + 新私钥密文」
+            放进**同一个事务**里。
+
+            ★★ 为什么非得能传进来：这两样东西必须同生同死。分开提交的话，
+            中间任何一步失败都会留下「口令与私钥包裹不同步」的账号 ——
+            那样的账号**两个口令都登不进去**（新口令解不开私钥、旧口令过不了
+            哈希校验），而私钥其实好好地躺在库里。
         """
-        with self._lock, self.db.session() as db:
-            row = self._user_row(db, username)
+
+        def _write(session: object) -> None:
+            row = self._user_row(session, username)
             with stage("重新封装私钥（PBKDF2-HMAC-SM3）"):
                 row.sk_wrapped = json.dumps(
                     wrap_private_key(new_password, old_sk), ensure_ascii=False
                 )
-            db.commit()
+
+        if db is not None:
+            _write(db)
+            return
+        with self._lock, self.db.session() as own:
+            _write(own)
+            own.commit()
 
     def user_public_key(self, username: str):
         """取用户的 SM2 公钥点 —— 上传/改块/追加时用它封块密钥。"""

@@ -88,11 +88,22 @@ def login(
         with collect() as sw:
             sk = mgr.unseal_user_key(user.username, body.password)
     except KeyWrapIntegrityError as exc:
-        # 口令刚刚用 bcrypt 验过是对的，却解不开私钥密文 ⇒ 那份密文被改过
+        # 口令刚刚用 bcrypt 验过是对的，却解不开私钥密文 ⇒ 两份记录不同步：
+        # 口令哈希换过，但私钥密文还是用**旧口令**包的（改口令时重封那一步没落地）。
+        #
+        # ★★ 提示里**绝不能**叫人"删掉重建这个账号"：重建 = 生成新密钥对 =
+        #    此人名下的文件**永久**解不开（块密钥是用旧公钥封的，方案上没有第二把钥匙）。
+        #    而这个故障本身是**无损可修**的 —— 私钥好端端在库里，只是外面那层
+        #    包裹的口令不对。正确做法：用旧口令解封出来，再用新口令重新封装。
         audit(db, user.username, "login", ok=False, detail="私钥解封失败")
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "口令对了，但私钥解不开 —— 密钥记录可能被改过或损坏，请管理员重建这个账号",
+            "口令对了，但私钥解不开 —— 口令与私钥的包裹不同步"
+            "（改口令时重新封装那一步没落地）。\n"
+            "  ⚠ 请**不要**删除重建这个账号：那会换掉密钥对，"
+            "此人名下的文件将永久无法解密。\n"
+            "  正确修法：用旧口令解封私钥，再用当前口令重新封装 —— "
+            "私钥本身完好，文件一把都不会丢。",
         ) from exc
     except NotFound as exc:
         audit(db, user.username, "login", ok=False, detail="没有密钥对")

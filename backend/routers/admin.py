@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from ..deps import audit, current_token, get_db, get_manager, require_admin
+from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
 from ..manager import StoreManager
 from ..models import AuditRow, BlockRow, FileRow, UserRow
 from ..schemas import UserCreateIn, UserPatchIn
@@ -88,20 +88,51 @@ def create_user(
 def patch_user(
     user_id: int,
     body: UserPatchIn,
-    admin: UserRow = Depends(require_admin),
+    actor: UserRow = Depends(current_user),
     token: str = Depends(current_token),
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
+    """改一个用户。
+
+    ★★ 这里**不再一律要求管理员**，而是分两种情形：
+
+      * **改自己**（只动 ``password`` / ``display_name``）—— 任何登录用户都能做。
+        必须放行：改口令要重新封装自己的私钥，而那把私钥只有在**他自己登录**
+        的那一刻才被解封出来（它从不落盘、只在内存里）。挡在 ``require_admin``
+        后面的话，普通用户在「个人中心」改口令会永远 403。
+      * **改别人**，或者动 ``role`` / ``disabled`` —— 仍然必须管理员。
+        否则任何人都能把自已提权成 admin。
+
+    ★★ 改口令的顺序（真踩过的坑，别再改回去）：
+        **先把新私钥密文写进当前事务，再落新哈希，最后一起提交。**
+        反过来（先提交哈希、再重封）的后果是：重封一失败就留下
+        「哈希是新的、私钥还是旧口令包的」——那个账号**两个口令都登不进去**
+        （新口令解不开私钥、旧口令过不了哈希），而私钥其实完好无损。
+    """
     user = db.get(UserRow, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+
+    is_self = user.id == actor.id
+    is_admin = actor.role == "admin"
+    #: 动这两项属于特权操作 —— 给自己提权/解停用不能靠"改自己"这条口子。
+    privileged = body.role is not None or body.disabled is not None
+
+    if not is_admin and (not is_self or privileged):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "需要管理员权限"
+            if not is_self
+            else "只有管理员能改角色或停用状态（改口令与显示名可以自己改）",
+        )
+
     if body.display_name is not None:
         user.display_name = body.display_name
     if body.role is not None:
         user.role = body.role
     if body.disabled is not None:
-        if user.username == admin.username and body.disabled:
+        if is_self and body.disabled:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能停用自己")
         user.disabled = body.disabled
 
@@ -117,7 +148,7 @@ def patch_user(
         #     * 自己改自己的 —— 本次会话里就有他的私钥，没问题；
         #     * 管理员改别人的 —— 拿不到那人的私钥，**只能拒绝**。
         #       这不是偷懒：真做了就是把他的数据永久锁死。
-        if user.username != admin.username:
+        if not is_self:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 f"不能替 {user.username} 改口令：他的私钥是用他自己的口令包的，"
@@ -130,19 +161,20 @@ def patch_user(
                 status.HTTP_403_FORBIDDEN,
                 "这次会话里没有你的私钥，无法重封 —— 请重新登录后再改口令。",
             )
-        user.pwd_hash = hash_password(body.password)
-        # 先落哈希，再重封私钥（重封失败也不会出现"能登录但解不开"）
-        db.commit()
+        # ★ 先写私钥密文（不提交），再落哈希，**同一个事务里一起提交**。
+        #   任何一步失败 ⇒ 两个都没变 ⇒ 账号仍然是"旧口令能正常登录"。
         with collect() as sw:
-            mgr.rewrap_user_key(user.username, sk, body.password)
-        audit(db, admin.username, "user_patch", user.username, detail="口令已更换（私钥已重封）")
+            mgr.rewrap_user_key(user.username, sk, body.password, db=db)
+        user.pwd_hash = hash_password(body.password)
+        db.commit()
+        audit(db, actor.username, "user_patch", user.username, detail="口令已更换（私钥已重封）")
         out = user_public(user)
         out["timings"] = sw.payload()
         return out
 
     db.commit()
     db.refresh(user)
-    audit(db, admin.username, "user_patch", user.username)
+    audit(db, actor.username, "user_patch", user.username)
     return user_public(user)
 
 
