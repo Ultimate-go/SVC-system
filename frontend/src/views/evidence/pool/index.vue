@@ -7,7 +7,7 @@
  * - 按 delta_fp 判断作废（不是 n）。
  * - 「一次验这 N 份」→ verify-batch，两个耗时都显示，agree 不一致报警。
  * - 分解再聚合 4 步演示。
- * - 故障演练开关：把要发出去的那一份副本改坏一个值再验。
+ * - 故障演练：勾选卡片后，把要发出去的那一份副本改坏一个值再验。
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -15,6 +15,7 @@ import { usePoolStore } from '../../../stores/pool'
 import { evidenceApi } from '../../../api/evidence'
 import { systemApi } from '../../../api/system'
 import { span, fmtAgo } from '../../../utils/format'
+import { parseIndexRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import VerifyResult from '../../../components/security/VerifyResult.vue'
@@ -25,9 +26,11 @@ const pool = usePoolStore()
 const batchRunning = ref(false)
 const batchResult = ref(null)
 
-const corruptToggle = ref(false)
 const corruptResult = ref(null)
 const corruptRunning = ref(false)
+
+// 取证据的下标输入，如 0 或 0,1,2 或 0-2 或 0-2,5,8
+const fetchInput = ref('0')
 
 const disaggRunning = ref(false)
 const disaggResult = ref(null)
@@ -50,14 +53,17 @@ async function syncDelta() {
 }
 
 async function fetchOne() {
-  // 取一份覆盖当前所有文件的证据（按第一个文件）
-  // 简化：让用户在下标框输入。这里给一个「取 [0]」的快捷入口。
   try {
-    const { data } = await evidenceApi.query([0], false)
-    pool.addCard({ label: '取回：0', src: '手动取回', result: data })
-    ElMessage.success('已取回一份证据')
+    const indices = parseIndexRange(fetchInput.value)
+    if (!indices.length) {
+      ElMessage.warning('请输入下标')
+      return
+    }
+    const { data } = await evidenceApi.query(indices, false)
+    pool.addCard({ label: `取回：${span(indices)}`, src: '手动取回', result: data })
+    ElMessage.success(`已取回一份覆盖 ${indices.length} 个下标的证据`)
   } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '取回失败')
+    ElMessage.error(e?.response?.data?.detail || e?.message || '取回失败')
   }
 }
 
@@ -90,15 +96,20 @@ async function corruptVerify() {
     ElMessage.warning('先勾选一张卡片')
     return
   }
+  const c = cards[0]
+  const vals = c.result?.values
+  if (!vals || !vals.length) {
+    ElMessage.warning('这张卡没有可改坏的值')
+    return
+  }
   corruptRunning.value = true
   corruptResult.value = null
   try {
-    const c = cards[0]
     // ★ 只改「要发出去的那一份副本」，不动池子、更不动服务器数据。
     const items = [
       {
         indices: c.indices,
-        values: c.result.values.map((v, i) => (i === 0 ? (BigInt(v) + 1n).toString() : v)),
+        values: vals.map((v, i) => (i === 0 ? (BigInt(v) + 1n).toString() : v)),
         proof: c.result.proof,
       },
     ]
@@ -147,17 +158,23 @@ onMounted(() => syncDelta())
 
 <template>
   <div>
-    <PageHeader title="证据池" subtitle="攒证据 → 聚合成一份（跨文件）" />
+    <PageHeader title="证据池" subtitle="取证据，并可跨文件聚合成一份" />
 
     <div class="panel mb-3">
       <div class="toolbar">
-        <el-button type="primary" @click="fetchOne">取一份证据（下标 0）</el-button>
+        <el-input
+          v-model="fetchInput"
+          class="fetch-input"
+          placeholder="请输入下标"
+          clearable
+        />
+        <el-button type="primary" @click="fetchOne">取回证据</el-button>
         <el-button :disabled="!pool.selectedCards.length" @click="pool.aggregateSelected()">聚合选中</el-button>
         <el-button :disabled="!pool.selectedCards.length" :loading="batchRunning" @click="batchVerify">一次验这 {{ pool.selectedCards.length }} 份</el-button>
         <el-button :disabled="!pool.selectedCards.length" @click="runDisagg" :loading="disaggRunning">分解</el-button>
         <el-button v-if="pool.cards.length" link type="danger" @click="pool.clear()">清空</el-button>
       </div>
-      <p class="note">池子存 sessionStorage，关掉标签页就没了（刻意）。判断「作废」用 δ 指纹，不用 n。</p>
+      <p class="note">证据池存储 sessionStorage。判断是否作废用 δ 指纹，不用 n。</p>
     </div>
 
     <div v-if="!pool.cards.length">
@@ -203,9 +220,8 @@ onMounted(() => syncDelta())
     <div class="panel mt-3">
       <h4 class="sec-title">故障演练</h4>
       <div class="flex items-center gap-3">
-        <el-switch v-model="corruptToggle" />
         <span class="text-2">把要发出去的那一份副本改坏一个值再验（不动池子、更不动服务器数据）</span>
-        <el-button :disabled="!corruptToggle || !pool.selectedCards.length" :loading="corruptRunning" @click="corruptVerify">演练</el-button>
+        <el-button :disabled="!pool.selectedCards.length" :loading="corruptRunning" @click="corruptVerify">演练</el-button>
       </div>
       <div v-if="corruptResult" class="mt-2">
         <el-alert :type="corruptResult.ok ? 'error' : 'error'" :closable="false" :title="corruptResult.ok ? '意外：竟然通过了' : `被抓住：${corruptResult.code_name || corruptResult.message}`" />
@@ -228,6 +244,9 @@ onMounted(() => syncDelta())
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+.fetch-input {
+  width: 180px;
 }
 .note {
   font-size: 12px;
