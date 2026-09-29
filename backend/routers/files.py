@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager
 from ..manager import (
     Conflict,
@@ -257,6 +258,7 @@ def upload(
     # ★ 阶段耗时随响应一起回去 —— 前端那条进度条的数据来源（见 core/timing.py）。
     out = _file_public(row, mgr)
     out["timings"] = sw.payload()
+    metrics.record("upload", sw.total_ms(), sw.rows())
     return out
 
 
@@ -353,6 +355,7 @@ def _do_modify(
     # 改库是在另一个 session 里提交的，这里的 ORM 对象已经过期 ——
     # 不 refresh 的话响应里的 version / total_bytes 会退回旧值。
     db.refresh(row)
+    metrics.record("modify", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 
@@ -410,6 +413,7 @@ def _do_append(
         ),
     )
     db.refresh(row)
+    metrics.record("truncate", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 
@@ -471,6 +475,7 @@ def _do_truncate(
         ),
     )
     db.refresh(row)
+    metrics.record("append", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 

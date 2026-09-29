@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..deps import audit, current_user, get_db, get_manager, require_admin
 from ..manager import Conflict, StoreManager
 from ..models import UserRow
@@ -152,6 +153,7 @@ def nodes_retry_push(
     )
     # ★ 阶段耗时：重新算摘要 / 只补推给没跟上的那几台 / 落库收尾
     out["timings"] = sw.payload()
+    metrics.record("retry_push", sw.total_ms(), sw.rows())
     return out
 
 @router.post("/por")
@@ -187,6 +189,7 @@ def proof_of_storage(
     except Conflict as exc:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     audit_ok = out["ok"]
+    metrics.record("por", sw.total_ms(), sw.rows())
     return {
         **out,
         "checked_by": user.username,

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from core.keywrap import KeyWrapIntegrityError
 from core.timing import collect
 
+from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager, get_settings
 from ..manager import NotFound, StoreManager
 from ..models import UserRow
@@ -116,6 +117,7 @@ def login(
     mgr.remember_key(token, user.username, sk)
 
     audit(db, user.username, "login", ok=True)
+    metrics.record("login", sw.total_ms(), sw.rows())
     return {
         "token": token,
         "token_type": "bearer",
@@ -124,7 +126,6 @@ def login(
         #   本机约 0.1 秒）。单独报出来，免得被当成"后端登录慢"。
         "timings": sw.payload(),
     }
-
 
 @router.post("/logout")
 def logout(

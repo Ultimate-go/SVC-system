@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
 from ..manager import StoreManager
 from ..models import AuditRow, BlockRow, FileRow, UserRow
@@ -81,6 +82,7 @@ def create_user(
     out = user_public(user)
     # ★ 阶段耗时：生成 SM2 密钥对 + 用刚设的口令封装私钥（20 万次 PBKDF2）
     out["timings"] = sw.payload()
+    metrics.record("create_user", sw.total_ms(), sw.rows())
     return out
 
 
@@ -170,6 +172,7 @@ def patch_user(
         audit(db, actor.username, "user_patch", user.username, detail="口令已更换（私钥已重封）")
         out = user_public(user)
         out["timings"] = sw.payload()
+        metrics.record("rewrap", sw.total_ms(), sw.rows())
         return out
 
     db.commit()
@@ -316,6 +319,7 @@ def run_check(
         audit(db, admin.username, "check", ok=False, detail=str(exc))
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"自检失败：{exc}") from exc
     audit(db, admin.username, "check", ok=True)
+    metrics.record("check", sw.total_ms(), sw.rows())
     return {
         "ok": True,
         "message": "自检通过：登记表 / 节点视图 / 增量摘要与一次性承诺一致",

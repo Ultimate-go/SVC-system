@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..deps import audit, current_user, get_db, get_manager
 from ..manager import NotFound, OutOfRange, StoreManager
 from ..models import UserRow
@@ -50,6 +51,7 @@ def query_by_indices(
     )
     # ★ 阶段耗时：探测各节点 / 取回分量与凭证 / 聚合凭证 / 承诺验证 / 块哈希自检
     out["timings"] = sw.payload()
+    metrics.record("query", sw.total_ms(), sw.rows())
     return out
 
 
@@ -80,6 +82,7 @@ def query_by_files(
         ok=out["ok"],
     )
     out["timings"] = sw.payload()
+    metrics.record("query_files", sw.total_ms(), sw.rows())
     return out
 
 
@@ -119,6 +122,7 @@ def verify_batch_route(
         detail=out["message"] if not out["ok"] else f"{out['ms_batch']} ms",
     )
     out["timings"] = sw.payload()
+    metrics.record("verify_batch", sw.total_ms(), sw.rows())
     return out
 
 
@@ -166,6 +170,7 @@ def evidence_disagg(
         detail="" if out["ok"] else out["verify"]["message"],
     )
     out["timings"] = sw.payload()
+    metrics.record("disagg", sw.total_ms(), sw.rows())
     return out
 
 

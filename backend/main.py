@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from .config import Settings, default_settings
 from .db import Database
 from .manager import StoreManager
-from .routers import admin, auth, files, system, verify
+from .routers import admin, auth, files, perf, system, verify
 
 __all__ = ["create_app", "app"]
 
@@ -97,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(files.router)
     app.include_router(verify.router)
     app.include_router(system.router)
+    app.include_router(perf.router)
 
     async def _unhandled(request: Request, exc: Exception):  # pragma: no cover
         # 不把内部细节泄给客户端；调试时靠 settings.debug 打开

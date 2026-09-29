@@ -75,7 +75,7 @@ onMounted(() => {
   object-fit: cover;
   /* 半透明 —— 让下层的 CSS 光斑与网格透上来。
      不透明的视频会把这页原有的 CSS 背景整块盖掉，那就不是「加一层」而是「换一张脸」了。 */
-  opacity: 0.55;
+  opacity: 0.8;
 }
 .scrim {
   position: absolute;
@@ -84,9 +84,9 @@ onMounted(() => {
     radial-gradient(ellipse 75% 65% at 50% 42%, transparent 0%, rgba(5, 8, 15, 0.62) 100%),
     linear-gradient(
       90deg,
-      rgba(5, 8, 15, 0.88) 0%,
+      rgba(5, 8, 15, 0.5) 0%,
       rgba(5, 8, 15, 0.3) 46%,
-      rgba(5, 8, 15, 0.72) 100%
+      rgba(5, 8, 15, 0.5) 100%
     );
 }
 </style>
