@@ -8,8 +8,13 @@
  *  - layout: 可选，/api/files/{id} 的 layout[].replicas（主副本在前）
  *
  * 若传 layout，用 replicas 判主/副本（更精确）；否则退化为「在/不在」。
+ *
+ * ★ 格子的悬浮提示里会附上这一块的**分量指纹**（需要 layout 里带 element
+ *   —— 只有文件详情页的"详细"模式才会要那份数据）。对着矩阵一块块看时，
+ *   "这一格到底是什么" 比 "块号@节点" 有用得多。
  */
 import { computed } from 'vue'
+import { hexFp } from '../../utils/format'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
@@ -19,17 +24,29 @@ const props = defineProps({
 
 const nodeIds = computed(() => props.nodes.map((n) => n.node_id))
 
-// 每个全局下标 → { holder, replicas }
+// 每个全局下标 → { holder, replicas, element }
 const cellInfo = computed(() => {
   const map = {}
   if (props.layout) {
     for (const b of props.layout) {
       const reps = Array.isArray(b.replicas) ? b.replicas : [b.holder]
-      map[b.global_index] = { holder: b.holder || reps[0], replicas: reps }
+      map[b.global_index] = {
+        holder: b.holder || reps[0],
+        replicas: reps,
+        //: 公开分量（十进制）。只有"详细"模式后端才会给 —— 不给就是 undefined。
+        element: b.element,
+      }
     }
   }
   return map
 })
+
+/** 格子的悬浮提示：带分量时把指纹也写上去。 */
+function cellTip(gi, nid) {
+  const head = `块 ${gi} @ ${nid}`
+  const el = cellInfo.value[gi]?.element
+  return el ? `${head} · 分量指纹 ${hexFp(el, 16)}` : head
+}
 
 // 全局下标列表（优先 layout，否则各节点 indices 并集）
 const indices = computed(() => {
@@ -76,7 +93,7 @@ function cellState(gi, nid) {
           <tr v-for="gi in shownIndices" :key="gi">
             <td class="row-head mono">{{ gi }}</td>
             <td v-for="nid in nodeIds" :key="nid" class="cell">
-              <span class="dot" :class="cellState(gi, nid)" :title="`${gi} @ ${nid}`" />
+              <span class="dot" :class="cellState(gi, nid)" :title="cellTip(gi, nid)" />
             </td>
           </tr>
         </tbody>

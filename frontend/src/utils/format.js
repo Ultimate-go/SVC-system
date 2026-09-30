@@ -10,17 +10,43 @@
  * ★ 本模块是纯函数：不 import Vue、不碰 DOM，否则 Node 测试挂。
  */
 
-/** 把十进制字符串转成十六进制指纹（默认前 8 位）。 */
-export function hexFp(value, len = 8) {
+/**
+ * 十进制字符串 → 十六进制（内部走 BigInt，**绝不经过 Number**）。
+ *
+ * ★ 补成**偶数位**（按字节对齐）：256 位的分量偶尔会少一位 —— 那不是丢了数据，
+ *   只是最高位那个半字节是 0、被 toString(16) 省掉了。补上它，界面上写
+ *   "64 位十六进制"就与 l=256 真正对得上（否则偶尔会出现 63 位，看起来像被截了）。
+ * ★ 短串（hexFp）与完整串（hexFull）都走这里，所以两者永远是**同一串的前缀**关系。
+ */
+function toHex(value) {
   const s = String(value ?? '')
-  if (!s) return '—'
+  if (!s) return ''
   try {
     const hex = BigInt(s).toString(16)
-    return hex.length <= len ? hex : hex.slice(0, len)
+    return hex.length % 2 ? '0' + hex : hex
   } catch {
-    // 不是整数（比如已经是字符串型摘要）就原样截断
-    return s.slice(0, len)
+    // 不是整数（比如已经是字符串型摘要）就原样返回，下面按字符串截
+    return s
   }
+}
+
+/** 把十进制字符串转成十六进制指纹（默认前 8 位）。 */
+export function hexFp(value, len = 8) {
+  const hex = toHex(value)
+  if (!hex) return '—'
+  return hex.length <= len ? hex : hex.slice(0, len)
+}
+
+/** 十进制字符串 → **完整**十六进制（悬浮提示用）。
+ *
+ * ★ 与 hexFp 同一个坑：上千位的十进制一过 Number() 就丢精度，必须走 BigInt。
+ * ★ 悬浮提示里给**完整十六进制**而不是完整十进制：十进制 300 多位在提示框里
+ *   换不了行、一眼也看不出头尾；十六进制短得多，而且与界面上那截前缀是
+ *   **同一个字符串**的前缀关系 —— "看到的前 8 位就是完整值的开头 8 位"，
+ *   人能把两边对上号。
+ */
+export function hexFull(value) {
+  return toHex(value)
 }
 
 /** 十进制字符串的前若干位，给 tooltip 用。 */

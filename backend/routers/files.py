@@ -506,14 +506,35 @@ def list_files(
 @router.get("/{file_id}")
 def file_detail(
     file_id: int,
+    elements: int = 0,
     user: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
+    """文件详情 —— 含每一块的账目（下标 / 持有者 / 副本 / 明文长度）。
+
+    :param elements: 传 1 时，每一块额外带上 ``element``：该块的**公开分量**
+        （群元素，十进制字符串）。界面上的「详细」模式用它显示"这一块的指纹"，
+        悬浮看完整十六进制。
+
+        ★ 为什么默认**不给**：1024 块的文件会凭空多出三百多 KB 的响应，
+          而「简略」模式根本不显示这些数。
+        ★ 给这个量**不构成新的泄露**：分量本来就是公开的（"验证不受限"，
+          ``/api/query`` 把它给任何登录用户）—— 验证者比的就是它。
+          反过来说，块密钥密文（``key_ct``）**任何模式都不给**，
+          那才是"只有所有者能解密"的根。
+    """
     row = _file_or_404(db, file_id)
     item = _file_public(row, mgr)
     item["can_decrypt"] = can_decrypt(user, row)
     item["is_mine"] = row.owner == user.username
+    blocks = list(
+        db.execute(
+            select(BlockRow)
+            .where(BlockRow.file_id == file_id)
+            .order_by(BlockRow.block_idx)
+        ).scalars()
+    )
     item["layout"] = [
         {
             "global_index": b.global_index,
@@ -523,12 +544,9 @@ def file_detail(
             # 所以界面上"这一块存在哪几台"在开副本之前传的文件上也不会显示错。
             "replicas": json.loads(b.replicas or "[]") or [b.holder],
             "plain_len": b.plain_len,
+            **({"element": b.element} if elements else {}),
         }
-        for b in db.execute(
-            select(BlockRow)
-            .where(BlockRow.file_id == file_id)
-            .order_by(BlockRow.block_idx)
-        ).scalars()
+        for b in blocks
     ]
     return item
 

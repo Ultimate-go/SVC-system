@@ -31,6 +31,8 @@ const ICONS = {
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 11v6M12 7h.01',
   key: 'M15 7a5 5 0 1 0-5.8 5.8L8 14l-1 1-1-1-1 1v2h2l2-2 1.2 1.2A5 5 0 0 0 15 7zM15 9h.01',
   back: 'M15 18l-6-6 6-6',
+  chevronLeft: 'M15 18l-6-6 6-6',
+  chevronRight: 'M9 18l6-6-6-6',
   copy: 'M8 8h12v12H8zM4 16V4h12',
   upload: 'M12 16V4M7 9l5-5 5 5M4 20h16',
   download: 'M12 4v12M7 11l5 5 5-5M4 20h16',
