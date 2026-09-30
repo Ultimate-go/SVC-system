@@ -8,19 +8,27 @@
  *   只填所有者 = 查他名下所有文件；只填文件标识 = 查所有叫这个名字的文件；
  *   两个都填 = 精确到那一个。命中的文件一起取回，天然合成**一份**证据。
  * - 「按全局下标查登记表」。
+ * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
+ *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
 import { usePoolStore } from '../../../stores/pool'
+import { useThemeStore } from '../../../stores/theme'
 import { span } from '../../../utils/format'
 import { parseIndexRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
+import DetailToggle from '../../../components/common/DetailToggle.vue'
 import VerifyResult from '../../../components/security/VerifyResult.vue'
+import BlockFingerprints from '../../../components/security/BlockFingerprints.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 
 const pool = usePoolStore()
+const theme = useThemeStore()
+/** 详细模式：把逐块分量铺出来（简略模式只给结论）。 */
+const detailed = computed(() => theme.detailMode === 'detail')
 
 const indicesInput = ref('0-3, 8')
 const allowPartial = ref(false)
@@ -153,6 +161,27 @@ const pickedBlocks = computed(() =>
     .reduce((n, f) => n + (f.block_count || 0), 0),
 )
 
+/** 勾中的那些文件 —— 「当前文件与块数」那一块用。 */
+const pickedFiles = computed(() =>
+  fileMatches.value.filter((f) => pickedIds.value.includes(f.id)),
+)
+
+/**
+ * 「当前文件与块数」（按全局下标验证那边）。
+ *
+ * ★ 一个证据可以横跨多个文件（设计 B），所以这是**真列表**而不是单个值：
+ *   逐文件统计这份证据盖住了它几块。数据源是响应里的 refs
+ *   （每个全局下标 → 哪个文件的第几块），拿不到归属时如实说“没有归属信息”。
+ */
+const resultFiles = computed(() => {
+  const map = new Map()
+  for (const r of result.value?.refs || []) {
+    const name = `${r.owner} / ${r.file_key}`
+    map.set(name, (map.get(name) || 0) + 1)
+  }
+  return [...map.entries()].map(([name, blocks]) => ({ name, blocks }))
+})
+
 /** 勾中的这些取一份证据并验证（**只有这一步会真的去取数据**）。 */
 async function verifyPicked() {
   const picked = fileMatches.value.filter((f) => pickedIds.value.includes(f.id))
@@ -214,11 +243,38 @@ async function runRegistry() {
 
       <div v-if="result" class="mt-3">
         <VerifyResult :result="result" />
+        <!-- 当前文件与块数：一份证据可以横跨多个文件（设计 B），所以逐文件列 -->
+        <div class="cur-file">
+          <span class="cur-lbl">当前文件与块数</span>
+          <template v-if="resultFiles.length">
+            <span v-for="f in resultFiles" :key="f.name" class="cur-item mono">
+              {{ f.name }}<span class="text-3"> · 本次覆盖 {{ f.blocks }} 块</span>
+            </span>
+          </template>
+          <span v-else class="cur-item text-3">这份证据没有文件归属信息（只按全局下标取的）</span>
+          <span class="cur-total mono">合计 {{ result.indices?.length || 0 }} 块</span>
+        </div>
         <div v-if="result.missing?.length" class="missing">
           <el-alert type="warning" :closable="false" :title="`这份结论没覆盖：${result.missing.join(', ')}`" />
         </div>
         <div v-if="result.proof" class="mono text-2 mt-2" style="font-size: 12px">
           证据 {{ result.proof.size_bytes }} 字节（与打开多少块无关）
+        </div>
+        <!-- 逐块分量：详细模式铺出来，简略模式只说"点详细可看"。 -->
+        <div v-if="result.values?.length" class="fp-block">
+          <div class="fp-head">
+            <span class="text-2" style="font-size: 12px">
+              这一份覆盖 {{ result.indices?.length || 0 }} 个下标
+            </span>
+            <DetailToggle />
+          </div>
+          <BlockFingerprints
+            v-if="detailed"
+            :indices="result.indices || []"
+            :values="result.values || []"
+            :refs="result.refs || []"
+          />
+          <p v-else class="note">点「详细」逐块看分量指纹（悬浮任意指纹显示完整十六进制）。</p>
         </div>
         <div v-if="result.refs?.length" class="refs mt-2">
           <div v-for="r in result.refs" :key="r.global_index" class="ref-row">
@@ -271,6 +327,15 @@ async function runRegistry() {
           >清空选择</el-button>
         </div>
 
+        <!-- 当前文件与块数：勾中的每一个 + 合计（未勾时整块不出现） -->
+        <div v-if="pickedFiles.length" class="cur-file">
+          <span class="cur-lbl">当前文件与块数</span>
+          <span v-for="f in pickedFiles" :key="f.id" class="cur-item mono">
+            {{ f.owner }} / {{ f.file_key }}<span class="text-3"> · {{ f.block_count }} 块</span>
+          </span>
+          <span class="cur-total mono">合计 {{ pickedBlocks }} 块</span>
+        </div>
+
         <div class="match-list">
           <div v-for="m in fileMatches" :key="m.id" class="match-row">
             <el-checkbox
@@ -298,6 +363,12 @@ async function runRegistry() {
         <div class="mono text-2 mt-2" style="font-size: 12px">
           一份证据覆盖 {{ fileQueryResult.indices?.length }} 块 · {{ fileQueryResult.proof?.size_bytes }} 字节
         </div>
+        <BlockFingerprints
+          v-if="detailed"
+          :indices="fileQueryResult.indices || []"
+          :values="fileQueryResult.values || []"
+          :refs="fileQueryResult.refs || []"
+        />
       </div>
     </div>
 
@@ -366,6 +437,42 @@ async function runRegistry() {
 }
 .missing {
   margin-top: 10px;
+}
+/* 「当前文件与块数」：一横条标签，文件多了自动换行。 */
+.cur-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  font-size: 12px;
+}
+.cur-lbl {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.cur-item {
+  color: var(--text-1);
+}
+.cur-total {
+  margin-left: auto;
+  color: var(--text-3);
+}
+.fp-block {
+  margin-top: 10px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.fp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 .refs {
   display: flex;

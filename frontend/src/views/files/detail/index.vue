@@ -4,17 +4,22 @@
  *
  * - 文件元信息 + 版本 + delta_n / delta_fp。
  * - 块分布矩阵（layout[].replicas 标主/副本）。
+ * - **块明细表**：每块的公开分量（指纹）—— 跟着「简略/详细」开关
+ *   决定要不要铺出来；详细模式会把每块的分量一起要回来（`?elements=1`）。
  * - 改块 / 追加 / 截断（三个写操作都显示 timings）。
  * - 解密预览（data_hex → hexToText，用 hasBadBytes 区分残缺）。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
 import { devicesApi } from '../../../api/devices'
 import { useAuthStore } from '../../../stores/auth'
+import { useThemeStore } from '../../../stores/theme'
 import { span, fmtBytes, hexFp, decodeBlockHex, hasBadBytes } from '../../../utils/format'
 import PageHeader from '../../../components/common/PageHeader.vue'
+import DetailToggle from '../../../components/common/DetailToggle.vue'
+import HashText from '../../../components/common/HashText.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import LockTag from '../../../components/security/LockTag.vue'
@@ -22,12 +27,23 @@ import LockTag from '../../../components/security/LockTag.vue'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const theme = useThemeStore()
 
 const id = computed(() => route.params.id)
 const loading = ref(false)
 const error = ref('')
 const file = ref(null)
 const nodes = ref([])
+
+/**
+ * 「简略 / 详细」—— 详细模式要多要一份数据：每块的分量（`?elements=1`）。
+ *
+ * ★ 所以它一变就要**重新拉一次详情**，而不是只切 `v-if`：简略模式那次
+ *   响应里**根本没有** element 字段（后端按参数决定给不给），
+ *   光切 v-if 会看到一整列空白。
+ */
+const detailed = computed(() => theme.detailMode === 'detail')
+watch(detailed, () => load())
 
 // 写操作表单
 const activeOp = ref('modify')
@@ -62,7 +78,7 @@ async function load() {
   error.value = ''
   try {
     const [{ data: f }, { data: n }] = await Promise.all([
-      filesApi.detail(id.value),
+      filesApi.detail(id.value, detailed.value),
       devicesApi.nodes(),
     ])
     file.value = f
@@ -175,6 +191,51 @@ onMounted(load)
         <BlockMatrix :nodes="nodes" :layout="file.layout" />
       </div>
 
+      <!-- 块明细：每一块的**公开分量**就是它的指纹。 -->
+      <div class="panel mb-3">
+        <div class="sec-head">
+          <h4 class="sec-title" style="margin-bottom: 0">块明细（每块的公开分量）</h4>
+          <DetailToggle />
+        </div>
+        <p class="note">
+          每一块的<b>分量</b>就是它的指纹：验证时比的就是它（「块哈希层」比的是
+          [密文与分量对不对得上]，所以缺一块、换一块都会在这里露出来）。
+          鼠标停在任意指纹上会显示<b>完整十六进制</b>。
+        </p>
+        <el-table :data="file.layout || []" size="small" border max-height="360">
+          <el-table-column prop="block_idx" label="块号" width="70" align="center" />
+          <el-table-column label="全局下标" width="90" align="center">
+            <template #default="{ row }"><span class="mono">{{ row.global_index }}</span></template>
+          </el-table-column>
+          <el-table-column v-if="detailed" label="分量指纹（十六进制 · 悬浮看完整）" min-width="240">
+            <template #default="{ row }">
+              <HashText v-if="row.element" :value="row.element" :len="24" />
+              <span v-else class="text-3">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="明文长度" width="100" align="center">
+            <template #default="{ row }"><span class="mono">{{ row.plain_len }} B</span></template>
+          </el-table-column>
+          <el-table-column label="存在哪几台（主副本在前）" min-width="210">
+            <template #default="{ row }">
+              <el-tag
+                v-for="(r, i) in row.replicas || [row.holder]"
+                :key="r"
+                :type="i === 0 ? 'success' : 'info'"
+                size="small"
+                effect="plain"
+                class="rep"
+              >{{ r }}{{ i === 0 ? ' · 主' : '' }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+        <p v-if="!detailed" class="note mt-2" style="margin-bottom: 0">
+          现在是最简略态：只列块号、下标、明文长度与所在节点。点右上角「详细」
+          可以看到每块的分量指纹（悬浮看完整十六进制）—— 那一次会多问后端要一份
+          分量数据，所以切换时会重新拉一次详情。
+        </p>
+      </div>
+
       <div class="panel mb-3">
         <h4 class="sec-title">写操作（只有所有者能改）</h4>
         <el-tabs v-model="activeOp">
@@ -250,6 +311,17 @@ onMounted(load)
   font-size: 14px;
   font-weight: 500;
   margin-bottom: 14px;
+}
+.sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rep {
+  margin-right: 6px;
 }
 .meta {
   display: flex;

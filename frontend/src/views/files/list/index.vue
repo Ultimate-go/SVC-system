@@ -183,7 +183,7 @@ async function addToPool(row) {
     try {
       await ElMessageBox.confirm(
         `这 ${indices.length} 块已经在池子里了。\n\n` +
-          '继续只会用刚取到的证据刷新那张卡，不会新增。',
+          '继续只会用刚取到的证据刷新卡片，不会新增。',
         '这份已在池子里',
         { type: 'warning', confirmButtonText: '刷新那一张', cancelButtonText: '取消' },
       )
@@ -303,7 +303,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="文件与块" subtitle="谁都能验证；只有所有者能解密" />
+    <PageHeader title="文件与块" subtitle="所有人可验证；持有者可解密" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>

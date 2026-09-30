@@ -49,6 +49,20 @@ const isDark = computed(() => theme.theme === 'dark')
         </div>
         <el-switch :model-value="theme.motion" active-text="开" inactive-text="关" @change="(v) => theme.setMotion(v)" />
       </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="name">哈希详略</div>
+          <div class="desc">
+            详细 = 把每一块的分量指纹铺出来（停在指纹上显示完整十六进制）；
+            简略只给块号、下标与结论。文件详情 / 证据池 / 完整性验证三页共用这一个偏好
+          </div>
+        </div>
+        <el-radio-group :model-value="theme.detailMode" @change="(v) => theme.setDetail(v)">
+          <el-radio-button value="brief">简略</el-radio-button>
+          <el-radio-button value="detail">详细</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
   </div>
 </template>

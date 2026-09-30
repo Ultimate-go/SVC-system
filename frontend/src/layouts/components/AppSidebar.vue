@@ -5,6 +5,7 @@
  * ★ 前端不做安全判断：菜单隐藏只是「看不见」，真正的权限在 meta + 后端。
  *   普通用户看不到管理员菜单项（requiresAdmin）。
  */
+import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePermission } from '../../composables/usePermission'
 import Icon from '../../components/icons/Icon.vue'
@@ -13,7 +14,35 @@ const { isAdmin } = usePermission()
 const route = useRoute()
 const router = useRouter()
 
+/**
+ * 侧栏开合：**点击**切换（不跟随鼠标悬停），并记住上次的选择。
+ *
+ * ★ 只存 localStorage 一个键，不动后端、也不进「界面偏好」页 ——
+ *   它是个手感开关，不是主题的一部分（那个页只管主题/密度/动效/哈希详略）。
+ * ★ 默认收起（图标轨）：内容区默认宽 160px，要看菜单名就点一下箭头。
+ */
+const OPEN_KEY = 'vds_sidebar_open'
+const open = ref(localStorage.getItem(OPEN_KEY) === '1')
+function toggle() {
+  open.value = !open.value
+  localStorage.setItem(OPEN_KEY, open.value ? '1' : '0')
+}
+
+/*
+ * 菜单顺序：**核心在上、管理在下**（日常干活的那几页先够得着，
+ * 管理类页面进去的频次低）。
+ * ★ 数组顺序就是界面顺序 —— 这里换位不需要动 routes.js。
+ */
 const groups = [
+  {
+    label: '核心',
+    items: [
+      { path: '/files', name: 'files', icon: 'file', label: '文件与块' },
+      { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },
+      { path: '/evidence/pool', name: 'pool', icon: 'list', label: '证据池' },
+      { path: '/devices', name: 'devices', icon: 'server', label: '设备' },
+    ],
+  },
   {
     label: '管理',
     adminOnly: true,
@@ -22,15 +51,6 @@ const groups = [
       { path: '/users', name: 'users', icon: 'users', label: '用户管理' },
       { path: '/audit', name: 'audit', icon: 'activity', label: '审计流水' },
       { path: '/perf', name: 'perf', icon: 'chart', label: '性能' },
-    ],
-  },
-  {
-    label: '核心',
-    items: [
-      { path: '/files', name: 'files', icon: 'file', label: '文件与块' },
-      { path: '/evidence/pool', name: 'pool', icon: 'list', label: '证据池' },
-      { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },
-      { path: '/devices', name: 'devices', icon: 'server', label: '设备' },
     ],
   },
 ]
@@ -49,25 +69,40 @@ function go(item) {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <!--
+    侧栏默认是一条宽的「图标轨」（只有图标 + 分组细线），点右上角箭头展开。
+    ★ 开合 = **点击**（不跟随鼠标悬停），并记住上次选择。
+    ★ 它**在流里正常占位**：展开时把右侧内容推过去，不会盖住内容。
+    ★ 每一格都带 title —— 收起时鼠标停上去能看全名字（不用等展开）。
+  -->
+  <aside class="sidebar" :class="{ open }">
     <div class="brand">
       <span class="brand-mark">VDS</span>
       <span class="brand-name">可验证分布式存储</span>
+      <button
+        class="rail-toggle"
+        :title="open ? '收起侧栏' : '展开侧栏'"
+        :aria-expanded="open ? 'true' : 'false'"
+        @click="toggle"
+      >
+        <Icon :name="open ? 'chevronLeft' : 'chevronRight'" :size="16" />
+      </button>
     </div>
 
     <nav class="nav">
       <template v-for="g in groups" :key="g.label">
         <template v-if="!g.adminOnly || isAdmin">
-          <div class="nav-label">{{ g.label }}</div>
+          <div class="nav-label"><span class="nav-label-txt">{{ g.label }}</span></div>
           <button
             v-for="item in g.items"
             :key="item.path"
             class="nav-item"
             :class="{ active: isActive(item) }"
+            :title="item.label"
             @click="go(item)"
           >
             <Icon :name="item.icon" :size="16" />
-            <span>{{ item.label }}</span>
+            <span class="nav-item-txt">{{ item.label }}</span>
           </button>
         </template>
       </template>
@@ -75,26 +110,34 @@ function go(item) {
 
     <div class="sidebar-foot mono">
       <Icon name="pulse" :size="13" />
-      <span>全系统一条向量</span>
+      <span class="nav-item-txt">全系统一条向量</span>
     </div>
   </aside>
 </template>
 
 <style scoped>
+/* 侧栏：**在流里正常占位**（不是覆盖层）。
+   收起 = icon-rail，展开 = sidebar-w，由 .open 驱动（点击切换）。 */
 .sidebar {
-  width: var(--sidebar-w);
+  width: var(--sidebar-rail);
   height: 100%;
-  background: var(--bg-panel);
-  border-right: 1px solid var(--line);
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  transition: width 0.2s ease;
 }
+.sidebar.open {
+  width: var(--sidebar-w);
+}
+
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 18px 16px;
+  padding: 16px 12px;
   border-bottom: 1px solid var(--line);
 }
 .brand-mark {
@@ -103,14 +146,38 @@ function go(item) {
   color: var(--accent);
   font-size: 18px;
   letter-spacing: 0.05em;
+  flex-shrink: 0;
 }
 .brand-name {
   font-size: 13px;
   color: var(--text-2);
 }
+
+/* 右上角那个开合箭头 —— 整个侧栏唯一的「机关」，必须一直看得见。 */
+.rail-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.rail-toggle:hover {
+  background: rgba(120, 190, 255, 0.08);
+  color: var(--text-1);
+}
+
 .nav {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px 8px;
 }
 .nav-label {
@@ -136,7 +203,7 @@ function go(item) {
   border-radius: var(--radius-sm);
   text-align: left;
   position: relative;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, padding 0.2s ease;
 }
 .nav-item:hover {
   background: rgba(120, 190, 255, 0.05);
@@ -164,5 +231,52 @@ function go(item) {
   border-top: 1px solid var(--line);
   font-size: 11px;
   color: var(--text-3);
+}
+
+/* 文字件：收起时收到 0 宽并透明（**不是 display:none** —— 那样子元素会从流里
+   消失，图标没法稳定居中，展开时也会"跳"一下）。
+   ★ 用 max-width 而不是 width：可过渡，且不会和 flex 争宽度。
+   ★ 必须 display:inline-block：inline 元素上 width/max-width 是不生效的。 */
+.brand-name,
+.nav-label-txt,
+.nav-item-txt {
+  display: inline-block;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 180px;
+  transition: opacity 0.15s ease, max-width 0.2s ease;
+}
+
+/* ---------- 收起态（.sidebar 上没有 .open）：只剩图标，分组标题变一条细线 ---------- */
+.sidebar:not(.open) .brand {
+  /* 88 - 16 = 72 要装下 VDS(约 36) + 箭头(26)：内边距收到 8，间距归零 */
+  gap: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.sidebar:not(.open) .nav-item {
+  gap: 0;
+  /* 图标落在 88px 轨道正中：.nav 内边距 8 + 这里 32 + 图标半宽 8 = 44 = 88/2 */
+  padding-left: 32px;
+  padding-right: 0;
+}
+.sidebar:not(.open) .sidebar-foot {
+  gap: 0;
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+.sidebar:not(.open) .brand-name,
+.sidebar:not(.open) .nav-label-txt,
+.sidebar:not(.open) .nav-item-txt {
+  max-width: 0;
+  opacity: 0;
+}
+.sidebar:not(.open) .nav-label {
+  height: 1px;
+  padding: 0;
+  margin: 12px 16px 10px;
+  background: var(--line);
+  overflow: hidden;
 }
 </style>
