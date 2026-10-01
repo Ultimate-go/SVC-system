@@ -8,10 +8,8 @@
 /** 演示账号（口令统一 vds12345），登录页一键填充用。 */
 export const DEMO_ACCOUNTS = [
   { username: 'admin', display: '管理员', hint: '能看审计与用户管理，但解不开别人的文件' },
-  { username: 'zhangsan', display: '张三', hint: '4 份病历本的所有者' },
-  { username: 'nurse', display: '内科护士', hint: '能验证别人的文件，但解不开' },
-  { username: 'ortho', display: '骨科医生', hint: '同上' },
-  { username: 'wangwu', display: '王五', hint: '只有一份会议纪要' },
+  { username: 'zhangsan', display: '张三', hint: '普通用户；上传自己的文件，能验证别人的、但解不开' },
+  { username: 'wangwu', display: '王五', hint: '另一个普通用户（演示“验证不受限、解密受限”）' },
 ]
 
 export const DEMO_PASSWORD = 'vds12345'

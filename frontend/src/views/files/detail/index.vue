@@ -106,6 +106,50 @@ async function doModify() {
   }
 }
 
+/** 那一条块账目（拿它的明文长度给确认框看）—— 简略模式下也有。 */
+const zeroTarget = computed(() =>
+  (file.value?.layout || []).find((b) => b.block_idx === modifyForm.blockIdx),
+)
+
+/**
+ * 清零：把这一块换成**等长的全 0 字节**。
+ *
+ * ★ 它不是删除，是**改块**（服务端的 ``op = zero`` 走的就是 ``mod``）：
+ *   块仍然在（下标不变、仍占存储、总块数不变），完整性照样验证通过，
+ *   只是内容变了、版本号 +1。所以这里的文案必须说清“不是删掉它”，
+ *   否则用户会以为清完那一块就不在了。
+ */
+async function doZero() {
+  const idx = modifyForm.blockIdx
+  const len = zeroTarget.value?.plain_len
+  try {
+    await ElMessageBox.confirm(
+      `把第 ${idx} 块的内容换成等长的全 0${len ? `（${len} 字节）` : ''}。\n\n` +
+        '这一块仍然在：全局下标不变、仍占节点存储、总块数也不变，' +
+        '事后完整性照样能验证通过。\n' +
+        '只有你自己（所有者）解密时看得到那一串 0；块密钥会换成新的，' +
+        '长度保持不变。\n\n原来的内容不可恢复，版本号 +1。',
+      '清零这一块',
+      { type: 'warning', confirmButtonText: '清零', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  writeRunning.value = true
+  writeTimings.value = null
+  try {
+    const { data } = await filesApi.zero(id.value, idx)
+    writeTimings.value = data.timings
+    ElMessage.success(
+      `已清零第 ${idx} 块（${data.zeroed?.bytes ?? '?'} 字节全 0，长度不变），现在是第 ${data.version} 版`,
+    )
+    await load()
+  } catch {
+  } finally {
+    writeRunning.value = false
+  }
+}
+
 async function doAppend() {
   const body = { op: 'append', data_b64: toB64(appendText.value) }
   writeRunning.value = true
@@ -198,8 +242,9 @@ onMounted(load)
           <DetailToggle />
         </div>
         <p class="note">
-          每一块的<b>分量</b>就是它的指纹：验证时比的就是它（「块哈希层」比的是
-          [密文与分量对不对得上]，所以缺一块、换一块都会在这里露出来）。
+          每一块的<b>分量</b>就是它的指纹：验证比的就是它 —— 而分量是验证方
+          <b>自己从这串密文算</b>出来的（对方替你声明的那个不作数），
+          所以缺一块、换一块都会在这里露出来。
           鼠标停在任意指纹上会显示<b>完整十六进制</b>。
         </p>
         <el-table :data="file.layout || []" size="small" border max-height="360">
@@ -247,7 +292,14 @@ onMounted(load)
               </div>
               <el-input v-model="modifyForm.text" type="textarea" :rows="3" placeholder="新内容（会重新加密、换密钥）" />
               <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doModify">改块</el-button>
+              <el-button :disabled="!isMine" :loading="writeRunning" @click="doZero">清零</el-button>
             </div>
+            <p class="text-3" style="font-size: 12px">
+              「清零」把上面这个块号的内容换成<strong>等长的全 0 字节</strong>：它走的是改块
+              （<span class="mono">op = mod</span>）而不是删除，所以块仍在、下标不变、总块数不变，
+              完整性照样验证通过 —— 只有你自己解密时看得到那一串 0。
+              想把某块从向量里真的去掉，只能删<strong>末尾</strong>那一段（见「截断」）。
+            </p>
           </el-tab-pane>
           <el-tab-pane label="追加" name="append">
             <div class="write-form">

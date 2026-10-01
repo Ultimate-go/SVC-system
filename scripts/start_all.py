@@ -215,6 +215,43 @@ def alive(port: int, host: str = "127.0.0.1", timeout: float = 0.4) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+#: 让 PowerShell 的**输出编码**固定成 UTF-8。
+#:
+#: ★★ 这行是实机踩出来的（报错长这样：先 ``UnicodeDecodeError: 'gbk' codec
+#:   can't decode byte 0xa8``，紧接着 ``AttributeError: 'NoneType' object has
+#:   no attribute 'splitlines'``）。成因：``subprocess.run(..., text=True)``
+#:   按**本机 locale**（中文 Windows = GBK）解码子进程输出，而
+#:   :func:`process_table` 要列**全机进程** —— 只要机器上**任何一个无关进程**
+#:   的命令行里含 UTF-8 中文（那串字节 GBK 解不了），解码线程就抛异常、
+#:   ``stdout`` 变成 ``None``，启动器当场崩在 ``[0/4] 重置``：
+#:   **一个文件都没删**，画面看起来却像"重置功能坏了"。
+#:
+#:   两头都要显式 UTF-8：这里让 PowerShell 按 UTF-8 输出，解码端也写死
+#:   ``encoding="utf-8"``（另加 ``errors="replace"`` —— 真有不干净字节时
+#:   只坏那一行，不再炸掉整条停止/重置流程）。
+_PS_UTF8 = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+
+
+def run_powershell(ps: str, *, timeout: float = 30) -> str:
+    """跑一段 PowerShell，**按 UTF-8** 拿回文本；跑不动就返回空串。
+
+    绝不抛异常、绝不返回 ``None`` —— 调用方拿到空串只会"什么都找不到"，
+    而那比崩在半路安全得多（理由见 :data:`_PS_UTF8`）。
+    """
+    try:
+        cp = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", _PS_UTF8 + ps],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return cp.stdout or ""
+
+
 def listening_map() -> dict[int, list[int]]:
     """**一次**问出所有正在监听的端口 → 是谁在听。
 
@@ -229,15 +266,7 @@ def listening_map() -> dict[int, list[int]]:
         "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | "
         "ForEach-Object { \"$($_.LocalPort) $($_.OwningProcess)\" }"
     )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout
-    except (subprocess.TimeoutExpired, OSError):
-        return {}
+    out = run_powershell(ps)
     table: dict[int, list[int]] = {}
     for line in out.splitlines():
         parts = line.split()
@@ -309,15 +338,7 @@ def process_table(name_like: str | None = "%python%") -> list[tuple[int, str]]:
             "Get-CimInstance Win32_Process | "
             "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
         )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    out = run_powershell(ps)
     rows: list[tuple[int, str]] = []
     for line in out.splitlines():
         head, _, cmd = line.partition("\t")
@@ -610,6 +631,11 @@ def stop_everything(
         for pid in got:
             if cmds is None:
                 cmds = process_cmdlines()
+                if not cmds:
+                    # 机器上总有进程，所以"空表"只有一个含义：进程表**没读到**。
+                    # 不吭声的话，下面会把每一个都当成"陌生程序"跳过 ——
+                    # 画面显示"停完了"，实际一个都没停（这个坑真的踩过）。
+                    say("  ★ 读不到进程表（PowerShell 调用失败）—— 这次停不掉任何东西。")
             if not ours_like(cmds.get(pid, "")):
                 # 命令行里认不出本系统的特征 —— 不动它。宁可留个孤儿，
                 # 也不要错杀一个陌生进程（那个赔不起）。

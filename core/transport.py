@@ -98,19 +98,23 @@ class NodeTransport(Protocol):
 
     def retrieve(
         self, node_id: str, Q: Sequence[int]
-    ) -> tuple[tuple[int, ...], Opening, tuple[bytes, ...]]:
-        """向一台节点索取 ``Q`` 的内容、证据、以及对应的密文段。
+    ) -> tuple[Opening, tuple[bytes, ...]]:
+        """向一台节点索取 ``Q`` 的**内容**与一份子向量证据。
 
-        返回 ``(F_Q, π_Q, 密文段)``，三者按 ``Q`` 的顺序一一对应。
-        把密文一起带回来是有意的：客户端的块哈希校验（``SM3(密文) == 分量``）
-        需要它，分两次请求纯属浪费。
+        返回 ``(π_Q, 密文段)``，两者按 ``Q`` 的顺序一一对应 —— 对应论文里
+        ``StrgNode.Retrieve`` 的 ``(F_Q, π_Q)``：在本方案里**交付给对方的东西
+        就是密文段**，所以检索只回这两样。
+
+        ★ 刻意**不回**节点声称的向量分量：分量由调用方**自己从密文段算**。
+        这样"承诺的分量"与"实际交付的字节"之间没有可声明的自由度 —— 节点
+        换了密文，调用方算出的值就跟着变，承诺验证必然不过。
         """
 
     def pos_prove(self, node_id: str, indices: Sequence[int]) -> "PoSProof":
         """让一台节点回答一次**存储证明**（PoR）挑战，只回它自己那一份。
 
         与 :meth:`retrieve` 的区别不只是“少返回密文”：``retrieve`` 是**检索**，
-        要顺手把密文带回来给客户端做块哈希校验；而 PoR 的目的恰恰是
+        要把密文带回来让调用方自己算出分量（那是验证的唯一依据）；而 PoR 的目的恰恰是
         **不下载任何内容**就确认数据还在。
 
         :param indices: 挑战点名的下标集合 ``r``。节点只答 ``Q = I ∩ r``
@@ -289,19 +293,19 @@ class LocalTransport:
 
     def retrieve(
         self, node_id: str, Q: Sequence[int]
-    ) -> tuple[tuple[int, ...], Opening, tuple[bytes, ...]]:
+    ) -> tuple[Opening, tuple[bytes, ...]]:
         state = self.states.get(node_id)
         if state is None:
             raise TransportError(f"节点 {node_id} 不存在")
         want = tuple(int(i) for i in Q)
-        F_Q, pi_Q = state.retrieve(want)
+        _F_Q, pi_Q = state.retrieve(want)
         try:
             cts = tuple(state.blobs[i] for i in want)
         except KeyError as exc:
             raise TransportError(
                 f"{node_id} 声称持有下标 {exc.args[0]}，但没有对应的密文"
             ) from exc
-        return F_Q, pi_Q, cts
+        return pi_Q, cts
 
     def pos_prove(self, node_id: str, indices: Sequence[int]) -> PoSProof:
         """本地模式下直接跑 :func:`vds.pos.pos_prove`。

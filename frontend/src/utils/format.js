@@ -88,26 +88,28 @@ export function span(indices) {
 }
 
 /**
- * 验证结果的标题 —— 失败时必须说清是哪一层没过。
- * 两层各管一段：承诺层管「分量对不对」，块哈希层管「密文与分量是不是还对得上」。
+ * 验证结果的标题 —— 失败时必须带上环节名。
+ *
+ * 现在只剩**一个**结论（见 core/store.py 的模块说明）：整体失败必然就是
+ * 承诺验证没过，所以环节名一定有，不用再分"哪一层"。
  */
 export function verifyFailTitle(d) {
   if (!d) return ''
   if (d.ok) return '验证通过'
-  if (!d.verify || !d.verify.ok) {
-    return `验证失败 · ${d.verify?.code_name || '未知环节'}`
+  if (d.verify && !d.verify.ok) {
+    return `验证失败 · ${d.verify.code_name || '未知环节'}`
   }
-  return '验证失败 · 块哈希层（承诺层是过的）'
+  // 兜底（旧数据：结论说失败、承诺却说通过）—— 照样不能显示成「验证失败 · OK」。
+  return '验证失败'
 }
 
 /** 失败时的副标题（人话），与 verifyFailTitle 配套。 */
 export function verifyFailDetail(d) {
   if (!d) return ''
   if (d.ok) return d.verify?.message || ''
-  // 整体失败：先看是不是承诺层自己没过；那才有环节名可报。
   if (d.verify && !d.verify.ok) return d.verify.message
-  // 承诺层过了 —— 那是块哈希层抓的（密文被换、分量没动）。
-  return '密文与它声明的分量对不上 —— 分量没动、内容被换过。这一层专门抓这种情况。'
+  // 没有环节名可报（旧数据）：绝不搬「验证通过」来当副标题。
+  return '没有环节名 —— 重新取一次证据再看。'
 }
 
 /** 十六进制的密文片段（后端给的是 hex 字符串）。 */

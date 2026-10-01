@@ -90,7 +90,7 @@ export const SCALE_LAWS = [
   {
     what: 'l = 64 → 128 → 256（n = 64 的 commit）',
     raw: '146 → 272 → 487 ms',
-    verdict: '近似线性 ⇒ 块哈希层把 l 从 128 抬到 256，约 1.8 倍的代价就是这么来的',
+    verdict: '近似线性 ⇒ 分量位长 l 从 128 抬到 256，约 1.8 倍的代价就是这么来的',
   },
 ]
 
@@ -98,7 +98,7 @@ export const SCALE_LAWS = [
 export const L_COMPARE = [
   { what: 'commit', l128: '10.5 ms/块', l256: '约 19 ms/块（×1.8）' },
   { what: '验证', l128: '2.2 ms/块', l256: '约 4 ms/块' },
-  { what: '文件上限（n_max = 1024）', l128: '16 KB', l256: '1 MB' },
+  { what: '文件上限（n_max = 8192）', l128: '128 KB', l256: '8 MB' },
 ]
 
 /** 其它零散数字。 */

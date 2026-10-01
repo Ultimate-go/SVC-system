@@ -16,7 +16,7 @@
 所以「把三个字段绑成一个哈希，然后映射」这一步（规划里讨论过的做法）
 **不能**写成 ``hash % n_max``：
 
-* ``n_max = 1024`` 时，按生日问题，**约 40 个块就有约 50% 的碰撞概率**；
+* ``n_max = 8192`` 时，按生日问题，**约 90 个块就有约 50% 的碰撞概率**；
 * 而碰撞的后果**不是报错** —— ``shamir_trick`` 在 ``gcd(x, y) ≠ 1`` 时
   **静默返回错误结果**（见 ``svc/mathbase.py``）。表现出来是
   「聚合结果偶尔不对」，几乎不可能靠读代码定位。
@@ -143,6 +143,116 @@ class BlockRegistry:
             self.alloc_block(owner, file_key, i) for i in range(count)
         )
 
+    def tail_plan(
+        self, count: int, *, allow_multi: bool = False
+    ) -> tuple[tuple[int, ...], tuple[tuple[str, str], ...]]:
+        r"""**只校验、不改状态**：退回末尾 ``count`` 个下标可行吗？
+
+        :returns: ``(要退回的下标, 涉及的整份文件键)``
+
+        为什么要把"校验"从"动手"里拆出来：删尾巴这件事在 :class:`~core.store.VectorStore`
+        里**先跑一遍协议、再收账**（``_settle``）。如果"账退不回去"这件事到收账那一步
+        才发现，向量已经短了、节点已经交回份额了 —— 那就成了一次**说不清账的删除**。
+        所以调用方必须在协议开动**之前**先把这件事问清楚（见
+        :meth:`~core.store.VectorStore.delete_from`）。
+
+        :param allow_multi: 允不允许一次退掉**多份文件**的尾巴。
+
+            * ``False``（默认，截断用）：只能作用于**一份**文件 ——
+              退跨文件的尾巴会让"谁的文件少了块"说不清；
+            * ``True``（删文件用）：允许跨文件，但每份被牵进来的文件都必须
+              **整份**退出去。删文件恰好满足这一点：它删的是"从这份文件的第一块
+              到向量末尾"，而各文件在下标上占的是连续区间、顺序就是上传顺序，
+              所以区间里**不可能**出现"某份文件只被退掉一半"。
+        """
+        count = int(count)
+        if count < 0:
+            raise ValueError(f"要退回的下标个数不能为负，收到 {count}")
+        if count == 0:
+            return (), ()
+        if count > self._cursor:
+            raise ValueError(
+                f"要退回 {count} 个下标，但一共只登记过 {self._cursor} 个"
+            )
+        tail = tuple(range(self._cursor - count, self._cursor))
+        refs = []
+        for idx in tail:
+            ref = self._by_index.get(idx)
+            if ref is None:
+                raise ValueError(f"全局下标 {idx} 没有登记过，无法退回")
+            refs.append(ref)
+
+        keys: list[tuple[str, str]] = []
+        for r in refs:
+            k = (r.owner, r.file_key)
+            if not keys or keys[-1] != k:
+                if k in keys:
+                    raise ValueError(
+                        f"{k[0]}/{k[1]} 的块没有连成一段（它的下标是 "
+                        f"{self._by_file[k]}）—— 要退的末尾必须按文件连着"
+                    )
+                keys.append(k)
+        if len(keys) > 1 and not allow_multi:
+            # 退跨文件的尾巴会让"谁的文件少了块"说不清；截断本来就只该作用于
+            # 一份文件（调用方已经把过关），这里再兜一道
+            raise ValueError(
+                f"要退回的末尾 {count} 个下标跨了 {len(keys)} 份文件："
+                f"{sorted(keys)} —— 截断只能作用于一份文件的末尾"
+            )
+
+        tset = set(tail)
+        for k in keys:
+            listed = self._by_file[k]
+            inside = [i for i in listed if i in tset]
+            if not inside:
+                raise ValueError(
+                    f"{k[0]}/{k[1]} 的块一块都不在要退的末尾区间 {list(tail)} 里"
+                    f"（它登记的是 {listed}）"
+                )
+            if allow_multi:
+                # 删文件：每份被牵进来的文件都必须**整份**退出去 ——
+                # 只退一半会留下一份「账面上还在、内容已经没了」的文件。
+                if len(inside) != len(listed):
+                    raise ValueError(
+                        f"要退回的下标只有一部分属于 {k[0]}/{k[1]}"
+                        f"（它登记的是 {listed}，其中落在要退区间里的是 {inside}）"
+                        f"—— 退一半会留下一份「账面上还在、内容已经没了」的文件"
+                    )
+            else:
+                # 截断：**只退这份文件的末尾几块**是合法的（正是它的用途），
+                # 所以这里只要求「要退的就是它最后那几个下标」，不要求整份都退。
+                if len(inside) != len(tail) or tuple(listed[-len(inside):]) != tail:
+                    raise ValueError(
+                        f"要退回的下标 {list(tail)} 不是 {k[0]}/{k[1]} 的末尾几块"
+                        f"（它的下标是 {listed}）"
+                    )
+        return tail, tuple(keys)
+
+    def _forget(self, tail: tuple[int, ...], keys: tuple[tuple[str, str], ...]) -> None:
+        """把 ``tail`` 这些下标与 ``keys`` 这些文件**从登记表里彻底忘掉**。
+
+        ★ 分两种情形（同一个 ``_forget`` 要同时服务它们，因为"退账"这一步
+          在两条路上是同一件事 —— 写两份迟早会出现"一条把账收干净、另一条漏了一半"）：
+
+        * 整份文件都在 ``tail`` 里（删文件）→ 这个文件键整个摘掉；
+        * 只有该文件的**末尾几块**在 ``tail`` 里（截断）→ 它的下标列表截短，
+          文件还在。
+        """
+        tset = set(tail)
+        for idx in tail:
+            ref = self._by_index.pop(idx)
+            del self._by_key[self.bind_key(ref.owner, ref.file_key, ref.block_idx)]
+        for k in keys:
+            listed = self._by_file.get(k)
+            if listed is None:
+                continue
+            left = [i for i in listed if i not in tset]
+            if left:
+                self._by_file[k] = left
+            else:
+                self._by_file.pop(k, None)
+        self._cursor -= len(tail)
+
     def free_tail(self, count: int) -> tuple[int, ...]:
         """退回**末尾**的 ``count`` 个下标（截断用），返回被退回的那些下标。
 
@@ -164,44 +274,28 @@ class BlockRegistry:
             连续的一段末尾 / 不属于同一个文件
         """
         count = int(count)
-        if count < 0:
-            raise ValueError(f"要退回的下标个数不能为负，收到 {count}")
-        if count == 0:
+        tail, keys = self.tail_plan(count)
+        if not tail:
             return ()
-        if count > self._cursor:
-            raise ValueError(
-                f"要退回 {count} 个下标，但一共只登记过 {self._cursor} 个"
-            )
-        tail = tuple(range(self._cursor - count, self._cursor))
-        refs = []
-        for idx in tail:
-            ref = self._by_index.get(idx)
-            if ref is None:
-                raise ValueError(f"全局下标 {idx} 没有登记过，无法退回")
-            refs.append(ref)
-        owners = {(r.owner, r.file_key) for r in refs}
-        if len(owners) != 1:
-            # 退跨文件的尾巴会让"谁的文件少了块"说不清；截断本来就只该作用于
-            # 一份文件（调用方已经把过关），这里再兜一道
-            raise ValueError(
-                f"要退回的末尾 {count} 个下标跨了 {len(owners)} 份文件："
-                f"{sorted(owners)} —— 截断只能作用于一份文件的末尾"
-            )
-        key = next(iter(owners))
-        listed = self._by_file[key]
-        if tuple(listed[-count:]) != tail:
-            raise ValueError(
-                f"要退回的下标 {list(tail)} 不是 {key[0]}/{key[1]} 的末尾几块"
-                f"（它的下标是 {listed}）"
-            )
+        self._forget(tail, keys)
+        return tail
 
-        for idx, ref in zip(tail, refs):
-            del self._by_index[idx]
-            del self._by_key[self.bind_key(ref.owner, ref.file_key, ref.block_idx)]
-        del listed[-count:]
-        if not listed:
-            del self._by_file[key]
-        self._cursor -= count
+    def free_tail_multi(self, count: int) -> tuple[int, ...]:
+        """退回**末尾** ``count`` 个下标，**允许跨多份文件**（删文件用）。
+
+        与 :meth:`free_tail` 只差一条：不作"必须属于同一份文件"的限制。
+        其余要求一样 —— 必须是末尾连续的一段、每份被牵进来的文件都得
+        **整份**退出（校验统一在 :meth:`tail_plan` 里，见它的 ``allow_multi``）。
+
+        ★ 为什么值得单独一个方法、而不是给 :meth:`free_tail` 加个开关：
+          ``free_tail`` 的调用者（截断）依赖"单一文件"这条不变式，
+          名字里带 ``_multi`` 让"这次退的可能是好几份文件"在调用点就看得见。
+        """
+        count = int(count)
+        tail, keys = self.tail_plan(count, allow_multi=True)
+        if not tail:
+            return ()
+        self._forget(tail, keys)
         return tail
 
     # -- 改名（删号用） -----------------------------------------------------

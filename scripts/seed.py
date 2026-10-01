@@ -13,8 +13,6 @@
 ============  ==========
 ``admin``     管理员
 ``zhangsan``  用户
-``nurse``     用户
-``ortho``     用户
 ``wangwu``    用户
 ============  ==========
 
@@ -56,8 +54,6 @@ DEMO_PASSWORD = "vds12345"
 USERS: list[tuple[str, str, str]] = [
     ("admin", "admin", "管理员"),
     ("zhangsan", "user", "张三"),
-    ("nurse", "user", "内科护士"),
-    ("ortho", "user", "骨科医生"),
     ("wangwu", "user", "王五"),
 ]
 

@@ -58,8 +58,6 @@ let elapsedTimer = null
 
 const selectedFile = ref(null)
 
-const canUpload = computed(() => selectedFile.value && uploadForm.fileKey.trim())
-
 const maxBytes = computed(() => status.value?.segment_bytes_max || 1048576)
 const minBytes = computed(() => status.value?.segment_bytes_min || 64)
 const defaultBytes = computed(() => status.value?.segment_bytes || 1024)
@@ -91,6 +89,11 @@ const effectiveBlocks = computed(() => {
 
 function onFileChange(f) {
   selectedFile.value = f?.raw || null
+  // ★ 自动填「文件标识」：拿文件名去掉扩展名当默认值。**只在为空时填** ——
+  //   免得把用户已经改过的名字覆盖掉（换个文件又得重打一遍）。
+  if (selectedFile.value && !uploadForm.fileKey.trim()) {
+    uploadForm.fileKey = String(f?.name || '').replace(/\.[^.]+$/, '').trim()
+  }
   // ★ 换文件就把上一份建议丢掉：那个候选表是**按上一个文件的大小**算的，
   //   贴到新文件上给出的块数与估算都不是这个文件的。
   planAdvice.value = null
@@ -242,7 +245,16 @@ function buildFormData() {
 }
 
 async function doUpload() {
-  if (!canUpload) return
+  // ★ 不靠"按钮置灰"拦：置灰只说明"还不能点"，说不清**为什么**。
+  //   这里把两种情况分开说，而且**一个请求都不发**（实测 0 次 POST）。
+  if (!selectedFile.value) {
+    ElMessage.warning('请先选择要上传的文件')
+    return
+  }
+  if (!uploadForm.fileKey.trim()) {
+    ElMessage.warning('未填写文件标识')
+    return
+  }
   uploading.value = true
   uploadTimings.value = null
   uploadElapsed.value = 0
@@ -276,6 +288,77 @@ async function tryDecrypt(file) {
     ElMessage.success(`解密成功：${len} 字节（${file.owner}/${file.file_key}）`)
   } catch {
     // 403 的中文理由已由拦截器原样弹出
+  }
+}
+
+/**
+ * 排在 ``row`` **之后**上传的那些文件（它们会被连带删掉）。
+ *
+ * 依据来自两条事实：① 各文件在向量上占连续区间；② 顺序就是上传顺序
+ * （见 ``core/registry.py::alloc_file``）。所以“首块下标更大”的就是后面的。
+ */
+function doomedAfter(row) {
+  const g0 = Math.min(...(row.indices || []))
+  return files.value.filter(
+    (f) => f.id !== row.id && Math.min(...(f.indices || [])) > g0,
+  )
+}
+
+/**
+ * 删除整份文件（**只有所有者**）。
+ *
+ * ★ 方案只允许删“向量末尾”的连续区间，而各文件在向量上按上传顺序连续排列
+ *   ⇒ 这次删除 = “从这份文件的第一块删到向量末尾”，会**连它之后上传的文件
+ *   一起删掉**。所以确认框必须先把连带名单列出来 —— 不做静默连带。
+ *
+ * ★ 后面压着**别人的**文件时不能删：那就变成替别人删数据了。这里先自己算
+ *   一遍提前说清（后端也会 409 再拦一道）。
+ */
+async function removeFile(row) {
+  const later = doomedAfter(row)
+  const others = later.filter((f) => !f.is_mine)
+  if (others.length) {
+    ElMessageBox.alert(
+      `这份文件后面还压着别人的 ${others.length} 份文件：${others
+        .slice(0, 5)
+        .map((f) => `${f.owner}/${f.file_key}`)
+        .join('、')}。\n\n` +
+        '方案只允许删「向量末尾」，要删它就得连别人的一起删 —— 那不能做。\n' +
+        '请让那位所有者先删掉他自己的文件。',
+      '不能删',
+      { type: 'warning' },
+    )
+    return
+  }
+  const parts = [
+    `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块，全局下标 ${span(row.indices)}）。`,
+  ]
+  if (later.length) {
+    parts.push(
+      `按方案的限制，这次删除会连它之后上传的 ${later.length} 份文件一起删掉：` +
+        later.map((f) => `${f.owner}/${f.file_key}（${f.block_count} 块）`).join('；') +
+        '。',
+    )
+  } else {
+    parts.push('它正好排在向量末尾，所以只删这一份。')
+  }
+  parts.push('删除不可撤销：那些块的密文与封装过的块密钥都会从库里、从节点上删掉。')
+  try {
+    await ElMessageBox.confirm(parts.join(''), '确认删除', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const { data } = await filesApi.remove(row.id)
+    const n = data.deleted_files.length - 1
+    ElMessage.success(`已删除 ${data.dropped_blocks} 块` + (n > 0 ? `（连带 ${n} 份文件）` : ''))
+    await load()
+  } catch {
+    // 错误已由拦截器弹出（409 会説清是谁挡着）
   }
 }
 
@@ -334,7 +417,7 @@ onMounted(load)
             </div>
             <div v-else-if="uploadForm.splitMode === 'by_count'" class="mono">
               <span class="text-2">切成几块：</span>
-              <el-input-number v-model="uploadForm.blockCount" :min="1" :max="1024" />
+              <el-input-number v-model="uploadForm.blockCount" :min="1" :max="8192" />
             </div>
 
             <div v-if="selectedFile" class="effective mono">
@@ -353,7 +436,7 @@ onMounted(load)
 
             <div class="actions">
               <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">问顾问</el-button>
-              <el-button type="primary" :disabled="!canUpload" :loading="uploading" @click="doUpload">上传</el-button>
+              <el-button type="primary" :loading="uploading" @click="doUpload">上传</el-button>
               <span v-if="uploading" class="mono elapsed">已用 {{ (uploadElapsed / 1000).toFixed(1) }} s</span>
             </div>
           </div>
@@ -454,13 +537,19 @@ onMounted(load)
               <LockTag :can-decrypt="row.can_decrypt" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="190" align="center">
+          <el-table-column label="操作" width="250" align="center">
             <template #default="{ row }">
               <el-button link type="primary" @click="router.push(`/files/${row.id}`)">详情</el-button>
               <el-button link type="primary" :loading="poolBusy" @click="addToPool(row)">
                 {{ inPool(row) ? '刷新' : '入池' }}
               </el-button>
               <el-button link type="primary" @click="tryDecrypt(row)">试解密</el-button>
+              <el-button
+                v-if="row.is_mine"
+                link
+                type="danger"
+                @click="removeFile(row)"
+              >删除</el-button>
             </template>
           </el-table-column>
           <template #empty>

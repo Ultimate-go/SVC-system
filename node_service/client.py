@@ -279,19 +279,18 @@ class HttpTransport:
 
     def retrieve(
         self, node_id: str, Q: Sequence[int]
-    ) -> tuple[tuple[int, ...], Opening, tuple[bytes, ...]]:
+    ) -> tuple[Opening, tuple[bytes, ...]]:
         body = self._post(node_id, "/node/retrieve", {"indices": [int(i) for i in Q]})
         want = tuple(int(i) for i in body["indices"])
-        values = tuple(int(v) for v in body["values"])
         p = body["proof"]
         pi = Opening(int(p["S_I"]), int(p["Lambda_I"]), tuple(int(i) for i in p["I"]))
         cts = tuple(bytes.fromhex(h) for h in body["blobs"])
-        if not (len(want) == len(values) == len(cts)):
+        if not (len(want) == len(cts)):
             raise TransportError(
                 f"{node_id} 返回的字段长度不一致："
-                f"{len(want)} 个下标 / {len(values)} 个值 / {len(cts)} 段密文"
+                f"{len(want)} 个下标 / {len(cts)} 段密文"
             )
-        return values, pi, cts
+        return pi, cts
 
     def pos_prove(self, node_id: str, indices: Sequence[int]) -> PoSProof:
         """让一台节点回答一次存储证明（PoR）挑战。

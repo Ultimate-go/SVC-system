@@ -83,11 +83,15 @@ class Smoke:
         self.check(r.status_code == 401, f"/api/status 无令牌 -> {r.status_code}")
 
         self.step("2. 登录（管理员 / 用户）")
-        nurse = self.login("nurse")
+        # ★ 演示账号现在只有 admin / zhangsan / wangwu 三个 —— 这里用 wangwu
+        #   扮“非所有者”（他要演示：能验别人的文件，但解不开别人的）。
+        #   变量名沿用旧写法 nurse：它只是下面那些请求的 headers 容器，
+        #   改名要动 30 处，对一支冒烟脚本没意义。
+        nurse = self.login("wangwu")
         owner = self.login("zhangsan")
         admin = self.login("admin")
         me = self.client.get("/api/auth/me", headers=nurse).json()
-        print(f"  nurse 有密钥对 = {me['has_key']}   公钥 = {me['pub_key'][:24]}…")
+        print(f"  wangwu 有密钥对 = {me['has_key']}   公钥 = {me['pub_key'][:24]}…")
         self.check(
             "pwd_hash" not in me and "password" not in me, "返回体不含口令哈希"
         )
@@ -99,7 +103,7 @@ class Smoke:
 
         self.step("3. 文件列表 —— 验证不受限：所有人都看得到全部文件")
         files = self.client.get("/api/files", headers=nurse).json()
-        print(f"  nurse 看到 {len(files)} 个文件")
+        print(f"  wangwu 看到 {len(files)} 个文件")
         for f in files:
             print(
                 f"    #{f['id']}  {f['owner']:9s} {f['block_count']:>2d} 块  "
@@ -115,7 +119,7 @@ class Smoke:
             return 1
         target = mine[0]
 
-        self.step("4. 验证不受限：nurse 验别人文件的全部块")
+        self.step("4. 验证不受限：wangwu 验别人文件的全部块")
         q = self.client.post(
             "/api/query", json={"indices": target["indices"]}, headers=nurse
         ).json()
@@ -125,16 +129,18 @@ class Smoke:
             f"验证 {q['verify']['ok']} {q['verify']['message']}"
         )
         self.check(q["ok"] is True, "验证通过")
-        self.check(q["hash_layer_ok"] is True, "块哈希层自洽")
+        # ★ 现在只有一个结论（不再单设"密文与分量对不对得上"那一层）：
+        #   值由本端从密文自己算，那个结论已经把交付的字节盖住了。
+        self.check("hash_layer_ok" not in q, "响应里只剩一个结论（没有第二个层字段）")
         self.check(len(q["values"]) == len(target["indices"]), "取回的分量个数正确")
 
-        self.step("5. 解密受限：nurse 解别人文件 -> 期望 403")
+        self.step("5. 解密受限：wangwu 解别人文件 -> 期望 403")
         r = self.client.post(f"/api/files/{target['id']}/decrypt", json={}, headers=nurse)
         self.check(r.status_code == 403, f"状态码 {r.status_code}")
         if r.status_code == 403:
             print(f"  提示：{r.json()['detail']}")
 
-        self.step("6. 被拒绝后仍然可以验证同一块（两条线独立）")
+        self.step("6. 被拒绝后仍然可以验证同一块（验证与解密互不影响）")
         q2 = self.client.post(
             "/api/query", json={"indices": target["indices"]}, headers=nurse
         )
@@ -249,7 +255,7 @@ class Smoke:
             "PoR 汇报里不含密文/明文",
         )
         # 发起人不是所有者：与"验证不受限"一致
-        self.check(pj["checked_by"] == "nurse", "非所有者也能发起审计")
+        self.check(pj["checked_by"] == "wangwu", "非所有者也能发起审计")
 
         self.step("13. 块大小是逐文件的（只读断言）")
         # 为什么只读：块大小在**上传时**定、之后不再改（改块 / 追加都按

@@ -274,14 +274,16 @@ def patch_file(
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
-    """改**已上传**的文件（**只有所有者**）。三个变体用 ``body.op`` 选：
+    """改**已上传**的文件（**只有所有者**）。四个变体用 ``body.op`` 选：
 
     * ``modify``（默认）：换某一**块**的内容（见 :func:`_do_modify`）；
+    * ``zero``：把某一**块**换成**等长的全 0 字节**（见 :func:`_do_zero`）
+      —— 它走的是**改块**那条路，不是删除；
     * ``append``：在**末尾新增**内容（见 :func:`_do_append`）；
     * ``truncate``：删掉**末尾**若干块（见 :func:`_do_truncate`）。
 
-    三个变体的共同点：**已有的块一个都不动**（``modify`` 只动它点名的那一块），
-    所以请求代价都只与"动了多少"成正比，与文件本身多大无关。
+    四个变体的共同点：**已有的块一个都不动**（``modify`` / ``zero`` 只动它点名
+    的那一块），所以请求代价都只与"动了多少"成正比，与文件本身多大无关。
     """
     row = _file_or_404(db, file_id)
     # ★ 只有所有者能改 —— **管理员也不行**。
@@ -301,6 +303,8 @@ def patch_file(
             "  注意：这不影响验证 —— 这份文件的完整性你照样能验。",
         )
 
+    if body.op == "zero":
+        return _do_zero(file_id, body, row, user, mgr, db)
     if body.op == "modify":
         return _do_modify(file_id, body, row, user, mgr, db)
     if body.op == "append":
@@ -357,6 +361,69 @@ def _do_modify(
     db.refresh(row)
     metrics.record("modify", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
+
+
+def _do_zero(
+    file_id: int,
+    body: FilePatchIn,
+    row: FileRow,
+    user: UserRow,
+    mgr: StoreManager,
+    db: Session,
+):
+    r"""``op=zero``：把某一块的内容换成**等长的全 0 字节**。
+
+    它走的是**改块**那条路（论文 §8.2 的 ``op = mod``），不是删除：
+
+    * 块还在：下标不变、仍占节点存储、``n`` 不变；
+    * 内容变成全 0，块密钥会换成新的（旧密钥连旧密文一起作废），并用
+      **所有者的公钥**重新封装 —— 所以**只有所有者**解密时看得到那一串 0；
+    * 该位置的承诺分量随之改变，并像改块一样推给持有它的节点；
+    * 事后任何人都能**正常验证通过** —— 这是应该的：承诺与密文始终一致。
+
+    .. important::
+
+       **"只把承诺里那个元素置 0"是做不到的**（也不该做到）：验证方不采用
+       节点声称的分量，而是把密文拿回来**自己算** :math:`F_i = vector_element(c_i)`
+       （见 ``core/store.py`` 开头那条纪律）。所以单方面改承诺或单方面改密文，
+       都会在验证那一步被抓到。
+
+    .. note::
+
+       长度用**这一块原来的长度**，不重新切块。所以 ``total_bytes`` 不变，
+       连"这块被清过"也不从长度上泄露。
+    """
+    assert body.block_idx is not None  # 由 FilePatchIn._required_fields 保证
+    _reject_if_pending(mgr)
+    try:
+        with collect() as sw:
+            out = mgr.zero_block(row.owner, row.file_key, body.block_idx)
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except (OutOfRange, Conflict) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except WriteError as exc:
+        raise _write_failed(exc) from exc
+
+    audit(
+        db,
+        user.username,
+        "zero_block",
+        f"{row.owner}/{row.file_key}",
+        detail=(
+            f"第 {body.block_idx} 块清零（{out['plain_len']} B 全 0，长度不变）"
+            f"→ 第 {out['version']} 版"
+        ),
+    )
+    db.refresh(row)
+    # 它本来就是改块，指标跟着 "modify" 记 —— 不另造一个名字去撑大统计口径
+    metrics.record("modify", sw.total_ms(), sw.rows())
+    return {
+        **out,
+        "zeroed": {"block_idx": body.block_idx, "bytes": out["plain_len"]},
+        "file": _file_public(row, mgr),
+        "timings": sw.payload(),
+    }
 
 
 def _do_append(
@@ -477,6 +544,81 @@ def _do_truncate(
     db.refresh(row)
     metrics.record("append", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
+
+
+# ---------------------------------------------------------------------------
+# 删除整份文件
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/{file_id}")
+def delete_file(
+    file_id: int,
+    user: UserRow = Depends(current_user),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    r"""删掉一份文件（**只有所有者**能做）。
+
+    ★ 方案的 ``del`` 只能删**向量末尾**的连续区间，而各文件在向量上按
+    **上传顺序**连续排列，所以这次删除 = "从这份文件的第一块删到向量末尾"：
+
+    * 它会**一并删掉它之后上传的那些文件** —— 返回值里如实列出被连带的
+      文件名，界面必须显示出来（不做静默连带）；
+    * 如果它后面压着**别人的**文件，这次删除会被拒（409）：不能替别人删
+      数据，要么请那位所有者先删，要么整库重置；
+    * 删除**真的丢数据**（密文、封装过的块密钥、文件账目一起没），
+      面板上先让用户确认，这一层不再二次拦截。
+
+    .. important::
+
+       想"只删中间某份文件、把后面的块整体前移"是不行的 —— 那要把剩下的
+       位置重编号、重新承诺整条向量，论文里没有这个操作
+       （见 ``core/store.py::truncate`` 的说明）。
+    """
+    row = _file_or_404(db, file_id)
+    # ★ 与改块同一条纪律：**只有所有者**。管理员也不行 —— 它能读的只有
+    #   审计，而"能删不能读"会变成一个说不清的授权模型。
+    if row.owner != user.username:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有所有者能删这份文件 —— 它会把这份文件的块（连同之后上传的块）"
+            "从全网真的删掉。\n"
+            "  注意：这不影响验证 —— 别的文件你照样能验。",
+        )
+    _reject_if_pending(mgr)
+    owner, file_key = row.owner, row.file_key
+    try:
+        with collect() as sw:
+            out = mgr.delete_file(owner, file_key)
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except Conflict as exc:
+        # 「后面还压着别人的文件」走这条：409 而不是 400 —— 那不是参数写错，
+        # 而是"当前状态不允许"（换个顺序就能做）。
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except OutOfRange as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except WriteError as exc:
+        raise _write_failed(exc) from exc
+    except TransportError as exc:
+        # 交回阶段失败：没有改动任何全局状态，交回是幂等的 ⇒ 重来一次即可
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    extra = [f for f in out["deleted_files"] if f != f"{owner}/{file_key}"]
+    audit(
+        db,
+        user.username,
+        "delete_file",
+        f"{owner}/{file_key}",
+        detail=(
+            f"删掉 {out['dropped_blocks']} 块（全局下标 {out['dropped_indices']}）"
+            + (f"，连带 {len(extra)} 份文件：{'、'.join(extra[:5])}" if extra else "")
+            + f"；删后向量 n = {out['blocks_after']}"
+        ),
+    )
+    metrics.record("delete", sw.total_ms(), sw.rows())
+    return {**out, "timings": sw.payload()}
 
 
 # ---------------------------------------------------------------------------

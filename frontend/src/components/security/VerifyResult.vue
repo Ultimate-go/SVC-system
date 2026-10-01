@@ -2,12 +2,10 @@
 /**
  * 验证结果 —— 结论 + 失败环节名。
  *
- * ★ 两层必须分开显示：
- *   - verify.ok         承诺层（分量对不对）
- *   - hash_layer_ok     块哈希层（密文与分量对不对得上）
- *
- * 存在「承诺层过了、块哈希层挂了」的情形（密文被换、分量没动），
- * 标题绝不能写成「验证失败 · OK」。直接用 verifyFailTitle / verifyFailDetail。
+ * ★ 只有一个结论：``ok`` 就是承诺验证（SVC）的结论。而承诺里那些分量，是
+ *   验证方**自己从收到的密文算**出来的（见 core/store.py::_collect）——
+ *   所以这一个结论已经把"交付的字节对不对得上承诺"一并盖住了，没有第二层可看。
+ *   标题绝不能写成「验证失败 · OK」。直接用 verifyFailTitle / verifyFailDetail。
  */
 import { computed } from 'vue'
 import { verifyFailTitle, verifyFailDetail } from '../../utils/format'
@@ -22,7 +20,6 @@ const detail = computed(() => verifyFailDetail(props.result))
 const overallOk = computed(() => !!props.result?.ok)
 
 const verifyOk = computed(() => props.result?.verify?.ok === true)
-const hashOk = computed(() => props.result?.hash_layer_ok === true)
 const codeName = computed(() => props.result?.verify?.code_name || '')
 </script>
 
@@ -35,12 +32,8 @@ const codeName = computed(() => props.result?.verify?.code_name || '')
 
     <div class="layers">
       <div class="layer" :class="verifyOk ? 'ok' : 'danger'">
-        <span class="layer-name">① 向量承诺层</span>
+        <span class="layer-name">向量承诺验证（唯一结论）</span>
         <span class="layer-state">{{ verifyOk ? '通过' : `失败 · ${codeName}` }}</span>
-      </div>
-      <div class="layer" :class="hashOk ? 'ok' : 'danger'">
-        <span class="layer-name">② 块哈希层</span>
-        <span class="layer-state">{{ hashOk ? '通过' : '失败' }}</span>
       </div>
     </div>
 

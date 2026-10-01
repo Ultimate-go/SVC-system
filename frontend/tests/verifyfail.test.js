@@ -5,8 +5,8 @@
  *
  * 这两行文案看着不起眼，但它们是真出事时人第一眼看到的东西。
  * 这里钉住的是一条踩过的坑：
- * 一开始标题只写 code_name，于是「密文被换、分量没动」这种情形
- * （承诺层确实通过、是块哈希层抓住的）会显示成自相矛盾的「验证失败 · OK」；
+ * 一开始标题只写 code_name，于是「结论说失败、承诺却说通过」这种情形
+ * （现在只剩一个结论，但仍要兜底）会显示成自相矛盾的「验证失败 · OK」；
  * 而修它的第一版又把条件写反了（标题说失败、副标题却搬来「验证通过」）。
  */
 
@@ -15,27 +15,25 @@ import { describe, it } from 'node:test'
 
 import { verifyFailDetail, verifyFailTitle } from '../src/utils/format.js'
 
-/** 承诺层失败的例子（BAD_LAMBDA）。 */
+/** 承诺验证失败的例子（BAD_LAMBDA）。 */
 const lambdaFail = {
   ok: false,
-  hash_layer_ok: false,
   verify: { ok: false, code: 3, code_name: 'BAD_LAMBDA', message: 'Λ_I 校验失败：…' },
 }
 
-/** ★ 最容易被写错的那一格：密文被换、分量没动。 */
-const hashLayerFail = {
+/** 旧的"两层"结果形状（新后端不再产生）：结论说失败、承诺却说通过。
+ *  兜底文案绝不能把它显示成「验证失败 · OK」。 */
+const legacyTwoLayer = {
   ok: false,
-  hash_layer_ok: false,
   verify: { ok: true, code: 0, code_name: 'OK', message: '验证通过' },
 }
 
 const pass = {
   ok: true,
-  hash_layer_ok: true,
   verify: { ok: true, code: 0, code_name: 'OK', message: '验证通过' },
 }
 
-describe('verifyFailTitle（失败标题必须说清是哪一层）', () => {
+describe('verifyFailTitle（失败标题必须说清）', () => {
   it('通过时就是「验证通过」', () => {
     assert.equal(verifyFailTitle(pass), '验证通过')
   })
@@ -44,9 +42,8 @@ describe('verifyFailTitle（失败标题必须说清是哪一层）', () => {
     assert.equal(verifyFailTitle(lambdaFail), '验证失败 · BAD_LAMBDA')
   })
 
-  it('★ 承诺层过了、整体失败：说「块哈希层」，不能显示成「验证失败 · OK」', () => {
-    const t = verifyFailTitle(hashLayerFail)
-    assert.equal(t, '验证失败 · 块哈希层（承诺层是过的）')
+  it('★ 兜底：结论说失败时，绝不能显示成「验证失败 · OK」', () => {
+    const t = verifyFailTitle(legacyTwoLayer)
     assert.ok(!t.includes('OK'), `标题里不该出现 OK：${t}`)
   })
 
@@ -64,10 +61,9 @@ describe('verifyFailDetail（副标题不能自相矛盾）', () => {
     assert.equal(verifyFailDetail(lambdaFail), 'Λ_I 校验失败：…')
   })
 
-  it('★ 第二层失败时不能搬「验证通过」当副标题', () => {
-    const d = verifyFailDetail(hashLayerFail)
+  it('★ 旧数据兜底时也不能搬「验证通过」当副标题', () => {
+    const d = verifyFailDetail(legacyTwoLayer)
     assert.notEqual(d, '验证通过')
-    assert.ok(d.includes('密文'), `副标题要说清是密文被换：${d}`)
   })
 
   it('没有结果时给空串', () => {

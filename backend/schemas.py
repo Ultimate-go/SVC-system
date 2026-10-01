@@ -108,14 +108,13 @@ class UserPatchIn(BaseModel):
 #: 请求里「下标 / 值」列表的长度上限。
 #:
 #: ★ 它**必须 ≥ 系统的块数上限**，否则会出现「**传得上去、验不了**」：
-#:   ``n_max`` 默认 1024（1 KB 块 ⇒ 1 MB 文件正好 1024 块），
-#:   而这里原来写死 512 —— 一个 1 MB 文件的**完整查询**会被 pydantic 以
-#:   422 拒掉（而且是一坨英文校验转储，界面上很难看）。
-#:   这是做 Day 2 那条「传 1 MB」验收时发现的（见 ``tests/test_bigfile.py``）。
+#:   ``n_max`` 现在是 8192（1 KB 块 ⇒ 8 MB 文件正好 8192 块），
+#:   这里也放到 8192 —— 否则一个 8 MB 文件的**完整查询**会被 pydantic
+#:   以 422 拒掉（而且是一坨英文校验转储，界面上很难看）。
 #:
 #: **调大 ``Settings.n_max`` 时，这个数也要跟着调**。
 #: （它写在 pydantic 里，静态声明、没法从配置读，但改一行就生效。）
-MAX_INDICES = 1024
+MAX_INDICES = 8192
 
 
 class QueryIn(BaseModel):
@@ -241,10 +240,13 @@ class DisaggIn(BaseModel):
 class FilePatchIn(BaseModel):
     """改**已上传**的文件（``PATCH /api/files/{id}``）。
 
-    三个变体用 ``op`` 区分，共同点是**已有的块一个都不动**（``modify`` 只动它
-    点名的那一块，``append`` 只在末尾加新块）：
+    四个变体用 ``op`` 区分，共同点是**已有的块一个都不动**（``modify`` / ``zero``
+    只动它点名的那一块，``append`` 只在末尾加新块）：
 
     * ``modify``（默认，兼容旧请求体）：换某一**块**的内容，会换掉那一块的密钥；
+    * ``zero``：把某一**块**换成**等长的全 0 字节** —— 它走的是 ``mod`` 而不是
+      ``del``，所以块仍在（下标不变、仍占存储、``n`` 不变），只是内容换了。
+      长度由服务端按这一块**原来的长度**填（请求里**不要**给 ``data_b64``）；
     * ``append``：在**末尾新增**若干块，已有块的密文/密钥/IV 一个字都不动；
     * ``truncate``：**删掉末尾**若干块（``drop_blocks`` = 删几块）。
 
@@ -263,10 +265,10 @@ class FilePatchIn(BaseModel):
     ``drop_blocks``。
     """
 
-    #: ``modify`` / ``append`` / ``truncate``。不传 = ``modify``，
+    #: ``modify`` / ``zero`` / ``append`` / ``truncate``。不传 = ``modify``，
     #: 这样早先只发 ``{block_idx, data_b64}`` 的调用方一字不用改。
-    op: str = Field(default="modify", pattern="^(modify|append|truncate)$")
-    #: ``modify`` 专用：要换第几块（**文件内的块序号**，从 0 开始）。
+    op: str = Field(default="modify", pattern="^(modify|zero|append|truncate)$")
+    #: ``modify`` / ``zero`` 专用：要动第几块（**文件内的块序号**，从 0 开始）。
     block_idx: int | None = Field(default=None, ge=0)
     #: 新内容的 base64（``append`` 时是要追加在末尾的内容）。
     #:
@@ -306,6 +308,16 @@ class FilePatchIn(BaseModel):
         if self.op == "truncate":
             if self.data_b64 is not None:
                 raise ValueError("truncate 不该带 data_b64（删除不提供新内容）")
+            return self
+        if self.op == "zero":
+            # 清零的内容由**服务端**按这一块原来的长度填全 0：让客户端传一遍等长
+            # 的零字节没有意义，而且一旦传错（长度不对）就会多出一次长度变化。
+            if self.data_b64 is not None:
+                raise ValueError(
+                    "zero 不该带 data_b64 —— 清零的内容由服务端按这一块原来的长度填全 0"
+                )
+            if self.block_idx is None:
+                raise ValueError("zero 必须带 block_idx（要清零第几块）")
             return self
         if self.data_b64 is None:
             raise ValueError(f"{self.op} 必须带 data_b64（要写进去的内容）")
