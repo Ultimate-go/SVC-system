@@ -294,3 +294,13 @@ class AuditRow(Base):
     target: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 管理员对这条流水的**人工批注**（可空）。
+    #:
+    #: ★ 单独一列，**不改** ``detail``：``detail`` 是系统当时记下的事实
+    #:   （"不是所有者"），这里是人后来的解释（"演示用的，不是故障"）。
+    #:   两者混在一列里，事后就分不清哪句是机器说的、哪句是人补的 ——
+    #:   审计记录最忌讳这个。
+    remark: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 最后写备注的人与时间（空 = 从没人批注过）。留痕是为了批注本身也可追溯。
+    remark_by: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    remark_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

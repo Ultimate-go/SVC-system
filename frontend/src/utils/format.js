@@ -136,8 +136,19 @@ export function hexToText(hex) {
 
 export function fmtTime(iso) {
   if (!iso) return '—'
-  // 后端给的是 local time 的 isoformat（无时区后缀），直接显示即可
-  return String(iso).replace('T', ' ')
+  // ★ 后端统一给 **UTC** 的 isoformat（无时区后缀 —— 见 backend/models.py:utcnow，
+  //   以及 admin.py 里的 `r.ts.isoformat(timespec="seconds")`）。
+  //   以前这里当成"local time"直接显示，于是东八区下**每条时间都少 8 小时**
+  //   （审计流水上最明显：刚做的操作显示成 8 小时前）。
+  //   修法：无时区后缀的串补 `Z` 让 Date 按 UTC 解析，再按浏览器本地时区格式化。
+  const s = String(iso)
+  const d = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z')
+  if (Number.isNaN(d.getTime())) return s.replace('T', ' ') // 认不出来就原样显示
+  const p = (n) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    ` ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  )
 }
 
 /** 相对时间，给证据池卡片看新旧用（δ 会变，旧证据就不成立了）。 */

@@ -105,6 +105,17 @@ class UserPatchIn(BaseModel):
     password: str | None = Field(default=None, max_length=256)
 
 
+class AuditRemarkIn(BaseModel):
+    """给一条审计流水写人工备注。
+
+    传空串 = **清空备注**（见 ``admin.set_audit_remark``）——
+    所以这里不能把 ``""`` 与"没传"当成同一件事，用默认值 ``""`` 表示
+    "就是要清空"，语义上正好一致。
+    """
+
+    remark: str = Field(default="", max_length=2000)
+
+
 #: 请求里「下标 / 值」列表的长度上限。
 #:
 #: ★ 它**必须 ≥ 系统的块数上限**，否则会出现「**传得上去、验不了**」：

@@ -64,7 +64,16 @@ class Database:
     #: 库还是旧的"会以 ``no such column`` 的形式在运行期才炸出来，
     #: 而且看上去像业务 bug。这里补上，让那份已经在用的开发库不必被清空。
     #: 只处理**带默认值**的加列；真要改类型或约束就该上正经迁移工具了。
-    _ADDED_COLUMNS = {"files": {"version": "INTEGER NOT NULL DEFAULT 1"}}
+    _ADDED_COLUMNS = {
+        "files": {"version": "INTEGER NOT NULL DEFAULT 1"},
+        # 管理员给某条审计流水写的备注。加它是为了能对一条记录做人工批注
+        # （"这次解密被拒是演示用的，不是故障"），不必去改那条原始记录。
+        "audit_log": {
+            "remark": "TEXT NOT NULL DEFAULT ''",
+            "remark_by": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "remark_at": "DATETIME",
+        },
+    }
 
     def _add_missing_columns(self) -> None:
         with self.engine.begin() as conn:

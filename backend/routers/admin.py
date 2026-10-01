@@ -8,11 +8,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from .. import metrics
@@ -41,8 +42,15 @@ from ..config import (
 )
 from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
 from ..manager import StoreManager
-from ..models import AuditRow, BlockRow, FileRow, UserRow
-from ..schemas import DeployIn, PortsIn, RestartIn, UserCreateIn, UserPatchIn
+from ..models import AuditRow, BlockRow, FileRow, UserRow, utcnow
+from ..schemas import (
+    AuditRemarkIn,
+    DeployIn,
+    PortsIn,
+    RestartIn,
+    UserCreateIn,
+    UserPatchIn,
+)
 from ..security import hash_password
 from core.timing import collect
 from .auth import user_public
@@ -296,44 +304,266 @@ def delete_user(
 
 @router.get("/audit")
 def list_audit(
-    limit: int = 200,
+    page: int = 1,
+    page_size: int = 10,
     target: str | None = None,
     actor: str | None = None,
+    action: str | None = None,
+    ok: bool | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    q: str | None = None,
     _: UserRow = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """审计流水（**最新在前**）。
+    """审计流水（**最新在前**），**服务端分页**。
 
-    ``target`` / ``actor`` 是做「回放」用的**精确匹配**过滤，两者可同时给（交集）。
-    刻意不做模糊搜索 —— 回放要的是「这一个对象 / 这一个人」，含糊匹配只会
-    把别人的记录混进来，那比不过滤更糟。
+    ★ 返回信封 ``{items, total, page, page_size, pages}``，不是裸数组。
 
-    * ``target`` 形如 ``所有者/文件标识``：**文件级**动作（上传、改块、追加、
-      授权、解密、解密被拒）都用这个键，所以按它能把一份文件的完整经历捞出来；
-    * ``actor`` 是操作者。**查询类动作只能靠它** —— 查询是按全局下标记的
-      （``target`` 是"12 块"这种摘要），本来就不落在某个具体文件上。
+    为什么必须挪到服务端：流水只会一直涨（每次登录/上传/解密都写一条）。
+    全量捞回前端再切页，等到几千条时一次响应就要几 MB，而且前端还得
+    自己维护"当前第几页"与"筛完之后共几页"这两件事 —— 那两件事本来就该
+    由**唯一知道完整数据**的那一端说了算。
+
+    ★★ 分页与筛选的**顺序**是这类改动的经典坑：**先筛、再数总数、最后切页**。
+       反过来（先取一页、再在页内筛）会得到"每页 10 条、筛完只剩 2 条"
+       这种看着像 bug 的结果，而且 ``total`` 会变成"当前页的条数"。
+       下面 ``count`` 与 ``offset`` 用的是**同一个 stmt**，就是为了保证
+       "说的总数"和"翻的页"是同一份筛选结果。
+
+    过滤条件：
+
+    * ``target`` / ``actor`` —— 做「回放」用的**精确匹配**，可同时给（交集）。
+      刻意不做模糊搜索：回放要的是「这一个对象 / 这一个人」，含糊匹配只会
+      把别人的记录混进来，那比不过滤更糟。
+      - ``target`` 形如 ``所有者/文件标识``：**文件级**动作（上传、改块、追加、
+        授权、解密、解密被拒）都用这个键，所以按它能把一份文件的完整经历捞出来；
+      - ``actor`` 是操作者。**查询类动作只能靠它** —— 查询是按全局下标记的
+        （``target`` 是"12 块"这种摘要），本来就不落在某个具体文件上。
+    * ``ok``    —— 只看成功 / 只看被拒。被拒才是审计里最该被翻出来的一类，
+      所以它必须是一个**一等的过滤条件**，不能靠肉眼从一屏流水里挑。
+    * ``since`` / ``until`` —— 时间窗，**半开区间** ``[since, until)``。
+      收的是**本地墙上时间**（``2026-10-02T01:30:00``，或只给 ``2026-10-02``），
+      在后端换算成 UTC 再比 —— 库里存的是 UTC（见 ``models.utcnow``）。
+      为什么换算放在后端：前端把本地时间转成 UTC 需要知道时区，
+      而那正是这个项目刚刚修过 8 小时的坑（``format.js:fmtTime``）。
+      中心换算就**只有一个地方要做对**，前端只管把选择器里的本地值原样发过来。
+      ★ 只给日期的 ``until`` 会自动扩到**当天 24:00**（含整日）——
+        否则"查到 10-02"会漏掉 10-02 当天的记录。
+    * ``q``     —— 在 ``actor / action / target / detail / remark`` 上做模糊匹配
+      （不区分大小写）。它是**多余的**、只是为了"我就记得有个人叫啥啥"时好使；
+      与 ``target`` 精确匹配并存，各管各的用法。
 
     只记元数据这一条不变：返回体里永远不含明文、密钥或密文。
     """
-    limit = max(1, min(limit, 1000))
+    page_size = max(1, min(page_size, 200))
+    page = max(1, page)
+
     stmt = select(AuditRow)
     if target:
         stmt = stmt.where(AuditRow.target == target)
     if actor:
         stmt = stmt.where(AuditRow.actor == actor)
-    rows = db.execute(stmt.order_by(AuditRow.id.desc()).limit(limit)).scalars().all()
-    return [
-        {
-            "id": r.id,
-            "ts": r.ts.isoformat(timespec="seconds"),
-            "actor": r.actor,
-            "action": r.action,
-            "target": r.target,
-            "ok": r.ok,
-            "detail": r.detail,
-        }
-        for r in rows
-    ]
+    if action:
+        stmt = stmt.where(AuditRow.action == action)
+    if ok is not None:
+        stmt = stmt.where(AuditRow.ok == ok)
+    lo = _parse_local_dt(since)
+    if lo is not None:
+        stmt = stmt.where(AuditRow.ts >= lo)
+    hi = _parse_local_dt(until, end_of_day=True)
+    if hi is not None:
+        stmt = stmt.where(AuditRow.ts < hi)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                AuditRow.actor.ilike(like),
+                AuditRow.action.ilike(like),
+                AuditRow.target.ilike(like),
+                AuditRow.detail.ilike(like),
+                AuditRow.remark.ilike(like),
+            )
+        )
+
+    # ★ 总数用**同一个 stmt** 数（只把 order_by 去掉）——
+    #   这样"共 N 条"与"翻出来的页"永远出自同一份筛选，不会各说各话。
+    total = db.execute(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ).scalar_one()
+
+    pages = max(1, (total + page_size - 1) // page_size)
+    # ★ 页码越界**夹回最后一页**，而不是返回空列表：
+    #   筛完只剩 3 条时，用户手里的"第 5 页"该怎么处理？返回空会让他以为
+    #   "没有数据"；夹回去能让他直接看到仅有的那几条，也不至于迷失。
+    if page > pages:
+        page = pages
+
+    rows = (
+        db.execute(
+            stmt.order_by(AuditRow.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "items": [_audit_public(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+    }
+
+
+@router.get("/audit/actions")
+def list_audit_actions(
+    _: UserRow = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """库里**实际出现过**的动作名（给筛选下拉用），按出现次数从多到少。
+
+    ★ 为什么不写死一份常量清单：动作名是**代码里散落的字符串**
+      （``upload`` / ``decrypt_denied`` / ``deploy_restart`` …），
+      新加一个动作就多一个值。写死的清单会慢慢与库里对不上 ——
+      表现为"筛某个动作时下拉里没有它"，而数据其实在。
+      从 ``audit_log`` 里 distinct 出来，界面永远与真数据一致。
+
+    ★ 只返回 ``action``，不带中文名：中文名是**展示层**的事（见
+      ``frontend/src/views/admin/audit/index.vue`` 里的 ``ACTION_LABEL``），
+      后端不该管界面怎么叫它。
+    """
+    rows = db.execute(
+        select(AuditRow.action, func.count())
+        .group_by(AuditRow.action)
+        .order_by(func.count().desc(), AuditRow.action)
+    ).all()
+    return [{"action": a, "count": c} for a, c in rows]
+
+
+def _parse_local_dt(raw: str | None, *, end_of_day: bool = False) -> datetime | None:
+    """把界面上传来的**本地墙上时间**收成**朴素 UTC**（与库里 ``ts`` 同尺）。
+
+    ★ 三个输入形状都要认，因为 ``el-date-picker`` 会给不同的东西：
+
+    * ``value-format="YYYY-MM-DD"``                 → ``2026-10-02``（整天）
+    * ``value-format="YYYY-MM-DDTHH:mm:ss"``        → ``2026-10-02T01:30:00``
+    * 没写 value-format（Element 会给 Date 对象，经 qs 序列化成 ISO）→
+      ``2026-10-01T17:30:00.000Z``（**带 Z，已经是 UTC**）
+
+    前两种是**本地**时间，要减掉时区偏移；最后一种已经带时区，直接用。
+
+    ★ ``end_of_day=True``（用在 ``until`` 上）：只给了日期时把它扩到
+      **当天 24:00**，于是"截止到 10-02"能包含 10-02 一整天的记录。
+      不这么做的话那个查询会静默漏掉最后一天 —— 差一天的错最难被发现，
+      因为结果看着"有数据"、只是少了点。
+
+    ★ 解析不出来就**返回 None**（当作没给这个条件），而不是抛 500：
+      审计页面不该因为用户手输了一个怪日期就整页报错。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    date_only = len(s) == 10 and s[4] == "-" and s[7] == "-"
+    # 已带时区（Z / +08:00）—— 已经是绝对时刻，直接转成朴素 UTC。
+    try:
+        if s.endswith(("Z", "z")):
+            aware = datetime.fromisoformat(s[:-1] + "+00:00")
+            return aware.astimezone(timezone.utc).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        naive = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        # 朴素串 = 本地墙上时间 → 减偏移得 UTC。
+        # ★ 用 ``astimezone()``（不带参数）让解释器给出本机偏移，
+        #   它会正确处理该时刻的夏令时 —— 而本项目**不用**写死 +8。
+        naive = parsed.astimezone().astimezone(timezone.utc).replace(tzinfo=None)
+    if end_of_day and date_only:
+        # 加一天之前**先**换算 —— 日界是本地概念，"本地 10-03 00:00"才是
+        # 10-02 那一天的右端点。反过来（先换算再 +24h）在夏令时切换那些天
+        # 会差一小时，而且那种错只在一年两天里出现，查起来极难。
+        return _parse_local_dt(
+            (parsed + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        )
+    return naive
+
+
+def _audit_public(r: AuditRow) -> dict:
+    """一条审计流水的对外形状。
+
+    ``remark`` 是管理员后来写的人工批注，与 ``detail``（系统当时记下的事实）
+    分开两块返回 —— 界面上也要分开显示，别让人分不清哪句是机器说的。
+    """
+    return {
+        "id": r.id,
+        "ts": r.ts.isoformat(timespec="seconds"),
+        "actor": r.actor,
+        "action": r.action,
+        "target": r.target,
+        "ok": r.ok,
+        "detail": r.detail,
+        "remark": r.remark or "",
+        "remark_by": r.remark_by or "",
+        "remark_at": r.remark_at.isoformat(timespec="seconds") if r.remark_at else None,
+    }
+
+
+@router.patch("/audit/{audit_id}/remark")
+def set_audit_remark(
+    audit_id: int,
+    body: AuditRemarkIn,
+    admin: UserRow = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """给一条审计流水写/改/清空**人工备注**。
+
+    为什么值得单独一列而不是直接改 ``detail``：``detail`` 是系统当时记下的
+    事实（"不是所有者"），备注是人后来的解释（"这次是演示，不是故障"）。
+    混在一起就分不清哪句是机器说的 —— 审计记录最忌讳这个，所以两块分开存、
+    界面上也分开显示。
+
+    * 传空串 = **清空备注**（连同 ``remark_by`` / ``remark_at`` 一起清掉），
+      这样"没人批注过"和"批注过又删了"在库里是同一个状态，不会留下一条
+      指向空的批注痕迹；
+    * 写备注本身**也记一条审计**（动作 ``audit_remark``），让批注可追溯 ——
+      "谁在什么时候给这条记录加了什么注解"本身也是该留痕的事。
+    """
+    row = db.get(AuditRow, audit_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "这条流水不存在")
+
+    text = (body.remark or "").strip()
+    if len(text) > 2000:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "备注最长 2000 字"
+        )
+
+    before = row.remark or ""
+    if text == before:
+        # 没变就不写：免得"点开又关掉"也给流水加一条噪音记录。
+        return _audit_public(row)
+
+    row.remark = text
+    row.remark_by = admin.username if text else ""
+    row.remark_at = utcnow() if text else None
+    db.commit()
+    db.refresh(row)
+
+    audit(
+        db,
+        admin.username,
+        "audit_remark",
+        str(audit_id),
+        detail=(
+            f"给流水 #{audit_id} 写了备注：{text[:200]}"
+            if text
+            else f"清空了流水 #{audit_id} 的备注（原备注：{before[:200]}）"
+        ),
+    )
+    return _audit_public(row)
 
 
 @router.post("/check")

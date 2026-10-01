@@ -223,10 +223,36 @@ class Smoke:
         self.check(info["owner"] == target["owner"], "归属正确")
 
         self.step("11. 审计流水")
-        rows = self.client.get("/api/admin/audit?limit=10", headers=admin).json()
+        # ★ 接口已经是**服务端分页**（返回 {items,total,page,page_size,pages}），
+        #   不再是裸数组 —— 这里必须读 items，否则 a["action"] 会拿到字符串下标而炸。
+        page = self.client.get("/api/admin/audit?page=1&page_size=10", headers=admin).json()
+        rows = page["items"]
         for a in rows[:8]:
             print(f"  {a['action']:<16s} {a['actor']:<10s} ok={str(a['ok']):<5s} {a['target']}")
-        self.check(any(a["action"] == "decrypt_denied" for a in rows), "拒绝有留痕")
+        # 分页信封完整、且"共 N 条"和"翻出来的页"出自同一份筛选
+        self.check(
+            all(k in page for k in ("items", "total", "page", "page_size", "pages")),
+            f"分页信封完整（共 {page['total']} 条 / {page['pages']} 页）",
+        )
+        self.check(page["page"] == 1 and page["page_size"] == 10, "分页参数回显正确")
+        self.check(len(rows) <= 10, "每页不超过 page_size 条")
+        # ★ 「拒绝有留痕」不能只看第 1 页：被拒的是**最老**那几条的话，
+        #   它们会落在最后一页 —— 只看首页就会误报"没有留痕"。
+        #   改成按 `ok=false` **筛出来**看（筛完通常就一页了）。
+        denied = self.client.get(
+            "/api/admin/audit?ok=false&page=1&page_size=10", headers=admin
+        ).json()
+        self.check(denied["total"] > 0, f"被拒记录有留痕（{denied['total']} 条）")
+        self.check(
+            all(not x["ok"] for x in denied["items"]),
+            "按被拒筛选后返回的确实都是被拒",
+        )
+        # 动作清单要覆盖到刚查出来的那几个（下拉选项来自它）
+        acts = self.client.get("/api/admin/audit/actions", headers=admin).json()
+        self.check(
+            {"decrypt_denied", "upload"} <= {x["action"] for x in acts},
+            f"动作清单覆盖到位（{len(acts)} 个动作）",
+        )
 
         self.step("12. 存储证明（PoR）")
         # 问的是**另一个**问题：不是"你给我的这几块对不对"，而是"你还存着吗"。
