@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
@@ -12,6 +12,13 @@ const route = useRoute()
 
 const form = reactive({ username: '', password: '' })
 const loading = ref(false)
+const introDone = ref(false)
+const showDescription = ref(false)
+const showForm = ref(false)
+const brand = 'IAVC-VDSS'
+let revealTimer
+let descriptionTimer
+let formTimer
 
 async function submit() {
   if (!form.username || !form.password) {
@@ -30,92 +37,139 @@ async function submit() {
   }
 }
 
-/** 背景漂浮的英文单词。 */
+function startIntro() {
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (reducedMotion) {
+    introDone.value = true
+    showDescription.value = true
+    showForm.value = true
+    return
+  }
+
+  revealTimer = window.setTimeout(() => {
+    introDone.value = true
+    descriptionTimer = window.setTimeout(() => {
+      showDescription.value = true
+      formTimer = window.setTimeout(() => {
+        showForm.value = true
+      }, 620)
+    }, 760)
+  }, brand.length * 105 + 260)
+}
+
+onMounted(startIntro)
+onUnmounted(() => {
+  window.clearTimeout(revealTimer)
+  window.clearTimeout(descriptionTimer)
+  window.clearTimeout(formTimer)
+})
+
 const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYPTOGRAPHIC', 'DECENTRALIZED']
 </script>
 
 <template>
   <div class="login-page">
-    <!-- 深色科技感背景：CSS 底座 + 半透明视频叠层 -->
     <div class="backdrop" aria-hidden="true">
       <div class="bg-glow" />
       <div class="bg-grid" />
+      <div class="scanline" />
       <VideoBackdrop />
       <span
-        v-for="(w, i) in FLOATING_WORDS"
-        :key="w"
+        v-for="(word, index) in FLOATING_WORDS"
+        :key="word"
         class="bg-word mono"
-        :style="{ '--i': i, '--left': (8 + i * 16) + '%', '--delay': (i * 1.1) + 's' }"
-      >{{ w }}</span>
+        :style="{ '--i': index, '--left': `${8 + index * 16}%`, '--delay': `${index * 1.1}s` }"
+      >{{ word }}</span>
     </div>
 
-    <div class="login-split">
-      <!-- 左：项目介绍 -->
-      <section class="intro">
-        <div class="intro-inner">
-          <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
-          <h1 class="intro-title">基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h1>
-          <p class="intro-sub">
-            文件交给别人保管，凭什么放心？
-            <br />答案不是「请相信我们」，而是一份谁都能自己验证的密码学证据。
-          </p>
-          <ul class="intro-points">
-            <li><span class="pt-dot" />谁都能验证，只有所有者能解密</li>
-            <li><span class="pt-dot" />不靠承诺，靠可验证</li>
-            <li><span class="pt-dot" />384 个算法回归测试钉住密码学</li>
-          </ul>
+    <main class="login-shell">
+      <section class="brand-stage" :class="{ 'is-complete': introDone }" aria-label="IAVC-VDSS">
+        <div class="terminal-line mono">
+          <span class="prompt">root@vds:~$</span>
+          <span class="command">./initialize --secure</span>
         </div>
+        <h1 class="brand-title mono" aria-live="polite">
+          <span
+            v-for="(character, index) in brand.split('')"
+            :key="`${character}-${index}`"
+            class="brand-character"
+            :style="{ '--char-index': index }"
+          >{{ character }}</span><span class="cursor" aria-hidden="true" />
+        </h1>
+        <p class="brand-caption mono">INCREMENTAL AGGREGATION · VERIFIABLE STORAGE</p>
+        <div class="progress-track" aria-hidden="true"><span /></div>
       </section>
 
-      <!-- 右：登录面板 -->
-      <section class="login-side">
-        <div class="login-card">
-          <h2 class="card-title">登录</h2>
-          <p class="card-sub">请输入账号与密码</p>
+      <section class="project-intro" :class="{ 'is-visible': showDescription }" aria-label="项目简介">
+        <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
+        <h2>基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h2>
+        <p>
+          文件交给别人保管，凭什么放心？
+          <br />答案不是“请相信我们”，而是一份谁都能自己验证的密码学证据。
+        </p>
+        <ul>
+          <li><span class="intro-dot" />谁都能验证，只有所有者能解密</li>
+          <li><span class="intro-dot" />不靠承诺，靠可验证</li>
+          <li><span class="intro-dot" />384 个算法回归测试钉住密码学</li>
+        </ul>
+      </section>
 
-          <!-- 被 401 兜底送回来时才会出现（见 main.js 的 expired 标记）。
-               用常驻提示而不是弹窗：掉线是“后端重启”的必然结果，不是错误。 -->
-          <el-alert
-            v-if="route.query.expired === '1'"
-            type="info"
-            :closable="false"
-            class="mb-3"
-            title="登录已过期，请重新登录"
-            description="后端重启会换掉签名密钥，重登一次就好。"
-          />
-
-          <div class="form">
-            <el-input
-              v-model="form.username"
-              placeholder="账号"
-              size="large"
-              @keyup.enter="submit"
-            >
-              <template #prefix><Icon name="user" :size="15" /></template>
-            </el-input>
-            <el-input
-              v-model="form.password"
-              type="password"
-              placeholder="密码"
-              size="large"
-              show-password
-              @keyup.enter="submit"
-            >
-              <template #prefix><Icon name="lock" :size="15" /></template>
-            </el-input>
-            <el-button
-              type="primary"
-              size="large"
-              :loading="loading"
-              class="submit"
-              @click="submit"
-            >
-              登录
-            </el-button>
+      <section class="login-panel" :class="{ 'is-visible': showForm }" aria-label="登录">
+        <div class="panel-corner corner-top" />
+        <div class="panel-corner corner-bottom" />
+        <div class="panel-heading">
+          <div class="status-dot" />
+          <div>
+            <p class="eyebrow mono">SECURE LOGIN / 01</p>
+            <h2>登录系统</h2>
           </div>
         </div>
+        <p class="card-sub">请输入账号和密码</p>
+
+        <el-alert
+          v-if="route.query.expired === '1'"
+          type="info"
+          :closable="false"
+          class="login-alert"
+          title="登录已过期，请重新登录"
+          description="后端重启会换掉签名密钥，重登一次就好。"
+        />
+
+        <div class="form">
+          <label class="field-label mono" for="login-username">账号</label>
+          <el-input
+            id="login-username"
+            v-model="form.username"
+            placeholder="请输入账号"
+            size="large"
+            autocomplete="username"
+            @keyup.enter="submit"
+          >
+            <template #prefix><Icon name="user" :size="15" /></template>
+          </el-input>
+          <label class="field-label mono" for="login-password">密码</label>
+          <el-input
+            id="login-password"
+            v-model="form.password"
+            type="password"
+            placeholder="请输入密码"
+            size="large"
+            show-password
+            autocomplete="current-password"
+            @keyup.enter="submit"
+          >
+            <template #prefix><Icon name="lock" :size="15" /></template>
+          </el-input>
+          <el-button type="primary" size="large" :loading="loading" class="submit" @click="submit">
+            <span>登录</span>
+            <span class="submit-arrow" aria-hidden="true">↗</span>
+          </el-button>
+        </div>
+        <p class="panel-footer mono"><span>●</span> END-TO-END VERIFICATION ENABLED</p>
       </section>
-    </div>
+    </main>
+
+    <footer class="system-footer mono"><span>SYS.STATUS</span> ONLINE <i /> NODE 01 · ENCRYPTED CHANNEL</footer>
   </div>
 </template>
 
@@ -124,200 +178,108 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   position: relative;
   min-height: 100vh;
   display: flex;
-  align-items: stretch;
-  background: #05080f;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
+  background: #04070d;
+  color: #e7f2ff;
 }
 
-/* ---------- 深色科技感动态背景 ---------- */
-.backdrop {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
+.backdrop { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .bg-glow {
   position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 60% 50% at 20% 30%, rgba(34, 211, 238, 0.16), transparent 60%),
-    radial-gradient(ellipse 50% 50% at 80% 70%, rgba(99, 102, 241, 0.14), transparent 60%),
-    radial-gradient(ellipse 40% 40% at 60% 20%, rgba(34, 197, 94, 0.08), transparent 60%);
-  animation: glow-drift 12s ease-in-out infinite alternate;
+  inset: -15%;
+  background: radial-gradient(ellipse at 18% 38%, rgba(0, 214, 255, .16), transparent 42%), radial-gradient(ellipse at 82% 74%, rgba(88, 72, 255, .13), transparent 38%), radial-gradient(ellipse at 50% 15%, rgba(26, 255, 193, .06), transparent 30%);
+  animation: glow-drift 14s ease-in-out infinite alternate;
 }
 .bg-grid {
   position: absolute;
   inset: 0;
-  background:
-    repeating-linear-gradient(0deg, rgba(120, 190, 255, 0.06) 0, rgba(120, 190, 255, 0.06) 1px, transparent 1px, transparent 48px),
-    repeating-linear-gradient(90deg, rgba(120, 190, 255, 0.06) 0, rgba(120, 190, 255, 0.06) 1px, transparent 1px, transparent 48px);
-  mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, #000 40%, transparent 100%);
+  background-image: linear-gradient(rgba(106, 172, 226, .055) 1px, transparent 1px), linear-gradient(90deg, rgba(106, 172, 226, .055) 1px, transparent 1px);
+  background-size: 54px 54px;
+  mask-image: radial-gradient(ellipse 78% 70% at 50% 50%, #000 25%, transparent 100%);
+}
+.scanline { position: absolute; inset: 0; opacity: .22; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.018) 4px); }
+.bg-word { position: absolute; top: 0; left: var(--left); color: rgba(120, 190, 255, .14); font-size: 11px; letter-spacing: .28em; white-space: nowrap; animation: word-rise 18s linear infinite; animation-delay: var(--delay); }
+
+.login-shell { position: relative; z-index: 1; width: min(1080px, 100%); min-height: 560px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(330px, .85fr); align-items: center; gap: clamp(48px, 9vw, 120px); padding: 48px 32px; }
+.brand-stage { position: absolute; z-index: 2; top: 50%; left: 50%; width: max-content; max-width: calc(100% - 32px); text-align: center; transform: translate(-50%, -50%); transition: opacity .6s ease, transform .8s cubic-bezier(.2,.8,.2,1); }
+.brand-stage.is-complete { opacity: 0; transform: translate(-50%, calc(-50% - 150px)); pointer-events: none; }
+.terminal-line { display: flex; gap: 12px; margin-bottom: 24px; color: rgba(183, 209, 231, .52); font-size: 11px; letter-spacing: .1em; }
+.prompt { color: #44e4c0; }
+.brand-title { display: flex; align-items: center; min-height: 1.2em; margin: 0; color: #f2f8ff; font-size: clamp(46px, 7vw, 82px); font-weight: 600; letter-spacing: .06em; line-height: 1; text-shadow: 0 0 30px rgba(0, 214, 255, .28); }
+.brand-character { display: inline-block; opacity: 0; transform: translateY(12px); animation: type-in .36s cubic-bezier(.2,.8,.2,1) forwards; animation-delay: calc(var(--char-index) * 105ms); }
+.cursor { width: 3px; height: .92em; margin-left: 9px; background: #42e4c2; box-shadow: 0 0 12px #42e4c2; animation: blink .85s steps(1) infinite; }
+.is-complete .cursor { animation: blink .85s steps(1) infinite, cursor-fade .5s ease 1.1s forwards; }
+.brand-caption { margin: 22px 0 28px; color: rgba(164, 196, 222, .64); font-size: 10px; letter-spacing: .23em; }
+.progress-track { width: min(310px, 80%); height: 2px; background: rgba(143, 188, 220, .16); overflow: hidden; }
+.progress-track span { display: block; width: 100%; height: 100%; transform-origin: left; background: linear-gradient(90deg, #29d7ff, #4be6bc); animation: progress 1.25s ease forwards; }
+.project-intro { grid-column: 1; max-width: 560px; opacity: 0; transform: translateY(28px); transition: opacity .65s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
+.project-intro.is-visible { opacity: 1; transform: translateY(0); }
+.intro-tag { margin-bottom: 16px; color: #47d9c1; font-size: 10px; letter-spacing: .18em; }
+.project-intro h2 { margin: 0 0 16px; color: #e6edf7; font-size: clamp(22px, 3vw, 31px); font-weight: 500; line-height: 1.4; }
+.project-intro p { margin: 0 0 19px; color: #9aadc1; font-size: 13px; line-height: 1.8; }
+.project-intro ul { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; color: #cbd8e5; font-size: 13px; }
+.project-intro li { display: flex; align-items: center; gap: 9px; }
+.intro-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #43e4bf; box-shadow: 0 0 9px rgba(67, 228, 191, .75); }
+
+.login-panel { position: relative; width: 100%; max-width: 390px; justify-self: end; padding: 34px 32px 26px; opacity: 0; transform: translateY(24px) scale(.98); background: rgba(7, 15, 27, .78); border: 1px solid rgba(104, 185, 228, .22); box-shadow: 0 24px 80px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(16px); transition: opacity .7s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
+.login-panel.is-visible { opacity: 1; transform: translateY(0) scale(1); }
+.panel-corner { position: absolute; width: 18px; height: 18px; border-color: #43dcbf; border-style: solid; }
+.corner-top { top: -1px; right: -1px; border-width: 1px 1px 0 0; }
+.corner-bottom { bottom: -1px; left: -1px; border-width: 0 0 1px 1px; }
+.panel-heading { display: flex; align-items: center; gap: 13px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #43e4bf; box-shadow: 0 0 0 4px rgba(67,228,191,.1), 0 0 14px #43e4bf; }
+.eyebrow, .field-label { margin: 0; color: #47d9c1; font-size: 10px; letter-spacing: .16em; }
+.panel-heading h2 { margin: 6px 0 0; font-size: 25px; font-weight: 500; letter-spacing: .04em; }
+.card-sub { margin: 19px 0 26px; color: #8ca4bb; font-size: 13px; }
+.login-alert { margin-bottom: 18px; }
+.form { display: flex; flex-direction: column; gap: 10px; }
+.field-label { margin-top: 5px; color: #7894ac; font-size: 9px; }
+.submit { width: 100%; height: 44px; margin-top: 9px; border: 0; letter-spacing: .08em; }
+.submit-arrow { margin-left: 12px; font-size: 17px; }
+.panel-footer { margin: 24px 0 0; color: rgba(139, 166, 187, .55); font-size: 9px; letter-spacing: .1em; }
+.panel-footer span { color: #43e4bf; margin-right: 6px; }
+.system-footer { position: absolute; z-index: 1; right: 30px; bottom: 22px; color: rgba(133, 163, 187, .5); font-size: 9px; letter-spacing: .12em; }
+.system-footer span { color: #43dcbf; }
+.system-footer i { display: inline-block; width: 4px; height: 4px; margin: 0 8px 2px; border-radius: 50%; background: #43e4bf; }
+
+@keyframes type-in { to { opacity: 1; transform: translateY(0); } }
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes cursor-fade { to { opacity: 0; } }
+@keyframes progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes glow-drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(2%, -2%) scale(1.06); } }
+@keyframes word-rise { 0% { transform: translateY(105vh); opacity: 0; } 10%, 90% { opacity: 1; } 100% { transform: translateY(-10vh); opacity: 0; } }
+
+@media (max-width: 760px) {
+  .login-shell { min-height: 100vh; grid-template-columns: 1fr; gap: 34px; padding: 42px 22px 70px; align-content: center; }
+  .brand-stage { top: 42%; }
+  .brand-stage.is-complete { transform: translate(-50%, calc(-50% - 120px)); }
+  .terminal-line { justify-content: center; margin-bottom: 20px; }
+  .brand-title { justify-content: center; font-size: clamp(37px, 12vw, 58px); }
+  .brand-caption { font-size: 8px; letter-spacing: .14em; }
+  .progress-track { margin: 0 auto; }
+  .project-intro { grid-column: 1; margin-top: 0; text-align: center; }
+  .project-intro h2 { font-size: clamp(20px, 6vw, 27px); }
+  .project-intro p, .project-intro ul { font-size: 12px; }
+  .project-intro ul { align-items: center; }
+  .login-panel { justify-self: center; max-width: 440px; padding: 29px 24px 23px; }
+  .system-footer { right: 0; bottom: 16px; width: 100%; text-align: center; font-size: 8px; }
 }
 
-/* 漂浮的英文单词 */
-.bg-word {
-  position: absolute;
-  top: 0;
-  left: var(--left);
-  font-size: 13px;
-  letter-spacing: 0.3em;
-  color: rgba(120, 190, 255, 0.14);
-  white-space: nowrap;
-  animation: word-rise 18s linear infinite;
-  animation-delay: var(--delay);
-}
-@keyframes word-rise {
-  0% {
-    transform: translateY(105vh);
-    opacity: 0;
-  }
-  10% {
-    opacity: 1;
-  }
-  90% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(-10vh);
-    opacity: 0;
-  }
-}
-@keyframes glow-drift {
-  0% {
-    transform: translate(0, 0) scale(1);
-  }
-  100% {
-    transform: translate(2%, -3%) scale(1.06);
-  }
-}
-
-/* ---------- 左右分栏 ---------- */
-.login-split {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  width: 100%;
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 40px 32px;
-  gap: 40px;
-  align-items: center;
-}
-
-/* 左：项目介绍 */
-.intro {
-  flex: 1.2;
-  color: #e6edf7;
-}
-.intro-inner {
-  max-width: 560px;
-}
-.intro-tag {
-  font-size: 11px;
-  letter-spacing: 0.22em;
-  color: var(--accent);
-  margin-bottom: 20px;
-}
-.intro-title {
-  font-size: 34px;
-  font-weight: 500;
-  line-height: 1.35;
-  margin: 0 0 20px;
-  background: linear-gradient(120deg, #e6edf7, #7dd3fc);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.intro-sub {
-  font-size: 14px;
-  line-height: 1.8;
-  color: #93a4bf;
-  margin: 0 0 24px;
-}
-.intro-points {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.intro-points li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 14px;
-  color: #cbd5e1;
-}
-.pt-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.6);
-  flex-shrink: 0;
-}
-
-/* 右：登录面板 */
-.login-side {
-  flex: 1;
-  display: flex;
-  justify-content: flex-end;
-}
-.login-card {
-  width: 380px;
-  max-width: 100%;
-  padding: 36px 32px;
-  background: rgba(13, 20, 36, 0.75);
-  border: 1px solid rgba(120, 190, 255, 0.16);
-  border-radius: 14px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 20px 60px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(12px);
-}
-.card-title {
-  font-size: 22px;
-  font-weight: 500;
-  color: #e6edf7;
-  margin: 0 0 6px;
-}
-.card-sub {
-  font-size: 13px;
-  color: #93a4bf;
-  margin: 0 0 28px;
-}
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.submit {
-  width: 100%;
-  margin-top: 4px;
-}
-
-/* 移动端：左右分栏自动堆叠 */
-@media (max-width: 860px) {
-  .login-split {
-    flex-direction: column;
-    align-items: stretch;
-    padding: 32px 20px;
-    gap: 32px;
-  }
-  .intro-title {
-    font-size: 26px;
-  }
-  .login-side {
-    justify-content: center;
-  }
-  .login-card {
-    width: 100%;
-  }
+@media (max-width: 390px) {
+  .login-shell { padding-inline: 16px; }
+  .brand-title { font-size: 34px; letter-spacing: .04em; }
+  .terminal-line { font-size: 9px; gap: 8px; }
+  .login-panel { padding-inline: 20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bg-glow,
-  .bg-word {
-    animation: none;
-  }
+  .bg-glow, .bg-word, .brand-character, .cursor, .progress-track span { animation: none; }
+  .brand-character { opacity: 1; transform: none; }
+  .login-panel, .brand-stage, .project-intro { transition: none; }
+  .brand-stage { position: relative; top: auto; left: auto; width: auto; max-width: none; transform: none; }
+  .brand-stage.is-complete { opacity: 1; transform: none; }
+  .project-intro { opacity: 1; transform: none; }
 }
 </style>
