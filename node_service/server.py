@@ -175,11 +175,10 @@ class NodeRuntime:
                     status.HTTP_404_NOT_FOUND,
                     f"本节点不持有下标 {missing}（持有 {list(self.state.I)}）",
                 )
-            F_Q, pi_Q, cts = _retrieve_from(self.state, want)
+            pi_Q, cts = _retrieve_from(self.state, want)
             return {
                 "node_id": self.node_id,
                 "indices": want,
-                "values": [str(v) for v in F_Q],
                 "proof": {
                     "S_I": str(pi_Q.S_I),
                     "Lambda_I": str(pi_Q.Lambda_I),
@@ -619,10 +618,14 @@ def _witness_in(o: dict) -> UpdateWitness:
 
 
 def _retrieve_from(state: NodeState, want: list[int]):
-    """取 ``(F_Q, π_Q, 密文段)``。走 ``NodeState.retrieve`` + 自己的密文表。"""
-    F_Q, pi_Q = state.retrieve(want)
+    """取 ``(π_Q, 密文段)``。走 ``NodeState.retrieve`` + 自己的密文表。
+
+    ★ 回给调用方的是**密文**而不是分量 —— 分量一律由验证方自己从密文重算，
+    节点声称的那一份不参与判定（见 ``core/store.py`` 模块说明）。
+    """
+    _F_Q, pi_Q = state.retrieve(want)
     cts = tuple(state.blobs[i] for i in want)
-    return F_Q, pi_Q, cts
+    return pi_Q, cts
 
 
 # ---------------------------------------------------------------------------

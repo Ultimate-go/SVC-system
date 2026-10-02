@@ -29,7 +29,7 @@ from typing import Callable, Sequence
 from sqlalchemy import delete, func, select
 
 from core import GlobalSession, VectorStore, crs_from_dict, new_session
-from core.crypto import split_segments
+from core.crypto import split_segments, vector_element
 from core.keywrap import (
     KeyWrapError,
     KeyWrapFormatError,
@@ -663,8 +663,8 @@ class StoreManager:
            拿 ``db.add`` 去写就会直接撞主键。
 
            而且漏写这类问题**不会当场暴露**：进程内的状态是对的，
-           要等重启后从库里重建，才会以「第 1 层块哈希对不上、
-           而第 2 层承诺照样通过」这种极难归因的形式冒出来。
+           要等重启后从库里重建，才会以「验证时本端算出的分量
+           对不上承诺」这种极难归因的形式冒出来。
         """
         store = self._require()
         exporter = getattr(store.transport, "export_states", None)
@@ -691,7 +691,8 @@ class StoreManager:
         for i in indices:
             gidx = int(i)
             # ★ 每一份副本都要落库。只写主副本的话，重启后别的副本拿到的
-            #   还是旧密文 —— 改块时尤其致命（第 1 层块哈希会当场对不上）。
+            #   还是旧密文 —— 改块时尤其致命（验证会当场因本端算出的分量
+            #   与承诺不符而失败）。
             for nid in store.replicas_of(gidx):
                 ct = snap[nid]["blobs"][gidx]
                 row = db.get(NodeBlobRow, (nid, gidx))
@@ -795,7 +796,7 @@ class StoreManager:
         旧摘要里根本没有它们 —— 两条路的**前置材料**不一样，不是实现上的偏好。
 
         ★ 这里**不动** ``δ``：``n`` 不变、``C`` 不变，变的只是"谁持有哪些下标"。
-        所以全局承诺、所有已发出的证据、所有文件的块哈希 **全部继续有效** ——
+        所以全局承诺、所有已发出的证据、所有块的分量 **全部继续有效** ——
         这正是"搬块"与"重传文件"的根本区别。
 
         :returns: ``{"moved_blocks", "moved_copies", "lost", "keep", "plan", ...}``
@@ -832,7 +833,10 @@ class StoreManager:
         for (src, tgt), idxs in sorted(groups.items()):
             Q = tuple(sorted(idxs))
             try:
-                values, proof, cts = store.transport.retrieve(src, Q)
+                _claimed, proof, cts = store.transport.retrieve(src, Q)
+                # ★ 值同样**不采信**来源节点声称的那份：搬过来的密文自己算。
+                #   目标节点收到后会照常做一次承诺验证，用的就是这组推导值。
+                values = [vector_element(ct) for ct in cts]
                 store.transport.adopt(
                     tgt,
                     positions=Q,
@@ -1125,7 +1129,7 @@ class StoreManager:
                     self._persist_globals(db)
                     # ★ 节点那一侧也要落库：新密文 + 它自己的 (δ, S_I, Λ_I)。
                     #   漏了这一步，进程内一切正常，**重启后**才会以
-                    #   "块哈希对不上" 的形式炸出来（见 _persist_nodes 的注释）。
+                    #   "本端算出的分量对不上承诺" 的形式炸出来（见 _persist_nodes 的注释）。
                     #   跨进程模式下它自动跳过 —— 密文在各节点自己的库里。
                     self._persist_nodes(db, [gidx])
                     db.commit()
@@ -1154,6 +1158,38 @@ class StoreManager:
             with stage("落库（新密文与块登记）"):
                 return _finish()
 
+    def zero_block(self, owner: str, file_key: str, block_idx: int) -> dict:
+        r"""把第 ``block_idx`` 块的内容换成**等长的全 0 字节**。
+
+        它**不是删除**，是改块（论文 §8.2 的 ``op = mod``）：块仍在向量里、
+        仍占原来那个下标、仍占节点存储，``n`` 不变；变的只有内容、
+        该位置的承诺分量、以及版本号（+1）。
+
+        ★ 为什么用**原来的长度**：明文长度是逐块记的（``plain_lengths``），
+          保持等长之后连"这块被清过"也不从长度上泄露；而且块大小上限是
+          上传时切好的，等长一定不会越界（``modify`` 里有"不超过单块上限"
+          与"不能为空"两道校，等长全 0 两道都天然满足）。
+
+        ★ 为什么**复用** :meth:`modify_block` 而不是另写一套：改块这条路
+          （重新加密 → 算新分量 → 推给全网 → 重新封装密钥 → 写库 → 补推）
+          只能有一份定义。两份的结果就是"一条把账收干净、另一条漏一半"，
+          而那是最难查的一类偏差。零清与改块**唯一**的区别只是"写什么内容"。
+
+        :returns: 与 :meth:`modify_block` 同构（``global_index`` / ``block_idx``
+            / ``plain_len`` / ``version``）。
+        """
+        with self._lock:  # RLock：下面 modify_block 还会再取一次，可重入
+            store = self._require()
+            rec = store.files.get((owner, file_key))
+            if rec is None:
+                raise NotFound(f"文件 {owner}/{file_key} 不存在")
+            if not 0 <= block_idx < len(rec.indices):
+                raise OutOfRange(
+                    f"块号 {block_idx} 越界：{owner}/{file_key} 只有 {len(rec.indices)} 块"
+                )
+            length = rec.plain_lengths[block_idx]
+        return self.modify_block(owner, file_key, block_idx, b"\x00" * length)
+
     # -------------------------------------------------------------------
     # 追加
     # -------------------------------------------------------------------
@@ -1169,7 +1205,7 @@ class StoreManager:
         与 :meth:`upload` / :meth:`modify_block` 同一套顺序：**先让全网跟上，
         再改自己的账**。反过来的话"库说加了、节点没收到"会让协调者比实际存储
         更乐观，而且这种不一致**不会当场报错**，要到下次验证时才以
-        "块哈希对不上"的形式炸出来。
+        "本端算出的分量对不上承诺"的形式炸出来。
         """
         with self._lock:
             store = self._require()
@@ -1234,7 +1270,7 @@ class StoreManager:
                     frow.total_bytes = cur.total_bytes
                     self._persist_globals(db)
                     # ★ 新块的密文 + 节点自己的 (δ, S_I, Λ_I) 都要落库 ——
-                    #   漏了这一步进程内一切正常、重启后才会以"块哈希对不上"炸出来。
+                    #   漏了这一步进程内一切正常、重启后才会以"本端算出的分量对不上承诺"炸出来。
                     #   跨进程模式下它自动跳过（密文在各节点自己的库里）。
                     self._persist_nodes(db, new_indices)
                     db.commit()
@@ -1380,6 +1416,99 @@ class StoreManager:
             out["dropped_from"] = n_before
             return out
 
+    def delete_file(self, owner: str, file_key: str) -> dict:
+        r"""删掉一份文件 —— **连同它之后写进向量的块**（只有所有者能做）。
+
+        ★ 为什么"连同后面"：``del`` 只支持向量末尾的连续区间（见
+          :meth:`core.store.VectorStore.truncate` 的说明）。而各文件在向量上
+          占的是连续区间、顺序 = 上传顺序，所以"从这份文件的第一块删到向量
+          末尾"恰好是一次合法的 ``del`` —— 代价是**它之后上传的文件也一起没了**。
+
+        ★ 因此这里有两条硬检查：
+
+        * **授权**：要连带删掉的必须**全是这位所有者自己的**文件。否则就是
+          替别人删数据 —— 返回 409 并说清是哪几份挡着，让所有者自己来删；
+        * **如实交代**：返回值里列出被连带删掉的文件名，界面必须显示出来，
+          不做静默连带。
+
+        :returns: ``{"deleted_files", "dropped_blocks", "dropped_indices",
+            "blocks_after"}``
+        """
+        with self._lock:
+            store = self._require()
+            rec = store.files.get((owner, file_key))
+            if rec is None:
+                raise NotFound(f"文件 {owner}/{file_key} 不存在")
+            n_before = store.n
+            g0 = int(rec.indices[0])
+            # ★ K 与"连带名单"都在删之前就算好：这样 _finish 在**补推路径**上
+            #   也能用（那时 store 里的文件账目已经被摘掉了，已经推不出来）。
+            K = tuple(range(g0, n_before))
+            doomed = tuple(
+                k for k, r in store.files.items() if r.indices and r.indices[0] >= g0
+            )
+            foreign = sorted(k for k in doomed if k[0] != owner)
+            if foreign:
+                raise Conflict(
+                    "方案只允许删「向量末尾」的连续区间，而这份文件后面还压着"
+                    f"**别人的** {len(foreign)} 份文件："
+                    + "、".join(f"{o}/{k}" for o, k in foreign[:5])
+                    + "。要删这份文件，得请它们的所有者先删掉"
+                    "（或者整库重置）。"
+                )
+
+            def _finish() -> dict:
+                """落库：删块行、删文件行、抹掉单进程模式下的节点密文。"""
+                with self.db.session() as db:
+                    for o, k in doomed:
+                        fid = db.execute(
+                            select(FileRow.id).where(
+                                FileRow.owner == o, FileRow.file_key == k
+                            )
+                        ).scalar_one_or_none()
+                        if fid is None:  # pragma: no cover - 与账目一致的兜底
+                            continue
+                        db.execute(delete(BlockRow).where(BlockRow.file_id == fid))
+                        db.execute(delete(FileRow).where(FileRow.id == fid))
+                    # 兜底：这个区间里的块行一个都不许剩（含不属于任何文件账目的）
+                    db.execute(delete(BlockRow).where(BlockRow.global_index.in_(K)))
+                    # ★ 单进程模式下节点密文是协调者代存的，也要一起抹掉：
+                    #   只删 blocks 会留下孤儿密文，重启后 import_states 会把它们
+                    #   读回节点 ⇒ 节点自检"下标与密文对不上"炸掉。
+                    db.execute(
+                        delete(NodeBlobRow).where(NodeBlobRow.global_index.in_(K))
+                    )
+                    self._persist_globals(db)
+                    # 节点状态整表重写（它们的 I 变小了，甚至全空）；密文不加不减
+                    self._persist_nodes(db, [])
+                    db.commit()
+                return {
+                    "deleted_files": [f"{o}/{k}" for o, k in doomed],
+                    "dropped_blocks": len(K),
+                    "dropped_indices": list(K),
+                    "blocks_after": store.n,
+                }
+
+            try:
+                got_K, got_doomed = store.delete_from(owner, file_key)
+            except WriteError:
+                if store.pending_write() is not None:
+                    self._pending_finish = _finish
+                raise
+            except KeyError as exc:
+                raise NotFound(str(exc)) from exc
+            except ValueError as exc:
+                raise OutOfRange(str(exc)) from exc
+            if got_K != K or set(got_doomed) != set(doomed):  # pragma: no cover
+                raise RuntimeError(
+                    "删之前算出的连带名单与核心层报的不一致 —— 这是实现自检"
+                )
+
+            with stage("落库（删除文件与块）"):
+                out = _finish()
+            out["dropped_from"] = n_before
+            return out
+
     # -------------------------------------------------------------------
     # 读
     # -------------------------------------------------------------------
@@ -1430,7 +1559,9 @@ class StoreManager:
                     "code_name": verify_code_name(r.report.code),
                     "message": r.report.message,
                 },
-                "hash_layer_ok": r.hash_layer_ok,
+                # ★ 只有一个结论：``ok`` 就是承诺验证的结论。值是本端从取回的
+                #   密文**自己算**出来的（见 ``core/store.py::_collect``），所以
+                #   它已经把"交付的字节对不对得上承诺"一并盖住了。
                 "ok": r.ok,
                 "holders": {str(k): v for k, v in r.holders.items()},
                 "refs": [
@@ -1555,9 +1686,7 @@ class StoreManager:
             #   * refs / holders —— 分解没向节点要东西，但协调者**本来就知道**
             #     谁持有哪一块，照填即可；
             #   * cert_count = 0、nodes_used = [] —— 分解确实一份凭证都没收，
-            #     填假数字才是骗人；
-            #   * hash_layer_ok —— 分解不涉及密文，没有"密文对不上分量"这回事，
-            #     所以是 True（没有任何东西被检查出不一致）。
+            #     填假数字才是骗人。
             return {
                 "delta_n": store.delta.n,
                 "delta_fp": self.delta_fingerprint(),
@@ -1576,7 +1705,6 @@ class StoreManager:
                     "message": report.message,
                 },
                 "ok": bool(report.ok),
-                "hash_layer_ok": True,
                 "holders": {str(i): store.holder_of(i) for i in K_set},
                 "refs": [
                     {

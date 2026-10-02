@@ -319,10 +319,9 @@ def main() -> int:
     victim.tamper_value(i)
     print(f"  把 node-1 手上下标 {i} 的分量 +1（模拟篡改数据）")
     bad = atk.query([i])
-    print(f"  向量承诺那层：{'通过' if bad.report.ok else '失败'} —— "
-          f"{bad.report.message}")
-    print(f"  块哈希那层  ：{'通过' if bad.hash_layer_ok else '失败'} —— "
-          f"不自洽的下标 {sorted(k for k, v in bad.hash_ok.items() if not v)}")
+    print(f"  承诺验证：{'通过' if bad.report.ok else '失败'} —— {bad.report.message}")
+    print("      ↑ 节点改的是自己手里的分量，而验证方用的是**自己从密文算**的分量：")
+    print("        两者对不上，承诺验证当场就把它拒了。")
     print(f"  整体：{'通过（不该！）' if bad.ok else '被抓 ✓'}")
     try:
         atk.check()
@@ -338,10 +337,9 @@ def main() -> int:
     j = v2.I[0]
     v2.overwrite_blob(j, d2.blobs[d2.I[0]])
     swap = atk2.query([j])
-    print(f"  向量承诺那层：{'通过' if swap.report.ok else '失败'}")
-    print("      ↑ 承诺的对象是**摘要**；摘要和证据都没被动，所以这层天然过得去。")
-    print(f"  块哈希那层  ：{'通过' if swap.hash_layer_ok else '失败'}")
-    print("      ↑ 正是为了堵这个洞，才必须在承诺之下再加一层块哈希。")
+    print(f"  承诺验证：{'通过' if swap.report.ok else '失败'} —— {swap.report.message}")
+    print("      ↑ 承诺的对象虽然只是摘要，但那个摘要是**验证方自己从这串密文算**的：")
+    print("        密文一换，算出来的值就跟着变，承诺这一层当场过不去。")
     print(f"  整体：{'通过（不该！）' if swap.ok else '被抓 ✓'}")
 
     sub("7c. 攻击三：伪造一份证据")

@@ -49,7 +49,7 @@ def query_by_indices(
         ok=out["ok"],
         detail=(out["verify"]["message"] if not out["ok"] else ""),
     )
-    # ★ 阶段耗时：探测各节点 / 取回分量与凭证 / 聚合凭证 / 承诺验证 / 块哈希自检
+    # ★ 阶段耗时：探测各节点 / 取回分量与凭证 / 聚合凭证 / 承诺验证
     out["timings"] = sw.payload()
     metrics.record("query", sw.total_ms(), sw.rows())
     return out

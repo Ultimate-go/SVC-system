@@ -50,7 +50,8 @@ __all__ = [
 DEFAULT_L: int = 256
 
 #: 全局位置上限（素数表容量）。**一旦定死不可改** —— 隐藏阶群方案的结构性约束。
-DEFAULT_N_MAX: int = 1024
+#: 1 KB 一块 ⇒ 文件上限 ≈ 8 MB。
+DEFAULT_N_MAX: int = 8192
 
 #: 演示档模数位长。**无安全强度，仅演示**；真实部署论文配置是 16λ = 2048。
 DEFAULT_MODULUS_BITS: int = 1024

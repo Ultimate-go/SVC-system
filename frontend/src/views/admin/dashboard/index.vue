@@ -122,8 +122,8 @@ onMounted(() => {
     </div>
     <div class="grid">
       <StatCard label="公开参数" :value="crs.N_bits" unit="位" hint="隐藏阶群的模数位长" />
-      <StatCard label="块哈希" :value="crs.l" unit="位" hint="每段密文的比特数" />
-      <StatCard label="素数位长" :value="crs.prime_bits" unit="位" hint="块哈希+1" />
+        <StatCard label="分量位长" :value="crs.l" unit="位" hint="一个分量的比特数" />
+        <StatCard label="素数位长" :value="crs.prime_bits" unit="位" hint="l + 1" />
       <StatCard label="位置上限" :value="crs.n_max" hint="不可更改" />
     </div>
 

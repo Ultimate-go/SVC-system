@@ -29,21 +29,30 @@
 * 全系统**只有一份摘要 δ** —— 任何用户都能验证任意位置（验证不受限）；
 * 一个证据可以**横跨多个文件** —— 只要下标集合覆盖到那几个文件就行。
 
-两条验证线
-----------
-查询回来的是**向量分量**（密文摘要），所以验证分两层：
+一条验证线：分量由验证方**自己从密文算**
+----------------------------------------
+向量里承诺的"值"是 :func:`~core.crypto.vector_element`（``SM3``）算出的**分量**。
+本项目的一条纪律是：
 
-* **第 1 层 · 块哈希自洽** —— ``SM3(密文段) == 收到的分量``。挡住"节点给了
-  别的段的密文"。
-* **第 2 层 · 向量承诺** —— :func:`svc.verify` 的两步校验，对着全局 δ。挡住
-  "节点改了自己存的分量"。
+    验证方**不采用节点声称的分量** —— 它拿回来的密文段**自己算**
+    ``F_i := vector_element(c_i)``，再拿这组自己算出来的值去跑承诺验证
+    （:func:`svc.verify` 的两步校验，对着全局 δ）。
 
-两层都过才算完整，**缺一层都有洞**：6b 那类攻击（换掉密文、分量不动）只有
-第 1 层抓得住；而分量被改（密文没换）只有第 2 层抓得住。
+于是承诺验证的结论就是**唯一且完整**的正确性保证，不需要另设一层"密文与
+分量对不对得上"的自检：
+
+* 分量对不上承诺 ⇒ 拒绝（节点改了自己存的分量）；
+* 分量对得上、但密文被换过 ⇒ 验证方自己算出的值随之改变 ⇒ 一样拒绝。
+
+也就是说，"承诺的分量"与"实际交付的字节"之间的绑定由**推导方向**保证：
+分量在这一侧的**唯一来源就是收到的密文本身**，对方没有"另行声明"的自由度。
+（相对"把密文段直接当值"的做法，这里多依赖一条 ``SM3`` 抗碰撞假设；换来的
+是每块只占 1 个位置、上传速度与容量都不受影响。）
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Callable, Collection, Mapping, Sequence
 
@@ -147,7 +156,6 @@ class QueryResult:
     report: VerifyReport
     holders: dict[int, str]
     refs: tuple[BlockRef, ...]
-    hash_ok: dict[int, bool]
     cert_count: int
     node_used: tuple[str, ...]
     #: **没拿到**的下标（只在 ``allow_partial=True`` 时非空）。
@@ -167,20 +175,19 @@ class QueryResult:
         return proof_bytes(self.proof.S_I, self.proof.Lambda_I)
 
     @property
-    def hash_layer_ok(self) -> bool:
-        return all(self.hash_ok.values())
-
-    @property
     def ok(self) -> bool:
-        return bool(self.report.ok) and self.hash_layer_ok
+        """承诺验证（:func:`svc.verify`）的结论 —— **唯一的正确性结论**。
+
+        向量里承诺的分量是本端从收到的密文**自己算**出来的（见
+        :meth:`_collect`），所以这一个结论已经连带盖住了"交付的字节
+        对不对得上承诺的分量"，没有第二层可看。
+        """
+        return bool(self.report.ok)
 
     def summary(self) -> str:
         """给人看的一行结论。"""
         if not self.report.ok:
             return f"承诺验证失败：{self.report.message}"
-        if not self.hash_layer_ok:
-            bad = sorted(i for i, v in self.hash_ok.items() if not v)
-            return f"块哈希不自洽，可疑下标 {bad}"
         return (
             f"通过：{len(self.indices)} 块 / {self.cert_count} 份凭证 / "
             f"证据 {self.proof_size_bytes} 字节"
@@ -394,7 +401,8 @@ class VectorStore:
 
             .. important::
 
-               * 顺序有意义 —— 轮转按你给的顺序转（所以界面上按集群顺序发就行）；
+               * **顺序不再决定谁拿哪块** —— 这几台会先被打乱再轮转（界面上按
+                 什么顺序勾都一样；只有"哪几台参与"有意义）；
                * 同一台不能重复；不认识的机器名会直接报错（不会静默忽略）；
                * 台数不能少于副本数（副本必须落在**不同的**机器上）。
 
@@ -864,6 +872,52 @@ class VectorStore:
                 f"—— 它们后面还压着之后写的块。要删这份文件的尾巴，先清掉那几块，"
                 f"或者重新上传一份"
             )
+        # ★ 协议开动**之前**先问清"账退得回去吗"：收账（_settle）跑在向量已经缩短、
+        #   节点已经交回份额**之后** —— 到那一步才发现退不掉，就成了一次
+        #   「向量短了、登记表没退」的说不清账的删除。合同一份文件那条路
+        #   （free_tail）的校验全在这里做。
+        self.registry.tail_plan(drop)
+
+        def _settle() -> None:
+            """这次删除**自己的收尾**（正常路径与补推路径共用）。
+
+            两件事：退回末尾下标（登记表游标要与向量长度一起回落）、
+            把文件账目截短。
+            """
+            self.registry.free_tail(drop)
+            rec.indices = rec.indices[:-drop]
+            rec.ivs = rec.ivs[:-drop]
+            rec.plain_lengths = rec.plain_lengths[:-drop]
+            rec.total_bytes = sum(rec.plain_lengths)
+            # 删掉的块如果有块密钥留在实现里，也要跟着抹掉（本类没有，子类有）
+            self._forget_block_keys(owner, file_key, rec.block_count)
+
+        self._delete_tail(K, _settle)
+        return K, rec
+
+    def _delete_tail(self, K: tuple[int, ...], settle: Callable[[], None]) -> None:
+        r"""把**向量末尾**的连续区间 ``K`` 删掉（论文 §8.2 的 ``op = del``）。
+
+        :func:`truncate` 与 :meth:`delete_from` 共用它 —— 这条协议路径**只能有
+        一份定义**（各写一遍，迟早会出现"一条路把账收干净、另一条漏了一半"，
+        而那属于最难查的一类偏差）。
+
+        :param settle: 这次删除**自己的收尾**（退回登记表游标、把文件账目截短……）。
+            它在**账目推进之后**被调；正常路径与补推路径共用同一份
+            （理由同 :meth:`_absorb_pushed` 的 ``on_success``）。
+        """
+        drop = len(K)
+        n = self.delta.n
+        if not K or K != tuple(range(n - drop, n)):
+            expect = tuple(range(max(0, n - drop), n))
+            raise ValueError(
+                f"只能删「向量末尾」的连续区间：收到 {list(K)}，"
+                f"而当前向量的末尾 {drop} 块是 {list(expect)}"
+            )
+        if self.registry.cursor != n:
+            raise RuntimeError(
+                f"登记表游标 {self.registry.cursor} 与向量长度 {n} 不一致"
+            )
 
         # ① 先让“与 K 部分相交”的节点交回 K 那部分
         #    （整段持有 K 的节点不动它 —— 底层 del 走“K ⊆ I”那条更便宜的路：
@@ -889,27 +943,13 @@ class VectorStore:
                 f"（这是实现自检，不该发生）"
             )
 
-        def _settle() -> None:
-            """这次删除**自己的收尾**（正常路径与补推路径共用）。
-
-            两件事：退回末尾下标（登记表游标要与向量长度一起回落）、
-            把文件账目截短。
-            """
-            self.registry.free_tail(drop)
-            rec.indices = rec.indices[:-drop]
-            rec.ivs = rec.ivs[:-drop]
-            rec.plain_lengths = rec.plain_lengths[:-drop]
-            rec.total_bytes = sum(rec.plain_lengths)
-            # 删掉的块如果有块密钥留在实现里，也要跟着抹掉（本类没有，子类有）
-            self._forget_block_keys(owner, file_key, rec.block_count)
-
         context = {
             "kind": "del",
             "delta_new": pushed.delta,
             "K": K,
             "per_index": {},
             "elements": (),
-            "on_success": _settle,
+            "on_success": settle,
         }
 
         try:
@@ -927,7 +967,60 @@ class VectorStore:
 
         self._pending = None
         self._absorb_deleted(context)
-        return K, rec
+
+    def delete_from(
+        self, owner: str, file_key: str
+    ) -> tuple[tuple[int, ...], tuple[tuple[str, str], ...]]:
+        r"""把这份文件**以及它之后写进向量的所有块**一起删掉。
+
+        为什么只能是"从这里删到末尾"：``del`` 只支持向量末尾的连续区间
+        （理由见 :meth:`truncate`）。而各文件在向量上占的是**连续区间、
+        顺序就是上传顺序**（见 :meth:`~core.registry.Registry.alloc_file`），
+        所以"从这份文件的第一块删到向量末尾"**恰好是一次合法的 ``del``**。
+
+        ★ 代价必须说清楚：被连带删掉的**只有它后面**的文件。想"只删中间某份
+        文件、把后面的块整体前移"是不行的 —— 那要重编号、重新承诺整条向量，
+        论文里没有这个操作（见 :meth:`truncate` 的说明）。
+
+        :returns: ``(被删掉的末尾区间 K, 被删掉的文件键列表)``
+        """
+        key = (owner, file_key)
+        rec = self.files.get(key)
+        if rec is None:
+            raise KeyError(f"文件 {owner}/{file_key} 不存在")
+        if not rec.indices:
+            raise KeyError(f"文件 {owner}/{file_key} 没有任何块")
+        n = self.delta.n
+        g0 = rec.indices[0]
+        K = tuple(range(g0, n))
+        if not K:
+            raise KeyError(f"文件 {owner}/{file_key} 的块不在向量末尾")
+        doomed = tuple(
+            k for k, r in self.files.items() if r.indices and r.indices[0] >= g0
+        )
+        covered = {i for k in doomed for i in self.files[k].indices}
+        if covered != set(K):
+            raise RuntimeError(
+                f"要删的区间有 {len(K)} 块，文件账目只覆盖 {len(covered)} 块 —— "
+                f"这是实现自检，不该发生（文件在向量上必须是连续区间）"
+            )
+        # ★ 协议开动**之前**先把"账退得回去吗"问清楚。
+        #   收账（_settle）是在向量已经缩短、节点已经交回份额**之后**才跑的；
+        #   如果到那一步才发现退不掉，就留下一次说不清账的删除。这里预检一次，
+        #   让所有"退不掉"的情况在动手之前就变成异常。
+        self.registry.tail_plan(len(K), allow_multi=True)
+
+        def _settle() -> None:
+            """退回末尾下标 + 把这几份文件的账目整个摘掉。"""
+            # 跨多份文件 —— 必须用 free_tail_multi（free_tail 只认单份文件）
+            self.registry.free_tail_multi(len(K))
+            for k in doomed:
+                self.files.pop(k, None)
+                # 文件都没了，它的块密钥也没必要留着（本类没有，子类有）
+                self._forget_block_keys(k[0], k[1], 0)
+
+        self._delete_tail(K, _settle)
+        return K, doomed
 
     def rename_owner(self, owner: str, new_owner: str) -> int:
         """把 ``owner`` 名下所有文件与块改挂到 ``new_owner``（删号专用）。
@@ -1125,10 +1218,12 @@ class VectorStore:
 
         偏移量按本次块数递推，所以连续多次小上传也能覆盖到所有服务器。
 
-        副本从主副本的位置**往后连续**取（而不是另抽），这样：
+        副本在**打乱后的环**上从主副本的位置往后连续取（而不是另抽），这样：
 
-        * ``replica_factor = 1`` 时结果与“没有副本”的实现**逐位相同**；
-        * “哪几台合起来能凑齐全部块”仍然均匀 —— 副本也参与轮转。
+        * ``replica_factor = 1`` 时行为与“没有副本”的实现一致；
+        * “哪几台合起来能凑齐全部块”仍然均匀 —— 副本也参与轮转；
+        * 而环**每次上传都重新打乱**、每块还再抽一个随机起点 ⇒ “主 i、副本 i+1”
+          这种固定配对和周期性条纹都不再出现（每块都是独立随机的两/三台）。
 
         :param pool: 只在哪几台里轮转。``None`` = 全部机器。就是“手动指定分发”。
 
@@ -1146,13 +1241,27 @@ class VectorStore:
         """
         nodes = self._resolve_pool(pool)
         m = len(nodes)
+        # ★ 主/副本的**配对**要随机：原来固定是"主 i、副本 i+1"，在块矩阵上
+        #   一眼就看得出规律（用户明确要求"随机一点"）。做法是把整圈机器
+        #   **打乱一次**再照原来的偏移走：
+        #
+        #   * 每块的不同副本仍然落在**不同的**机器上（那条硬性前提没动）；
+        #   * 一次上传仍然走完整圈 ⇒ "任意块数都摊得匀"也没丢；
+        #   * 但谁是主、谁是副本每次都不同，看不出固定搭配。
+        #
+        #   打乱只影响"分到哪台" —— 摘要、证据、验证与谁存哪块无关
+        #   （见 :meth:`upload` 的 ``nodes`` 参数说明）。
+        ring = list(nodes)
+        random.shuffle(ring)
         per_index: dict[int, tuple[str, ...]] = {}
         # ★ 桶覆盖全部节点（含没参与的）；轮转只在 nodes 里发生。
         buckets: dict[str, list[int]] = {nid: [] for nid in self.node_ids}
         for t, j in enumerate(K):
-            base = (self._offset + t) % m
+            # 两级随机：① 环已打乱（改变"谁和谁搭伴"）；② 每块再抽一个随机
+            # 起点（打散"每隔几块就重复一次"的周期性条纹）。
+            base = (self._offset + t + random.randrange(m)) % m
             holders = tuple(
-                nodes[(base + c) % m] for c in range(self.replica_factor)
+                ring[(base + c) % m] for c in range(self.replica_factor)
             )
             per_index[j] = holders
             for nid in holders:
@@ -1227,7 +1336,7 @@ class VectorStore:
         if Q[-1] >= self.delta.n:
             raise ValueError(f"下标 {Q[-1]} 超出当前向量长度 {self.delta.n}")
 
-        certs, holders, used, cts, missing = self._collect(Q, allow_partial=allow_partial)
+        certs, holders, used, _recv, missing = self._collect(Q, allow_partial=allow_partial)
 
         # 允许部分结果时，下面的聚合与验证只针对**真的拿到了**的那些块 ——
         # 把缺的也塞进 F_Q / 证据里就是伪造（那样验出来的“通过”毫无意义）。
@@ -1238,6 +1347,8 @@ class VectorStore:
         with stage("聚合凭证"):
             pi_K = client.aggregate_certificates(certs)
 
+        # 各凭证携带的值已经是**本地从密文重算**出来的（见 _collect），
+        # 所以这里的 F_Q 不是"节点声称的那份"，而是"由交付的字节推出来的那份"。
         valmap: dict[int, int] = {}
         for c in certs:
             valmap.update(dict(zip(c.Q, c.F_Q)))
@@ -1246,10 +1357,6 @@ class VectorStore:
         with stage("承诺验证（VerRetrieve）"):
             report = client.ver_retrieve(Q, F_Q, pi_K)
 
-        # 第 1 层：块哈希自洽 —— 拿回来的密文必须真的对得上那个分量
-        with stage("块哈希自检（SM3）"):
-            hash_ok = {i: vector_element(cts[i]) == valmap[i] for i in Q}
-
         return QueryResult(
             indices=Q,
             values=F_Q,
@@ -1257,7 +1364,6 @@ class VectorStore:
             report=report,
             holders=dict(holders),
             refs=self.registry.blocks_of(Q),
-            hash_ok=hash_ok,
             cert_count=len(certs),
             node_used=tuple(used),
             missing=tuple(sorted(missing)),
@@ -1326,8 +1432,13 @@ class VectorStore:
             if not take:
                 continue
             with stage("取回分量与凭证"):
-                F_part, pi_part, ct_part = self.transport.retrieve(nid, take)
-            certs.append(Certificate(take, F_part, pi_part, nid))
+                pi_part, ct_part = self.transport.retrieve(nid, take)
+            # ★ 值**不采信**对方声称的那一份，自己从回来的密文段重算：
+            #   分量的唯一来源就是交付的字节，于是"承诺的分量"与"实
+            #   际交付的字节"被推导方向绑死 —— 密文被换 ⇒ 这里算出的
+            #   值就变 ⇒ 后面的承诺验证必然不过。
+            F_derived = tuple(vector_element(ct) for ct in ct_part)
+            certs.append(Certificate(take, F_derived, pi_part, nid))
             for j, ct in zip(take, ct_part):
                 holders[j] = nid
                 cts[j] = ct
@@ -1430,7 +1541,7 @@ class VectorStore:
         ct_of: dict[int, bytes] = {}
         with stage("取回密文"):
             for nid, idxs in by_node.items():
-                _, _, ct_part = self.transport.retrieve(nid, idxs)
+                _, ct_part = self.transport.retrieve(nid, idxs)
                 ct_of.update(dict(zip(idxs, ct_part, strict=True)))
 
         out: dict[int, bytes] = {}
