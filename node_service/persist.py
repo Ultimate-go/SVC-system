@@ -7,8 +7,13 @@
 存什么
 ------
 * ``meta``  —— 公开参数 ``(N, g, l, n_max)`` 与自己的 ``node_id``
-* ``state`` —— 一行：``(δ, st, I, F_I)``
-* ``blobs`` —— 自己那几段密文
+* ``state`` —— **每份参与的文件一行**：``(offset, δ, st, I, F_I)``
+* ``blobs`` —— 自己那几段密文，键是 ``(offset, 局部块号)``
+
+★ 为什么是“每份文件一行”：新方案里**每份文件是一条独立向量**，一台节点
+可以同时参与好几份（各有各的 δ 与位图）。而 ``I`` 里的下标是**文件内局部
+块号**（``svc`` 层假定下标密集 ``0..n-1``），不同文件的同名块号指的是完全
+不同的位置 —— 所以密文的键必须带上 ``offset``。
 
 **不存什么**：``p``、``q``、``φ(N)`` —— 连它们存在过这件事都不该写进来。
 节点只拿公开参数，它凭公开参数与更新密钥就能算出自己该有的状态。
@@ -30,7 +35,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS state (
-    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    offset    INTEGER PRIMARY KEY,
     delta_U   TEXT NOT NULL,
     delta_C   TEXT NOT NULL,
     delta_n   INTEGER NOT NULL,
@@ -40,8 +45,10 @@ CREATE TABLE IF NOT EXISTS state (
     FI_json   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS blobs (
-    global_index INTEGER PRIMARY KEY,
-    ciphertext   BLOB NOT NULL
+    offset      INTEGER NOT NULL,
+    local_index INTEGER NOT NULL,
+    ciphertext  BLOB NOT NULL,
+    PRIMARY KEY (offset, local_index)
 );
 """
 
@@ -93,43 +100,48 @@ class NodeDB:
 
     # -- 状态 ---------------------------------------------------------------
 
-    def load_state(self) -> dict | None:
-        """读回 ``(δ, st, I, F_I)``，没有则 ``None``。"""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT delta_U, delta_C, delta_n, S_I, Lambda_I, I_json, FI_json "
-                "FROM state WHERE id = 1"
-            ).fetchone()
-        if row is None:
-            return None
-        U, C, n, S_I, Lam, I_json, FI_json = row
-        return {
-            "delta": (U, C, int(n)),
-            "st": (S_I, Lam),
-            "I": json.loads(I_json),
-            "FI": json.loads(FI_json),
-        }
-
-    def load_blobs(self) -> dict[int, bytes]:
+    def load_states(self) -> dict[int, dict]:
+        """读回**每份文件**的 ``(δ, st, I, F_I)``，按 ``offset`` 索引。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT global_index, ciphertext FROM blobs"
+                "SELECT offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
+                "       I_json, FI_json FROM state"
             ).fetchall()
-        return {int(i): bytes(ct) for i, ct in rows}
+        out: dict[int, dict] = {}
+        for off, U, C, n, S_I, Lam, I_json, FI_json in rows:
+            out[int(off)] = {
+                "delta": (U, C, int(n)),
+                "st": (S_I, Lam),
+                "I": json.loads(I_json),
+                "FI": json.loads(FI_json),
+            }
+        return out
 
-    def save_state(self, *, delta, st, I, FI) -> None:
-        """整行覆写 —— 状态只有一行，一次追加只写一次。"""
+    def load_blobs(self) -> dict[int, dict[int, bytes]]:
+        """读回密文，按 ``offset`` 分组（键是**文件内局部块号**）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT offset, local_index, ciphertext FROM blobs"
+            ).fetchall()
+        out: dict[int, dict[int, bytes]] = {}
+        for off, li, ct in rows:
+            out.setdefault(int(off), {})[int(li)] = bytes(ct)
+        return out
+
+    def save_state(self, offset: int, *, delta, st, I, FI) -> None:
+        """整行覆写 —— 每份文件一行，一次更新只写一份。"""
         with self._lock:
             self._conn.execute(
-                "INSERT INTO state(id, delta_U, delta_C, delta_n, S_I, Lambda_I, "
+                "INSERT INTO state(offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
                 "                  I_json, FI_json) "
-                "VALUES(1, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(offset) DO UPDATE SET "
                 "  delta_U = excluded.delta_U, delta_C = excluded.delta_C, "
                 "  delta_n = excluded.delta_n, S_I = excluded.S_I, "
                 "  Lambda_I = excluded.Lambda_I, I_json = excluded.I_json, "
                 "  FI_json = excluded.FI_json",
                 (
+                    int(offset),
                     str(delta.U),
                     str(delta.C),
                     int(delta.n),
@@ -140,19 +152,37 @@ class NodeDB:
                 ),
             )
 
-    def save_blobs(self, blobs: dict[int, bytes]) -> None:
-        """**只写新增的** —— 每次上传都重写全部的话，n=1024 时就是 1024 行。"""
+    def delete_state(self, offset: int) -> int:
+        """删掉**一段**的状态行 —— 这一份文件在本节点上彻底没了。
+
+        ★ 什么时候会走到这里：协调者把整份文件删掉（``n = 0``）。那时节点侧的
+          :meth:`~core.node_state.NodeState.apply_delete` 已经把这一段从内存里
+          **整个摘掉**了，库这边必须跟着删行 —— 否则重启时 :meth:`load_states`
+          会把一个空段读回来，节点与协调者对"现在有哪些段"的认识就分叉了
+          （协调者那边本来就是**直接删行**的），启动自检会报
+          「node-x 停在 [... (10, 0)]，协调者是 [...]」并**拒绝启动**。
+
+        :returns: 删掉的状态行数（0 或 1）
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM state WHERE offset = ?", (int(offset),)
+            )
+        return int(cur.rowcount or 0)
+
+    def save_blobs(self, offset: int, blobs: dict[int, bytes]) -> None:
+        """**只写新增的** —— 每次都重写全部的话，n=1024 时就是 1024 行。"""
         if not blobs:
             return
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO blobs(global_index, ciphertext) VALUES(?, ?) "
-                "ON CONFLICT(global_index) DO UPDATE SET "
+                "INSERT INTO blobs(offset, local_index, ciphertext) VALUES(?, ?, ?) "
+                "ON CONFLICT(offset, local_index) DO UPDATE SET "
                 "  ciphertext = excluded.ciphertext",
-                [(int(i), sqlite3.Binary(ct)) for i, ct in blobs.items()],
+                [(int(offset), int(i), sqlite3.Binary(ct)) for i, ct in blobs.items()],
             )
 
-    def delete_blobs(self, indices: Iterable[int]) -> int:
+    def delete_blobs(self, offset: int, indices: Iterable[int]) -> int:
         """删掉若干下标的密文（交回 ``RmvStorage`` / 应用 ``del`` 之后必须真删）。
 
         :returns: 实际删掉的行数
@@ -170,7 +200,8 @@ class NodeDB:
             return 0
         with self._lock:
             cur = self._conn.executemany(
-                "DELETE FROM blobs WHERE global_index = ?", [(i,) for i in want]
+                "DELETE FROM blobs WHERE offset = ? AND local_index = ?",
+                [(int(offset), i) for i in want],
             )
         return int(cur.rowcount or 0)
 
@@ -186,10 +217,15 @@ class NodeDB:
     def stats(self) -> dict:
         with self._lock:
             n_blobs = self._conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
-            has_state = (
-                self._conn.execute("SELECT COUNT(*) FROM state").fetchone()[0] > 0
-            )
-        return {"file": str(self.path), "blobs": int(n_blobs), "has_state": has_state}
+            n_vectors = self._conn.execute(
+                "SELECT COUNT(*) FROM state"
+            ).fetchone()[0]
+        return {
+            "file": str(self.path),
+            "blobs": int(n_blobs),
+            "vectors": int(n_vectors),
+            "has_state": n_vectors > 0,
+        }
 
     def close(self) -> None:
         with self._lock:

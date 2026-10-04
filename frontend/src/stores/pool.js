@@ -108,12 +108,17 @@ export const usePoolStore = defineStore('pool', {
   actions: {
     addCard({ label, result, src = '' }) {
       const indices = [...(result?.indices || [])]
+      // ★ 卡片要把"这份证据来自哪份文件的第几块"一并收下：界面靠它说人话，
+      //   而不是把内部坐标（全局位置）摊给用户看。
+      //   单文件查询（/api/query）的响应里也有 files，所以两条路都存在。
+      const files = Array.isArray(result?.files) ? result.files : null
       const dup = this.cards.find(
         (c) => c.indices.length === indices.length && c.indices.join(',') === indices.join(','),
       )
       if (dup) {
         // 同一集合有卡了就把内容换成新的，不能直接 return（否则旧作废标记会残留）。
         dup.result = result
+        dup.files = files
         if (src) dup.src = src
         dup.n = typeof result?.delta_n === 'number' ? result.delta_n : dup.n
         dup.fp = typeof result?.delta_fp === 'string' ? result.delta_fp : dup.fp
@@ -128,6 +133,7 @@ export const usePoolStore = defineStore('pool', {
         label,
         src,
         indices,
+        files,
         result,
         n: typeof result?.delta_n === 'number' ? result.delta_n : null,
         fp: typeof result?.delta_fp === 'string' ? result.delta_fp : null,

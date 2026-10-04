@@ -611,7 +611,14 @@ class Settings:
     所以这里没有任何"密钥文件路径"可配 —— 也就没有了"测试库配错\n    到开发库那份主密钥"那个坑（真踩过）。
     """
 
-    db_path: Path = field(default_factory=lambda: BASE_DIR / "vds.db")
+    #: SQLite 文件路径。★ 支持 ``VDS_DB_PATH`` 覆盖 —— 演示 / 冒烟 / 自检
+    #: 可以用一个临时库跑完整流程，**不碰**正式那份 ``vds.db``。
+    #: （以前只能靠“换个目录跑”，很容易误伤正式库。）
+    db_path: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("VDS_DB_PATH") or (BASE_DIR / "vds.db")
+        )
+    )
     secret_key: str = field(
         default_factory=lambda: os.environ.get("VDS_SECRET_KEY") or secrets.token_urlsafe(32)
     )

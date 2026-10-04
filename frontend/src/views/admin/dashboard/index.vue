@@ -145,18 +145,38 @@ onMounted(() => {
     <div class="compact-sections">
       <section class="compact-section">
         <div class="section-heading">
-          <div><span class="section-kicker mono">GLOBAL COMMITMENT</span><h2>全局摘要 <span class="mono">δ = (U, C, n)</span></h2></div>
+          <div><span class="section-kicker mono">COMMITMENTS</span><h2>逐文件摘要 <span class="mono">每份文件一条向量</span></h2></div>
           <span class="section-note mono">{{ usageRatio }}% USED</span>
         </div>
         <div class="panel commitment-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">全局向量的公开指纹与已用位置</span><span class="live-mark"><i />SYNCED</span></div>
+          <div class="panel-title-row"><span class="panel-subtitle">每份文件各自的公开指纹与已用位置</span><span class="live-mark"><i />SYNCED</span></div>
           <div class="delta-row">
             <RingGauge :value="delta.n" :max="crs.n_max" label="已用位置" />
             <div class="delta-detail">
-              <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">全局块数</span></div>
-              <div class="delta-item"><span class="k">U</span><span class="v mono" :title="delta.U">{{ hexFp(delta.U, 16) }}</span><span class="hint">摘要指纹 · 前 16 位</span></div>
-              <div class="delta-item"><span class="k">C</span><span class="v mono" :title="delta.C">{{ hexFp(delta.C, 16) }}</span><span class="hint">摘要指纹 · 前 16 位</span></div>
+              <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">全局位置总数</span></div>
+              <!-- ★ 架构变了：摘要是**逐文件**的，没有单一的全局 U / C。
+                   以前这里显示 delta.U / delta.C —— 那两个字段在新架构里
+                   根本不存在，于是永远显示 "—"。现在如实给条数 + 逐条列表。 -->
+              <div class="delta-item"><span class="k">向量</span><span class="v mono">{{ (delta.files || []).length }}</span><span class="hint">每份文件一条</span></div>
+              <div class="delta-item">
+                <span class="k">δ 指纹</span>
+                <span
+                  class="v mono"
+                  :title="(delta.files || []).length === 1 ? ('U = ' + delta.files[0].U + '\nC = ' + delta.files[0].C) : ''"
+                >{{ (delta.files || []).length === 1 ? hexFp(delta.files[0].delta_fp, 16) : '每份各不相同' }}</span>
+                <span class="hint">一份文件一个值</span>
+              </div>
             </div>
+          </div>
+          <div
+            v-for="f in (delta.files || [])"
+            :key="`${f.owner}/${f.file_key}`"
+            class="panel-subtitle mono"
+            style="white-space: normal; margin-top: 6px"
+            :title="'U = ' + f.U + '\nC = ' + f.C"
+          >
+            {{ f.owner }} / {{ f.file_key }} · n={{ f.n }} · offset={{ f.offset }} ·
+            {{ hexFp(f.delta_fp, 16) }}
           </div>
         </div>
       </section>

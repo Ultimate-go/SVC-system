@@ -16,9 +16,11 @@ import { ElMessage } from 'element-plus'
 import { usePoolStore } from '../../../stores/pool'
 import { useThemeStore } from '../../../stores/theme'
 import { evidenceApi } from '../../../api/evidence'
+import { filesApi } from '../../../api/files'
 import { systemApi } from '../../../api/system'
 import { span, fmtAgo } from '../../../utils/format'
-import { parseIndexRange } from '../../../utils/validate'
+// ★ 界面上要的是"第几块"（parseBlockRange），不是内部坐标（parseIndexRange）
+import { parseBlockRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import DetailToggle from '../../../components/common/DetailToggle.vue'
@@ -54,8 +56,62 @@ const batchResult = ref(null)
 const corruptResult = ref(null)
 const corruptRunning = ref(false)
 
-// 取证据的下标输入，如 0 或 0,1,2 或 0-2 或 0-2,5,8
-const fetchInput = ref('0')
+/* ---- 取回：**选文件 + 第几块**（主交互）----
+ *
+ * ★ 为什么不再让用户填"全局下标"：那是**内部坐标**，它由上传顺序决定，
+ *   和用户脑子里想的"这份文件的第几块"是两码事。把内部坐标露到界面上，
+ *   用户就得自己去数前面的文件占了多少位置 —— 错一次还很难看出来。
+ *   现在界面上只有文件名与块号，转换成全局下标是前端自己的事。
+ */
+const fileOptions = ref([])
+const fetchFileId = ref(null)
+const blockInput = ref('0')
+/** 副本数（从 /api/status 读）—— 取回耗时的口径之一，读不到就不显示。 */
+const replicas = ref(null)
+
+const pickedFile = computed(
+  () => fileOptions.value.find((f) => f.id === fetchFileId.value) || null,
+)
+
+/**
+ * 这次取回大概要多久 —— 界面上必须有个数，但**绝不编毫秒**。
+ *
+ * ★ 口径来自方案本身：一次取回里，每块都要问**持它的那 r 台**节点各算
+ *   一次模幂，所以耗时 ≈ 块数 × 副本数 × 单次模幂。前两项能算准，第三项
+ *   取决于机器 —— 所以这里给"要打几台、节点要算几次"这种**可核对**的口径
+ *   加一个相对档位；真正的毫秒数由响应里的 timings 带回来。
+ */
+const fetchEta = computed(() => {
+  const f = pickedFile.value
+  if (!f) return null
+  let blocks
+  try {
+    blocks = parseBlockRange(blockInput.value, f.block_count)
+  } catch {
+    return null
+  }
+  if (!blocks.length) return null
+  const level =
+    blocks.length <= 2 ? '很快' : blocks.length <= 8 ? '要等一下' : '会明显等一会儿'
+  return {
+    blocks: blocks.length,
+    replicas: typeof replicas.value === 'number' ? replicas.value : null,
+    asks: typeof replicas.value === 'number' ? blocks.length * replicas.value : null,
+    level,
+  }
+})
+
+async function loadFiles() {
+  try {
+    const { data } = await filesApi.list()
+    fileOptions.value = Array.isArray(data) ? data : []
+    if (!fileOptions.value.some((f) => f.id === fetchFileId.value)) {
+      fetchFileId.value = fileOptions.value[0]?.id ?? null
+    }
+  } catch {
+    /* 列表拉不到就先空着，取回时会给提示 */
+  }
+}
 
 const disaggRunning = ref(false)
 const disaggResult = ref(null)
@@ -112,8 +168,20 @@ const isStale = (card) => pool.staleIds.has(card.id)
  * ★ 所以本改动**只落在这一个文件**：`verify/index.vue` 存进来的 label
  *   仍然带着旧下标，但它显示时会被这里覆盖，那边不必动。
  */
+function cardScope(card) {
+  // ★ 优先用"哪份文件的第几块"说话（界面坐标）；只有旧卡（没存 files）
+  //   才退回内部坐标。这样新卡片上根本不会出现"全局下标"这种字样。
+  const files = card.files || card.result?.files || null
+  if (Array.isArray(files) && files.length) {
+    return files
+      .map((f) => `${f.file_key} 第 ${span(f.block_indices || [])} 块`)
+      .join('；')
+  }
+  return span(card.indices)
+}
+
 function cardTitle(card) {
-  const scope = span(card.indices)
+  const scope = cardScope(card)
   const raw = String(card.label || '')
   if (!raw) return scope
   const cut = raw.search(/[：:]/)
@@ -124,6 +192,9 @@ async function syncDelta() {
   try {
     const { data } = await systemApi.status()
     pool.syncDelta({ fp: null, n: data.delta.n })
+    // 副本数：取回耗时的口径之一（每块要问持它的那 r 台）。
+    // 拿不到就留 null —— 界面上宁可不显示这个数，也不要显示一个编的。
+    replicas.value = data?.crs?.replicas ?? data?.replicas ?? null
     // 也取指纹：status 没有 delta_fp，用 query 一个空集取不到 —— 直接用 n 与已有卡比对。
     // 实际上 delta_fp 需要从某次 query 拿。这里从池子里已有的 fp 兜底。
   } catch {
@@ -132,15 +203,41 @@ async function syncDelta() {
 }
 
 async function fetchOne() {
+  const f = pickedFile.value
+  if (!f) {
+    ElMessage.warning('先选一份文件')
+    return
+  }
+  let blocks
   try {
-    const indices = parseIndexRange(fetchInput.value)
-    if (!indices.length) {
-      ElMessage.warning('请输入下标')
-      return
-    }
-    const { data } = await evidenceApi.query(indices, false)
-    pool.addCard({ label: `取回：${span(indices)}`, src: '手动取回', result: data })
-    ElMessage.success(`已取回一份覆盖 ${indices.length} 个下标的证据`)
+    blocks = parseBlockRange(blockInput.value, f.block_count)
+  } catch (e) {
+    ElMessage.error(e?.message || '块号写法不对')
+    return
+  }
+  if (!blocks.length) {
+    ElMessage.warning('请输入第几块')
+    return
+  }
+  try {
+    // ★ 界面坐标 → 内部坐标的**唯一转换点**：块号交给后端，由它按这份文件的
+    //   位置段换成全局下标（前端不复现那份映射，免得多一处会分叉的真相）。
+    //
+    //   targets 的形状是 **[owner, file_key] 数组对**（后端是
+    //   ``list[tuple[str, str]]``）—— 发成 ``{owner, file_key}`` 对象会 422，
+    //   而且 422 的报错只说"字段不合法"，看不出是形状问题。
+    const { data } = await evidenceApi.queryFiles(
+      [[f.owner, f.file_key]],
+      blocks,
+    )
+    pool.addCard({
+      label: `取回：${f.file_key} 第 ${span(blocks)} 块`,
+      src: '手动取回',
+      result: data,
+    })
+    ElMessage.success(
+      `已取回 ${f.file_key} 第 ${span(blocks)} 块（共 ${blocks.length} 块）的证据`,
+    )
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || e?.message || '取回失败')
   }
@@ -201,19 +298,47 @@ async function corruptVerify() {
   }
 }
 
-/** 打开分解弹窗（校验：勾了卡、且那张卡覆盖 ≥ 2 个下标）。 */
+/** 这张卡覆盖的**文件**（去重后的 "owner/file_key" 列表）。 */
+function cardFiles(card) {
+  const fs = card?.files || card?.result?.files || []
+  return [...new Set(fs.map((f) => `${f.owner} / ${f.file_key}`))]
+}
+
+/** 这张卡是不是只覆盖一份文件（分解的硬要求）。 */
+const disaggFiles = computed(() => cardFiles(disaggCard.value))
+const disaggSingleFile = computed(() => disaggFiles.value.length <= 1)
+
+/**
+ * 打开分解弹窗。
+ *
+ * ★ 两条硬约束得先查清，否则用户填完范围才捶 400/500：
+ *   ① 那张卡要覆盖 ≥ 2 个下标（否则拆不出真子集）；
+ *   ② 那张卡必须**只覆盖一份文件** —— 证据是"这份文件的 n"的函数，
+ *      跨文件的卡拆出来的 π_K 没有意义（后端会明确回 400）。
+ *      原来只查了 ①，所以勾中跨文件的卡一点「分解」必然报错。
+ */
 function openDisagg() {
   const cards = pool.selectedCards
   if (!cards.length) {
     ElMessage.warning('先勾选一张卡片（覆盖至少 2 个下标）')
     return
   }
-  const c = cards.find((x) => (x.indices?.length || 0) >= 2)
-  if (!c) {
+  const many = cards.filter((x) => (x.indices?.length || 0) >= 2)
+  if (!many.length) {
     ElMessage.warning('勾中的卡片都只覆盖 1 个下标，拆不出真子集')
     return
   }
-  disaggCardId.value = c.id
+  const single = many.find((x) => cardFiles(x).length <= 1)
+  if (!single) {
+    const names = cardFiles(many[0])
+    ElMessage.warning(
+      '分解要在「同一份文件」的卡上做 —— 勾中的卡片都跨了多份文件' +
+        (names.length ? `（如 ${names.slice(0, 3).join('、')}${names.length > 3 ? ' 等' : ''}）` : '') +
+        '。请先在「取回」里按单份文件取一份证据，再分解。',
+    )
+    return
+  }
+  disaggCardId.value = single.id
   resetDisaggRange()
   showAllIndices.value = false
   disaggOpen.value = true
@@ -256,7 +381,10 @@ async function confirmDisagg() {
   }
 }
 
-onMounted(() => syncDelta())
+onMounted(() => {
+  syncDelta()
+  loadFiles()
+})
 </script>
 
 <template>
@@ -265,10 +393,23 @@ onMounted(() => syncDelta())
 
     <div class="panel mb-3">
       <div class="toolbar">
-        <el-input
-          v-model="fetchInput"
+        <el-select
+          v-model="fetchFileId"
           class="fetch-input"
-          placeholder="请输入下标"
+          placeholder="选一份文件"
+          filterable
+        >
+          <el-option
+            v-for="f in fileOptions"
+            :key="f.id"
+            :value="f.id"
+            :label="`${f.file_key}（${f.owner}，${f.block_count} 块）`"
+          />
+        </el-select>
+        <el-input
+          v-model="blockInput"
+          class="fetch-input"
+          placeholder="第几块，如 0 或 0-2"
           clearable
         />
         <el-button type="primary" @click="fetchOne">取回证据</el-button>
@@ -278,7 +419,17 @@ onMounted(() => syncDelta())
         <el-button v-if="pool.cards.length" link type="danger" @click="pool.clear()">清空</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
-      <p class="note">只存在当前标签页（sessionStorage），关掉就没了。是否作废看 δ 指纹。</p>
+      <p class="note">
+        只存在当前标签页（sessionStorage），关掉就没了。是否作废看 δ 指纹。
+        <template v-if="fetchEta">
+          ｜本次取回 {{ fetchEta.blocks }} 块：
+          <template v-if="fetchEta.asks">
+            每块要问持它的那 {{ fetchEta.replicas }} 台，共 {{ fetchEta.asks }} 次模幂
+          </template>
+          <template v-else>块数越多越慢（每块都要问持它的那几台各算一次）</template>
+          —— {{ fetchEta.level }}。
+        </template>
+      </p>
     </div>
 
     <div v-if="!pool.cards.length">
@@ -388,6 +539,16 @@ onMounted(() => syncDelta())
             {{ showAllIndices ? '收起完整下标' : '展开完整下标' }}
           </el-button>
         </div>
+        <!-- ★ 说清"这是哪份文件的证据"：分解的硬约束就是它必须只有一份文件。 -->
+        <div v-if="disaggFiles.length" class="dg-row">
+          <span class="dg-lbl">所属文件</span>
+          <span class="mono" :class="{ 'text-danger': !disaggSingleFile }">
+            {{ disaggFiles.join('、') }}
+          </span>
+          <span v-if="!disaggSingleFile" class="text-danger">
+            —— 跨了 {{ disaggFiles.length }} 份文件，不能分解；请按单份文件重新取一份证据
+          </span>
+        </div>
         <div class="dg-idx" :class="{ open: showAllIndices }">
           <span class="mono">{{ showAllIndices ? disaggIndices.join(', ') : span(disaggIndices) }}</span>
         </div>
@@ -417,7 +578,7 @@ onMounted(() => syncDelta())
         <el-button
           type="primary"
           :loading="disaggRunning"
-          :disabled="!disaggK.length"
+          :disabled="!disaggK.length || !disaggSingleFile"
           @click="confirmDisagg"
         >分解</el-button>
       </template>

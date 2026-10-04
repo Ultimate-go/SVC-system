@@ -136,7 +136,7 @@ def main() -> int:
             idx = manager._require().file_indices(owner, file_key)
             print(
                 f"[demo] {owner}/{file_key}  {row.total_bytes} B → "
-                f"{row.block_count} 块（全局下标 {idx[0]}-{idx[-1]}）"
+                f"{row.block_count} 块（全局位置 {idx[0]}-{idx[-1]}）"
             )
         print("[demo] 每块的块密钥都用**所有者的公钥**封装 —— 只有他能解密；验证不限")
 

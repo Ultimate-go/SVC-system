@@ -97,7 +97,7 @@ class NodeTransport(Protocol):
         """
 
     def retrieve(
-        self, node_id: str, Q: Sequence[int]
+        self, node_id: str, offset: int, Q: Sequence[int]
     ) -> tuple[Opening, tuple[bytes, ...]]:
         """向一台节点索取 ``Q`` 的**内容**与一份子向量证据。
 
@@ -108,14 +108,20 @@ class NodeTransport(Protocol):
         ★ 刻意**不回**节点声称的向量分量：分量由调用方**自己从密文段算**。
         这样"承诺的分量"与"实际交付的字节"之间没有可声明的自由度 —— 节点
         换了密文，调用方算出的值就跟着变，承诺验证必然不过。
+
+        ★ ``offset`` 必填，``Q`` 是**文件内局部块号**。新方案里一台节点同时
+        参与好几份文件，各自一段视图；不带 ``offset`` 就不知道该翻哪一份。
         """
 
-    def pos_prove(self, node_id: str, indices: Sequence[int]) -> "PoSProof":
+    def pos_prove(self, node_id: str, offset: int, indices: Sequence[int]) -> "PoSProof":
         """让一台节点回答一次**存储证明**（PoR）挑战，只回它自己那一份。
 
         与 :meth:`retrieve` 的区别不只是“少返回密文”：``retrieve`` 是**检索**，
         要把密文带回来让调用方自己算出分量（那是验证的唯一依据）；而 PoR 的目的恰恰是
         **不下载任何内容**就确认数据还在。
+
+        ★ ``offset`` 必填：``indices`` 是**文件内局部块号**，审计是按
+        **某一份文件**发起的（见 ``VectorStore.pos_audit``）。
 
         :param indices: 挑战点名的下标集合 ``r``。节点只答 ``Q = I ∩ r``
             —— 一个下标都不沾的节点会返回一份**空份额**（不带群元素），
@@ -126,13 +132,13 @@ class NodeTransport(Protocol):
         self,
         node_id: str,
         *,
+        offset: int,
         positions: Sequence[int],
         values: Sequence[int],
         proof: Opening,
         blobs: Mapping[int, bytes] | None = None,
     ) -> None:
         """让一台节点**接收**一批已经承诺过的位置（``StrgNode.AddStorage``）。
-
         这是本协议里唯一一个「往节点里塞东西」的方法，所以它的定位要讲清楚：
         它塞的是**一份来自另一台节点的检索凭证** :math:`(Q, F_Q, \\pi_Q)`，
         节点会自己验一遍再合并 —— 协调者**不**（也无法）直接指定节点的新状态。
@@ -149,7 +155,8 @@ class NodeTransport(Protocol):
         （见 ``backend.manager.StoreManager.redistribute``）。
         时机很关键 —— 必须在那些机器**还活着**的时候搬，重启之后就来不及了。
 
-        :param positions: 要接收的下标
+        :param offset: 这批位置属于**哪一份文件**（节点按它认视图）
+        :param positions: 要接收的下标（**文件内局部块号**）
         :param values: 与 ``positions`` 一一对应的分量
         :param proof: :math:`\\pi_Q`
         :param blobs: ``下标 -> 密文段``。节点要用它满足
@@ -200,7 +207,9 @@ class NodeTransport(Protocol):
            效果相同 —— 掉队的节点算出的 ``C`` 对不上 ``delta_new``，当场暴露。
         """
 
-    def drop(self, positions: Mapping[str, Sequence[int]]) -> None:
+    def drop(
+        self, offset: int, positions: Mapping[str, Sequence[int]]
+    ) -> None:
         """让若干节点**交出**自己手里的某些位置（论文的 ``StrgNode.RmvStorage``）。
 
         这是 ``del`` 的前置步骤，不是可选项：``vds.updates._apply_del`` 要求每个
@@ -208,12 +217,19 @@ class NodeTransport(Protocol):
         我们的分片是「轮转 + 每块 2 份副本」，一个跨台的末尾区间几乎必然让某些
         节点部分相交，所以必须先让它们把 ``K`` 那部分交出来。
 
-        :param positions: ``节点 -> 要交回的下标``。空元组的节点会被跳过。
+        :param offset: 这份文件在哪一段（节点按它认视图）
+        :param positions: ``节点 -> 要交回的**全局位置号**``。空元组的节点会被跳过。
 
         .. important::
 
            **必须幂等**：交回实现里"本来就不在我手里的下标"直接跳过。否则
            "交回了 2 台、第 3 台掉线"之后整次截断就没法重来了。
+
+        .. note::
+
+           ``positions`` 用的是**全局位置号**（与 ``holder_of`` / ``_plan_drops``
+           同一套）。转换到局部块号发生在各实现内部 —— ``LocalTransport`` 当场
+           转，``HttpTransport`` 交给服务端转（服务端才知道自己的位置视图）。
         """
 
     def apply_delete(
@@ -278,10 +294,9 @@ class LocalTransport:
                 out.append(
                     {
                         "node_id": nid,
-                        "n": 0,
+                        "vectors": [],
+                        "offsets": [],
                         "held": 0,
-                        "indices": [],
-                        "span": "—",
                         "valid": True,
                         "proved": None,
                         "fresh": True,
@@ -292,22 +307,24 @@ class LocalTransport:
         return out
 
     def retrieve(
-        self, node_id: str, Q: Sequence[int]
+        self, node_id: str, offset: int, Q: Sequence[int]
     ) -> tuple[Opening, tuple[bytes, ...]]:
+        """取 ``(π_Q, 密文段)``。``Q`` 是**该文件内**的局部块号。"""
         state = self.states.get(node_id)
         if state is None:
             raise TransportError(f"节点 {node_id} 不存在")
         want = tuple(int(i) for i in Q)
-        _F_Q, pi_Q = state.retrieve(want)
+        _F_Q, pi_Q = state.retrieve(offset, want)
+        store = state.blobs_of(offset)
         try:
-            cts = tuple(state.blobs[i] for i in want)
+            cts = tuple(store[i] for i in want)
         except KeyError as exc:
             raise TransportError(
                 f"{node_id} 声称持有下标 {exc.args[0]}，但没有对应的密文"
             ) from exc
         return pi_Q, cts
 
-    def pos_prove(self, node_id: str, indices: Sequence[int]) -> PoSProof:
+    def pos_prove(self, node_id: str, offset: int, indices: Sequence[int]) -> PoSProof:
         """本地模式下直接跑 :func:`vds.pos.pos_prove`。
 
         走 ``state.node()`` 包出的 :class:`~vds.storage_node.StorageNode`，
@@ -321,12 +338,15 @@ class LocalTransport:
         if not want:
             raise TransportError("挑战下标不能为空")
         # Challenge.n 只是记账（pos_prove 不看它），所以用节点自己的 n。
-        return pos_prove(state.node(), Challenge(indices=want, n=state.delta.n))
+        return pos_prove(
+            state.node(offset), Challenge(indices=want, n=state.delta_of(offset).n)
+        )
 
     def adopt(
         self,
         node_id: str,
         *,
+        offset: int,
         positions: Sequence[int],
         values: Sequence[int],
         proof: Opening,
@@ -341,10 +361,14 @@ class LocalTransport:
         if state is None:
             raise TransportError(f"节点 {node_id} 不存在")
         try:
-            state.adopt(positions, values, proof, blobs=blobs)
+            state.adopt(offset, positions, values, proof, blobs=blobs)
         except NodeRejected as exc:
             raise TransportError(f"{node_id} 拒绝接收：{exc}") from exc
-        if not state.check():
+        # ★ 只查**被改动的那一段**。无参 ``check()`` 会遍历该节点持有的**全部**
+        #   位置段并逐段跑密码学验证 —— 一处写操作的开销就变成「全库块数」，
+        #   而本次只碰了 ``offset`` 这一段。实测（4 块文件、2 副本、4 台）：
+        #   偏移 0 时 148 次 pow / 223 ms，偏移 64 时涨到 492 次 / 822 ms。
+        if not state.check(offset):
             raise TransportError(f"{node_id} 接收后本地视图不合法")
         self.states[node_id] = state
 
@@ -360,35 +384,50 @@ class LocalTransport:
         assignments: Mapping[str, Sequence[int]],
         blobs: Mapping[str, Mapping[int, bytes]],
     ) -> None:
+        # ★ 两套下标：``assignments`` / ``blobs`` 的键是**全局位置号**（协调者记账用它），
+        #   而节点侧（``LocalView.I`` / 密文表）用的是**文件内局部块号**。
+        #   ★ 必须用 ``delta_new.positions``（追加**之后**的位置列表）：
+        #     新文件的 ``delta_old`` 是空向量（positions 为空），拿它建映射会 KeyError。
+        #   交换只在传输层发生，store 不用管。
+        idx_of = {g: i for i, g in enumerate(delta_new.positions)}
+        off = int(delta_old.offset)
         for nid in self.node_ids:
-            seg = tuple(assignments.get(nid, ()))
+            seg = tuple(idx_of[g] for g in assignments.get(nid, ()))
             state = self.states.get(nid)
 
-            if state is None or not state.has_state:
-                # 第一次被指派任务：从空视图起步（π_∅ = (U_n, C_n)）
+            if state is None:
                 state = NodeState(nid, self.session)
+            if not state.has_view(off):
+                # 这份文件还没参与过：从空视图起步（π_∅ = (U_n, C_n)）。
+                # ★ 这里用 ``delta_new`` 而不是 ``delta_old``：紧接着的
+                #   ``absorb`` 会把 ``current.delta.C`` 当成“**新**承诺”来用，
+                #   π_∅ 必须与它配套。
+                # ★ 也不要在这里重建 NodeState —— 那样会把该节点参与过的
+                #   别的文件的视图一起丢掉（一台节点同时存着好几份文件的数据）。
                 state.adopt_empty(delta_new)
             else:
                 try:
-                    state.adapt(op_delta, witness)
+                    state.adapt(off, op_delta, witness, delta_new)
                 except NodeRejected as exc:
                     raise TransportError(f"{nid} 拒绝更新：{exc}") from exc
-                if state.delta != delta_new:
+                if state.delta_of(off) != delta_new:
                     # 节点自己算出来的摘要必须与协调者算的逐位相同 ——
                     # 两条路径（apply_update vs push_update）的交叉验证
                     raise TransportError(
                         f"{nid} 自己算出的摘要与协调者不一致："
-                        f"{state.delta!r} vs {delta_new!r}"
+                        f"{state.delta_of(off)!r} vs {delta_new!r}"
                     )
 
+            nb = blobs.get(nid)
             state.absorb(
                 delta_old=delta_old,
                 new_positions=tuple(op_delta.K),
                 assigned=seg,
                 values_all=tuple(op_delta.F_new),
-                blobs=blobs.get(nid),
+                blobs={idx_of[g]: ct for g, ct in nb.items()} if nb else None,
+                delta_new=delta_new,
             )
-            if not state.check():
+            if not state.check(off):
                 raise TransportError(f"{nid} 更新后本地视图不合法")
             self.states[nid] = state
 
@@ -400,50 +439,62 @@ class LocalTransport:
         witness: UpdateWitness,
         blobs: Mapping[str, Mapping[int, bytes]],
     ) -> None:
+        off = int(delta_new.offset)
+        # 与 apply_append 同理：密文表的键要从全局位置号换成局部块号
+        idx_of = {g: i for i, g in enumerate(delta_new.positions)}
         for nid in self.node_ids:
             state = self.states.get(nid)
-            if state is None or not state.has_state:
+            if state is None or not state.has_view(off):
                 raise TransportError(
                     f"{nid} 还没有状态，无法应用 {op_delta.op} 更新"
                     f"（修改只能作用于已经分发下去的数据）"
                 )
             try:
-                state.adapt(op_delta, witness)
+                state.adapt(off, op_delta, witness, delta_new)
             except NodeRejected as exc:
                 raise TransportError(f"{nid} 拒绝更新：{exc}") from exc
-            if state.delta != delta_new:
+            if state.delta_of(off) != delta_new:
                 # 与 apply_append 同一道交叉验证：两条路径（apply_update
                 # vs push_update）必须算出逐位相同的摘要。
                 raise TransportError(
                     f"{nid} 自己算出的摘要与协调者不一致："
-                    f"{state.delta!r} vs {delta_new!r}"
+                    f"{state.delta_of(off)!r} vs {delta_new!r}"
                 )
+            nb = blobs.get(nid) or {}
             try:
-                state.replace_blobs(blobs.get(nid, {}))
+                state.replace_blobs(
+                    off, {idx_of[g]: ct for g, ct in nb.items()}
+                )
             except NodeRejected as exc:
                 raise TransportError(f"{nid} 换密文失败：{exc}") from exc
-            if not state.check():
+            if not state.check(off):
                 raise TransportError(f"{nid} 更新后本地视图不合法")
             self.states[nid] = state
 
-    def drop(self, positions: Mapping[str, Sequence[int]]) -> None:
+    def drop(
+        self, offset: int, positions: Mapping[str, Sequence[int]]
+    ) -> None:
         """让被点名的节点交出某些位置（``del`` 的前置步骤）。
 
         与写路径不同：这一步**不改**全局摘要，只让节点的 ``I`` 变小、并删掉
-        对应的密文。它幂等，所以"交回一半之后重来"是安全的。
+        对应的密文。它幂等，所以“交回一半之后重来”是安全的。
+
+        ★ ``positions`` 的值是**全局位置号**，而节点侧用的是**文件内局部块号** ——
+        这里按该向量的 ``positions`` 换一次。
         """
         for nid, want in positions.items():
             if not want:
                 continue
             state = self.states.get(nid)
-            if state is None or not state.has_state:
-                # 没有状态的节点没什么可交的 —— 成功返回（幂等），不当作故障
+            if state is None or not state.has_view(offset):
+                # 不参与这份向量的节点没什么可交的 —— 成功返回（幂等）
                 continue
+            idx_of = {g: i for i, g in enumerate(state.delta_of(offset).positions)}
             try:
-                state.drop(tuple(int(i) for i in want))
+                state.drop(offset, tuple(idx_of[int(i)] for i in want))
             except NodeRejected as exc:
                 raise TransportError(f"{nid} 交回失败：{exc}") from exc
-            if not state.check():  # pragma: no cover - 兜底不变式
+            if not state.check(offset):  # pragma: no cover - 兜底不变式
                 raise TransportError(f"{nid} 交回后本地视图不合法")
 
     def apply_delete(
@@ -454,14 +505,15 @@ class LocalTransport:
         witness: UpdateWitness,
     ) -> None:
         """把一次删除通知每一台节点（节点自己算新摘要、自己删密文）。"""
+        off = int(delta_new.offset)
         for nid in self.node_ids:
             state = self.states.get(nid)
-            if state is None or not state.has_state:
+            if state is None or not state.has_view(off):
                 # 从来没有拿到过状态的节点：它没有 δ 要推进，也没有密文要删。
                 # `apply_append` 会给它 adopt_empty 后再收数据，所以这里跳过是安全的。
                 continue
             try:
-                state.apply_delete(op_delta, witness, delta_new)
+                state.apply_delete(off, op_delta, witness, delta_new)
             except NodeRejected as exc:
                 raise TransportError(f"{nid} 拒绝删除更新：{exc}") from exc
             self.states[nid] = state
@@ -472,14 +524,42 @@ class LocalTransport:
         """导出全部节点状态，供单进程模式写库、重启后恢复。"""
         out: dict[str, dict] = {}
         for nid, state in self.states.items():
-            if not state.has_state:
+            if not state.offsets:
                 continue
+            # ★ 新方案：一台节点可能同时参与好几份文件，所以导出的是
+            #   **一串向量**（每份一行），而不是单个 δ。
             out[nid] = {
-                "delta": (state.delta.U, state.delta.C, state.delta.n),
-                "st": (state.st.S_I, state.st.Lambda_I),
-                "I": list(state.I),
-                "FI": list(state.FI),
-                "blobs": dict(state.blobs),
+                # ★ 顶层再给一份「**全局位置号** → 密文」的汇总：
+                #   协调者记账（``_persist_nodes`` / ``node_blobs``）用的就是
+                #   全局位置号，而 ``vectors[i]["blobs"]`` 的键是**文件内局部块号**
+                #   —— 两套下标长得一样、含义不同，让调用方自己去转迟早出事。
+                "blobs": {
+                    state.delta_of(off).positions[li]: ct
+                    for off in state.offsets
+                    for li, ct in state.blobs_of(off).items()
+                },
+                "vectors": [
+                    {
+                        "offset": off,
+                        "delta": (
+                            state.delta_of(off).U,
+                            state.delta_of(off).C,
+                            state.delta_of(off).n,
+                        ),
+                        # ★ 位置段必须一起导出去：它是“局部块号 → 素数”那张视图，
+                        #   丢了的话重启后节点会以为自己的位置是“从 offset 起
+                        #   连续 n 个”，后续每一次更新都会因 e_i 取错而失败。
+                        "chunks": tuple(state.delta_of(off).chunks),
+                        "st": (
+                            state.st_of(off).S_I,
+                            state.st_of(off).Lambda_I,
+                        ),
+                        "I": list(state.I_of(off)),
+                        "FI": list(state.FI_of(off)),
+                        "blobs": dict(state.blobs_of(off)),
+                    }
+                    for off in state.offsets
+                ],
             }
         return out
 
@@ -488,20 +568,28 @@ class LocalTransport:
         from vds.digest import Digest, LocalView
 
         for nid, blob in data.items():
-            U, C, n = blob["delta"]  # type: ignore[misc]
-            S_I, Lambda_I = blob["st"]  # type: ignore[misc]
-            I = tuple(blob["I"])  # type: ignore[arg-type]
-            self.states[nid] = NodeState(
-                nid,
-                self.session,
-                LocalView(
-                    delta=Digest(U=int(U), C=int(C), n=int(n)),
-                    st=Opening(int(S_I), int(Lambda_I), I),
-                    I=I,
-                    FI=tuple(blob["FI"]),  # type: ignore[arg-type]
-                ),
-                blobs=dict(blob["blobs"]),  # type: ignore[arg-type]
-            )
+            state = NodeState(nid, self.session)
+            for row in blob["vectors"]:  # type: ignore[union-attr]
+                U, C, n = row["delta"]  # type: ignore[misc]
+                off = int(row["offset"])
+                S_I, Lambda_I = row["st"]  # type: ignore[misc]
+                state.restore(
+                    off,
+                    Digest(
+                        U=int(U),
+                        C=int(C),
+                        n=int(n),
+                        offset=off,
+                        chunks=tuple(
+                            (int(a), int(b)) for a, b in row.get("chunks", ())
+                        ),  # type: ignore[union-attr]
+                    ),
+                    Opening(int(S_I), int(Lambda_I), tuple(row["I"])),  # type: ignore[arg-type]
+                    tuple(row["I"]),  # type: ignore[arg-type]
+                    tuple(row["FI"]),  # type: ignore[arg-type]
+                    blobs=dict(row["blobs"]),  # type: ignore[arg-type]
+                )
+            self.states[nid] = state
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
         return f"LocalTransport({len(self.states)}/{len(self.node_ids)} 台有状态)"

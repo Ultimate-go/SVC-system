@@ -55,15 +55,26 @@ const names = computed(() => summary.value?.names || {})
 const label = (key) => names.value[key] || key
 const latencies = computed(() => summary.value?.latency || {})
 const samples = computed(() => Object.values(latencies.value).reduce((n, x) => n + (x.count || 0), 0))
-const totalOpsPerMin = computed(() => Object.values(summary.value?.throughput || {}).reduce((n, x) => n + x * 60, 0))
+// ★ 后端的 throughput 已经是「最近 60 秒各操作次数」= 每分钟的速率，
+//   再乘 60 会把吞吐量全部放大 60 倍（早先就是这么错的）。
+const totalOpsPerMin = computed(() => Object.values(summary.value?.throughput || {}).reduce((n, x) => n + x, 0))
 const queryLatency = computed(() => latencies.value.query || { p50: 0, p95: 0, p99: 0, count: 0 })
+// ★ 一次查询都没采到时，分位数是「没有」而不是「0 ms」——
+//   直接印 0ms 等于凭空宣称测到了 0 延迟（hero 那边已经写「待采样」，两处得一致）。
+const hasQuery = computed(() => (queryLatency.value.count || 0) > 0)
 const health = computed(() => queryLatency.value.count ? queryLatency.value[latencyPercentile.value] <= slaMs.value : null)
 const age = computed(() => summary.value?.snapshot_at ? Math.max(0, Math.round(now.value / 1000 - summary.value.snapshot_at)) : null)
 const scale = computed(() => summary.value?.scale || {})
 const crs = computed(() => summary.value?.crs || {})
-const operationRows = computed(() => PRIMARY.filter(k => latencies.value[k]?.count).map(k => ({ key: k, name: label(k), ...latencies.value[k], throughput: Math.round((summary.value?.throughput?.[k] || 0) * 60) })))
+const operationRows = computed(() => PRIMARY.filter(k => latencies.value[k]?.count).map(k => ({ key: k, name: label(k), ...latencies.value[k], throughput: Math.round(summary.value?.throughput?.[k] || 0) })))
 
-const series = computed(() => (summary.value?.series || []).slice(-24))
+// ★ 延迟趋势只画「真有主操作样本」的桶：桶里只存了登录这类样本时，
+//   平均下来是 0.0——画成平线等于凭空宣称「延迟是 0 ms」。
+const series = computed(() => {
+  const pts = (summary.value?.series || []).slice(-24)
+  if (activeMetric.value === 'throughput') return pts
+  return pts.filter(p => PRIMARY.some(k => p[k] != null))
+})
 const chart = computed(() => {
   const points = series.value
   if (!points.length) return null
@@ -115,15 +126,15 @@ const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: 
     </section>
 
     <section class="kpi-grid">
-      <div class="kpi"><span class="kpi-label">查询 P50</span><strong>{{ queryLatency.p50 }}<em>ms</em></strong><small>典型请求延迟</small></div>
-      <div class="kpi"><span class="kpi-label">查询 P95</span><strong>{{ queryLatency.p95 }}<em>ms</em></strong><small>大多数请求上限</small></div>
-      <div class="kpi"><span class="kpi-label">查询 P99</span><strong>{{ queryLatency.p99 }}<em>ms</em></strong><small>尾部延迟</small></div>
-      <div class="kpi"><span class="kpi-label">最近 60 秒操作</span><strong>{{ fmt(Math.round(totalOpsPerMin / 60)) }}<em>次</em></strong><small>{{ fmt(samples) }} 个累计样本</small></div>
+      <div class="kpi"><span class="kpi-label">查询 P50</span><strong>{{ hasQuery ? queryLatency.p50 : '—' }}<em v-if="hasQuery">ms</em></strong><small>典型请求延迟</small></div>
+      <div class="kpi"><span class="kpi-label">查询 P95</span><strong>{{ hasQuery ? queryLatency.p95 : '—' }}<em v-if="hasQuery">ms</em></strong><small>大多数请求上限</small></div>
+      <div class="kpi"><span class="kpi-label">查询 P99</span><strong>{{ hasQuery ? queryLatency.p99 : '—' }}<em v-if="hasQuery">ms</em></strong><small>尾部延迟</small></div>
+      <div class="kpi"><span class="kpi-label">最近 60 秒操作</span><strong>{{ fmt(totalOpsPerMin) }}<em>次</em></strong><small>{{ fmt(samples) }} 个累计样本</small></div>
     </section>
 
     <section class="main-grid">
       <div class="panel chart-panel"><div class="panel-head"><div><div class="section-kicker">OBSERVABILITY</div><h2>实时性能趋势</h2></div><div class="segmented"><button :class="{ active: activeMetric === 'latency' }" @click="activeMetric = 'latency'">延迟</button><button :class="{ active: activeMetric === 'throughput' }" @click="activeMetric = 'throughput'">吞吐</button></div></div><div v-if="chart" class="chart-box"><svg :viewBox="`0 0 ${chart.W} ${chart.H}`" class="chart"><line v-for="i in 4" :key="i" :x1="chart.L" :x2="chart.W-chart.R" :y1="chart.y(chart.max*i/4)" :y2="chart.y(chart.max*i/4)" class="grid" /><text v-for="i in 4" :key="'y'+i" :x="chart.L-8" :y="chart.y(chart.max*i/4)+4" text-anchor="end" class="axis">{{ Math.round(chart.max*i/4) }}</text><line v-if="chart.threshold" :x1="chart.L" :x2="chart.W-chart.R" :y1="chart.y(chart.threshold)" :y2="chart.y(chart.threshold)" class="sla-line" /><path :d="chart.area" class="chart-area" /><path :d="chart.line" class="chart-line" /><circle v-for="(v, i) in chart.values" :key="i" :cx="chart.x(i)" :cy="chart.y(v)" r="3.2" class="point"><title>{{ fmtTime(chart.points[i].t) }} · {{ v.toFixed(1) }}</title></circle></svg><div class="chart-foot"><span>{{ chart.points.length ? fmtTime(chart.points[0].t) : '' }}</span><span class="chart-now">● {{ activeMetric === 'latency' ? `平均 ${latestValue.toFixed(1)} ms · SLA ${slaMs} ms` : `当前 ${Math.round(latestValue)} ops/min` }}</span><span>{{ chart.points.length ? fmtTime(chart.points.at(-1).t) : '' }}</span></div></div><div v-else class="empty">还没有样本。做几次上传或查询，趋势就出来了。</div></div>
-      <div class="panel summary-panel"><div class="section-kicker">TAIL LATENCY</div><h2>延迟分布</h2><div class="percentile-tabs"><button v-for="p in ['p50','p95','p99']" :key="p" :class="{ active: latencyPercentile === p }" @click="latencyPercentile = p"><b>{{ (queryLatency[p] || 0).toFixed(1) }}</b><span>{{ p.toUpperCase() }} / ms</span></button></div><div class="sla-control"><div><span>SLA 阈值</span><b>{{ slaMs }} ms</b></div><el-slider v-model="slaMs" :min="20" :max="500" :step="10" /></div><div class="bar-row" v-for="row in operationRows.slice(0, 4)" :key="row.key"><span>{{ row.name }}</span><div><i :style="{ width: `${Math.min(100, row[latencyPercentile] / Math.max(slaMs, 1) * 100)}%`, background: colors[row.key] }" /></div><b>{{ row[latencyPercentile] }} ms</b></div></div>
+      <div class="panel summary-panel"><div class="section-kicker">TAIL LATENCY</div><h2>延迟分布</h2><div class="percentile-tabs"><button v-for="p in ['p50','p95','p99']" :key="p" :class="{ active: latencyPercentile === p }" @click="latencyPercentile = p"><b>{{ hasQuery ? (queryLatency[p] || 0).toFixed(1) : '—' }}</b><span>{{ p.toUpperCase() }} / ms</span></button></div><div class="sla-control"><div><span>SLA 阈值</span><b>{{ slaMs }} ms</b></div><el-slider v-model="slaMs" :min="20" :max="500" :step="10" /></div><div class="bar-row" v-for="row in operationRows.slice(0, 4)" :key="row.key"><span>{{ row.name }}</span><div><i :style="{ width: `${Math.min(100, row[latencyPercentile] / Math.max(slaMs, 1) * 100)}%`, background: colors[row.key] }" /></div><b>{{ row[latencyPercentile] }} ms</b></div></div>
     </section>
 
     <section class="experiment-grid"><div class="panel controls-panel"><div class="section-kicker">WHAT-IF BENCHMARK</div><h2>参数实验</h2><p class="muted">调参数，看预估值怎么变（基线取实时快照）。</p><label>消息块大小 <b>{{ payloadKb }} KB</b><el-slider v-model="payloadKb" :min="4" :max="256" :step="4" /></label><label>并发请求 <b>{{ concurrency }} 路</b><el-slider v-model="concurrency" :min="1" :max="16" /></label><label>验证比例 <b>{{ verifyRatio }}%</b><el-slider v-model="verifyRatio" :min="0" :max="100" :step="5" /></label><div class="estimate-row"><div><small>预估吞吐</small><strong>{{ fmt(projection.throughput) }}<em> ops/min</em></strong></div><div><small>预估查询延迟</small><strong>{{ projection.latency }}<em> ms</em></strong></div></div></div><div class="panel scale-panel"><div class="panel-head"><div><div class="section-kicker">CONCURRENCY SWEEP</div><h2>并发敏感性</h2></div><span class="tag">预估模型</span></div><div class="sweep"><div v-for="bar in projectionBars" :key="bar.c" class="sweep-col"><div class="sweep-value">{{ fmt(bar.value) }}</div><div class="sweep-track"><i :style="{ height: `${Math.min(100, bar.value / Math.max(...projectionBars.map(x => x.value)) * 100)}%` }" /></div><span>{{ bar.c }} 路</span></div></div><div class="sweep-note">输入：消息块 {{ payloadKb }} KB · 验证比例 {{ verifyRatio }}%</div></div></section>

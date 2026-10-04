@@ -263,10 +263,9 @@ class HttpTransport:
                         "unreachable": True,
                         # n = -1 是刻意的“不合法值”：万一有人忘了看 unreachable，
                         # 后续的 n 比对也会失败，而不是恰好撞上一个合法值。
-                        "n": -1,
+                        "vectors": [],
+                        "offsets": [],
                         "held": 0,
-                        "indices": [],
-                        "span": "—",
                         "valid": False,
                         "proved": None,
                         "fresh": False,
@@ -278,9 +277,14 @@ class HttpTransport:
         return out
 
     def retrieve(
-        self, node_id: str, Q: Sequence[int]
+        self, node_id: str, offset: int, Q: Sequence[int]
     ) -> tuple[Opening, tuple[bytes, ...]]:
-        body = self._post(node_id, "/node/retrieve", {"indices": [int(i) for i in Q]})
+        """取 ``(π_Q, 密文段)``。``Q`` 是**该文件内**的局部块号。"""
+        body = self._post(
+            node_id,
+            "/node/retrieve",
+            {"offset": int(offset), "indices": [int(i) for i in Q]},
+        )
         want = tuple(int(i) for i in body["indices"])
         p = body["proof"]
         pi = Opening(int(p["S_I"]), int(p["Lambda_I"]), tuple(int(i) for i in p["I"]))
@@ -292,13 +296,19 @@ class HttpTransport:
             )
         return pi, cts
 
-    def pos_prove(self, node_id: str, indices: Sequence[int]) -> PoSProof:
+    def pos_prove(self, node_id: str, offset: int, indices: Sequence[int]) -> PoSProof:
         """让一台节点回答一次存储证明（PoR）挑战。
 
         ``proof`` 为 ``None`` 表示节点回的是**空份额**（挑战没打到它）——
         那是合法回答，交给聚合阶段跳过，不要当成错误。
+
+        ★ ``offset`` 必填：``indices`` 是**文件内局部块号**。
         """
-        body = self._post(node_id, "/node/pos", {"indices": [int(i) for i in indices]})
+        body = self._post(
+            node_id,
+            "/node/pos",
+            {"offset": int(offset), "indices": [int(i) for i in indices]},
+        )
         raw = body.get("proof")
         if raw is None:
             return PoSProof(Q=(), F_Q=(), pi_Q=EMPTY_OPENING)
@@ -318,6 +328,7 @@ class HttpTransport:
         self,
         node_id: str,
         *,
+        offset: int,
         positions: Sequence[int],
         values: Sequence[int],
         proof: Opening,
@@ -340,6 +351,7 @@ class HttpTransport:
         if not positions:
             return
         payload = {
+            "offset": int(offset),
             "positions": [int(i) for i in positions],
             "values": [str(int(v)) for v in values],
             "proof": {
@@ -368,14 +380,19 @@ class HttpTransport:
         """
         failures: list[dict] = []
         payloads: dict[str, dict] = {}
+        # ★ 两套下标：``assignments`` / ``blobs`` 的键是**全局位置号**（协调者记账用它），
+        #   而节点侧用的是**文件内局部块号**。转换只在这一层做
+        #   （与 LocalTransport 逐字一致，否则两条路径会惄惄分叉）。
+        idx_of = {g: i for i, g in enumerate(delta_new.positions)}
         for nid in self.node_ids:
+            nb = blobs.get(nid) or {}
             payload = _append_payload(
                 delta_old=delta_old,
                 delta_new=delta_new,
                 op_delta=op_delta,
                 witness=witness,
-                assigned=tuple(assignments.get(nid, ())),
-                blobs=blobs.get(nid, {}),
+                assigned=tuple(idx_of[g] for g in assignments.get(nid, ())),
+                blobs={idx_of[g]: ct for g, ct in nb.items()},
             )
             try:
                 self._post(nid, "/node/append", payload)
@@ -427,12 +444,14 @@ class HttpTransport:
         """
         failures: list[dict] = []
         payloads: dict[str, dict] = {}
+        idx_of = {g: i for i, g in enumerate(delta_new.positions)}
         for nid in self.node_ids:
+            nb = blobs.get(nid) or {}
             payload = _update_payload(
                 delta_new=delta_new,
                 op_delta=op_delta,
                 witness=witness,
-                blobs=blobs.get(nid, {}),
+                blobs={idx_of[g]: ct for g, ct in nb.items()},
             )
             try:
                 self._post(nid, "/node/update", payload)
@@ -449,7 +468,7 @@ class HttpTransport:
                 payloads,
             )
 
-    def drop(self, positions: Mapping[str, Sequence[int]]) -> None:
+    def drop(self, offset: int, positions: Mapping[str, Sequence[int]]) -> None:
         """让被点名的节点**交出**某些位置（``del`` 的前置步骤）。
 
         与写路径不同：这一步**不改**全局摘要，所以失败时**不建补推现场** ——
@@ -463,7 +482,9 @@ class HttpTransport:
                 continue
             try:
                 self._post(
-                    nid, "/node/drop", {"positions": [int(i) for i in want]}
+                    nid,
+                    "/node/drop",
+                    {"offset": int(offset), "positions": [int(i) for i in want]},
                 )
             except TransportError as exc:
                 failures.append({"node": nid, "reason": str(exc)})
@@ -532,10 +553,13 @@ def _update_payload(
     （节点现在的摘要就是「改动前」，协调者说了不算）。
     """
     return {
+        "offset": int(delta_new.offset),
         "delta_new": {
             "U": str(delta_new.U),
             "C": str(delta_new.C),
             "n": int(delta_new.n),
+            "offset": int(delta_new.offset),
+            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
         },
         "op_delta": {
             "op": op_delta.op,
@@ -566,10 +590,13 @@ def _delete_payload(
     没有 ``blobs``：这次没有任何新密文要发，反而不该把被删块的密文放到线上。
     """
     return {
+        "offset": int(delta_new.offset),
         "delta_new": {
             "U": str(delta_new.U),
             "C": str(delta_new.C),
             "n": int(delta_new.n),
+            "offset": int(delta_new.offset),
+            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
         },
         "op_delta": {
             "op": op_delta.op,
@@ -602,8 +629,25 @@ def _append_payload(
     blobs: Mapping[int, bytes],
 ) -> dict:
     return {
-        "delta_old": {"U": str(delta_old.U), "C": str(delta_old.C), "n": int(delta_old.n)},
-        "delta_new": {"U": str(delta_new.U), "C": str(delta_new.C), "n": int(delta_new.n)},
+        "offset": int(delta_new.offset),
+        "delta_old": {
+            "U": str(delta_old.U),
+            "C": str(delta_old.C),
+            "n": int(delta_old.n),
+            "offset": int(delta_old.offset),
+            "chunks": [[int(a), int(b)] for a, b in delta_old.chunks],
+        },
+        "delta_new": {
+            "U": str(delta_new.U),
+            "C": str(delta_new.C),
+            "n": int(delta_new.n),
+            "offset": int(delta_new.offset),
+            # ★ 位置段**必须**过线：节点侧要用它建“局部块号 → 素数”那张
+            #   视图（新块的局部号在旧 δ 里根本不存在）。丢了它就退化成
+            #   “从 offset 起连续 n 个”，跨进程时每一步更新都会以
+            #   “算出的摘要与协调者不一致”收场。
+            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
+        },
         "op_delta": {
             "op": op_delta.op,
             "K": [int(x) for x in op_delta.K],

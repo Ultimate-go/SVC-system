@@ -110,7 +110,7 @@ function go(item) {
 
     <div class="sidebar-foot mono">
       <Icon name="pulse" :size="13" />
-      <span class="nav-item-txt">全系统一条向量</span>
+      <span class="nav-item-txt" title="每份文件各占一段、各有自己的承诺与摘要，互不影响">一文件一向量</span>
     </div>
   </aside>
 </template>

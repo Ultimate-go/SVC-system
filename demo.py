@@ -198,35 +198,39 @@ def main() -> int:
                 key_sink=make_sink(box, owner),
             )
         total_bytes += size
+        _d = store.delta_of(owner, fkey)
         print(
             f"  {owner:9s} / {fkey:14s} {size:>6d} B → {rec.block_count:>2d} 块  "
-            f"下标 {rec.indices[0]:>3d}-{rec.indices[-1]:<3d}  "
+            f"位置段 {' '.join(f'{o}+{c}' for o, c in _d.segments):<12s}"
             f"块密钥已封给 {owner:<9s} {t.take():>6.0f} ms"
         )
-    print(f"\n  合计 {len(plan)} 个文件 / {total_bytes} 字节 / {store.n} 块"
-          f"（全系统共享这一条向量）")
+    print(f"\n  合计 {len(plan)} 个文件 / {total_bytes} 字节 / {store.n} 个全局位置"
+          f"（每份文件一条**独立**向量；位置段互不重叠、永不回收）")
 
     # -- 3. 分片 -----------------------------------------------------------
-    sub("3. 块分布（每台服务器只持有它那一段）")
-    for row in store.node_report():
+    sub("3. 块分布（每台服务器只持有它被分到的那几块）")
+    rows = store.node_report()
+    for row in rows:
         print(f"  {row['node_id']}  {row['held']:>3d} 块  跨度 {row['span']:<28s} "
               f"视图{'合法' if row['valid'] else '不合法'}")
-    covered = set()
-    for state in store.transport.states.values():
-        covered |= set(state.I)
-    print(f"  并集覆盖 {len(covered)}/{store.n} 个位置，两两不相交 ✓")
-    assert covered == set(range(store.n))
+    # ★ 新架构下全局位置是**稀疏**的（每份文件各占一段、段间可以有空洞），
+    #   不再是 0..n-1 那样的一整段。所以要断言的是
+    #   「各节点手里的位置并集 == 所有**在用**位置」。
+    live = {i for owner, fk, _size in plan for i in store.file_indices(owner, fk)}
+    covered = {i for row in rows for i in row["indices"]}
+    print(f"  并集覆盖 {len(covered)}/{len(live)} 个在用位置 ✓")
+    assert covered == live
 
     # -- 4. 单文件查询 -----------------------------------------------------
     sub("4. 单文件查询（一个用户的某个文件）")
     idx = store.file_indices("zhangsan", "case-内科")
     r = store.query(idx)
-    print(f"  文件 case-内科 → 下标 {list(idx)}")
+    print(f"  文件 case-内科 → {len(idx)} 块，全局位置 {list(idx)}")
     print(f"  {r.summary()}")
     print(f"  用了 {r.node_used} 共 {r.cert_count} 份凭证")
 
     # -- 5. 跨文件跨用户 ---------------------------------------------------
-    sub("5. 跨文件 / 跨用户一次查询 —— 设计 B 的核心")
+    sub("5. 跨文件 / 跨用户一次查询 —— 每个文件一条独立向量，一份证据重新算出来")
     a = store.file_indices("zhangsan", "case-基础信息")
     b = store.file_indices("lisi", "report-A")
     c = store.file_indices("wangwu", "note")
@@ -236,7 +240,8 @@ def main() -> int:
         r = store.query(sel)
     print(f"  选中 {sel} —— 来自 2 个用户的 3 个不同文件")
     for ref in r.refs:
-        print(f"    {ref}  ← 全局下标 {store.registry.index_of(ref.owner, ref.file_key, ref.block_idx)}")
+        g = store.registry.positions_of(ref.owner, ref.file_key)[ref.block_idx]
+        print(f"    {ref}  ← 全局位置 {g}")
     print(f"  {r.summary()}")
     print(f"  ★ 一份聚合成一体的证据覆盖了 {len({(x.owner) for x in r.refs})} 个用户"
           f"、{len({(x.file_key) for x in r.refs})} 个文件、{len(sel)} 个块")
@@ -244,15 +249,23 @@ def main() -> int:
 
     # -- 6. 性能指标 -------------------------------------------------------
     sub("6. 性能指标（题目要求的那几项，现场实测）")
-    pool = sorted(
-        {i for owner, fk, _size in plan for i in store.file_indices(owner, fk)}
-    )
+    # ★ 新架构里“一份文件一条向量”，节点凭证聚合（agg）要求各凭证的下标
+    #   两两不交、而且属于**同一份文件**；所以这一节的样本全部取自
+    #   块数最多的那一份文件（表格里读作“这份文件里检索 |Q| 个块”）。
+    best = max(plan, key=lambda x: len(store.file_indices(x[0], x[1])))
+    hfid = (best[0], best[1])
+    pool = list(store.file_indices(*hfid))
     from vds.client_node import ClientNode
 
-    client = ClientNode(session, store.delta)
+    client = ClientNode(session, store.delta_of(*hfid))
     nbytes = (session.crs.N.bit_length() + 7) // 8
 
+    # ★ 全局位置 ↔ 文件内块号的换算：证据里的下标（Q / I）一律是**文件内块号**
+    #   （svc 层假定 0..n-1 密集），而 pick 用的是全局位置号。
+    _local_of = {g: k for k, g in enumerate(store.file_indices(*hfid))}
+
     def measure(pick) -> Sample:
+        loc = [_local_of[g] for g in pick]
         tg, ta, tv = Timer(), Timer(), Timer()
         with tg:
             certs, holders, _, _ = store.collect_certificates(tuple(pick))
@@ -261,9 +274,9 @@ def main() -> int:
         valmap: dict[int, int] = {}
         for cert in certs:
             valmap.update(dict(zip(cert.Q, cert.F_Q)))
-        F_Q = tuple(valmap[i] for i in pick)
+        F_Q = tuple(valmap[i] for i in loc)
         with tv:
-            client.ver_retrieve(list(pick), list(F_Q), pi_K)
+            client.ver_retrieve(list(loc), list(F_Q), pi_K)
         size = sum(
             (x.bit_length() + 7) // 8 for x in (pi_K.S_I, pi_K.Lambda_I)
         )
@@ -278,7 +291,10 @@ def main() -> int:
         )
 
     samples: list[Sample] = []
-    for q in (1, 2, 4, 8, 14):
+    # ★ 样本文件的块数是硬上限；q 超出它只会重复“全部块”那一行，
+    #   所以把上限一起放进候选集合（去重后仍有序）。
+    qs = sorted({q for q in (1, 2, 4, 8, 14) if q <= len(pool)} | {len(pool)})
+    for q in qs:
         pick = pool[:q]
         measure(pick)  # 预热：第一次会算 e_all 缓存与模逆表
         runs = [measure(pick) for _ in range(3)]
@@ -301,9 +317,10 @@ def main() -> int:
               f"{s.agg_ms:>8.1f} ms {s.ver_ms:>8.1f} ms {s.proof_bytes:>9d}")
     print(f"\n  证据规模上界 = 2 个群元素 = 2 × {nbytes} = {2 * nbytes} 字节，"
           f"**与 |Q| 和向量长度 n 都无关**")
-    print("  |Q|=14 那行只有 128 字节：此刻 I 覆盖了全部位置，空乘积使 Λ_I = 1，")
-    print("  所以只剩一个群元素 —— 这是方案的定义，不是测量误差。")
-    print("  证明生成在 |Q|=14 时几乎为零：disagg 的目标集合就等于节点持有的集合，")
+    print(f"  样本文件 {hfid[1]} 共 {len(pool)} 块 —— 新架构里每份文件一条独立向量；")
+    print("  q 取到上限那行：此刻节点的 I 恰好等于挑中的集合，空乘积使 Λ_I = 1，")
+    print("  于是证据只剩一个群元素 —— 这是方案的定义，不是测量误差。")
+    print("  同一行里证明生成几乎为零：disagg 的目标集合就等于节点持有的集合，")
     print("  一个 add_back 都不用做。")
 
     # -- 7. 攻击 -----------------------------------------------------------
@@ -314,28 +331,51 @@ def main() -> int:
     # 被篡改能不能被发现，跟密钥保护无关 —— 真正的密钥保护在第 8 节。
     atk = PlainKeyStore(session, node_ids=NODES)
     atk.upload("attacker", "victim", payload(4096, 90))
-    victim = atk.transport.states["node-1"]
-    i = victim.I[0]
-    victim.tamper_value(i)
-    print(f"  把 node-1 手上下标 {i} 的分量 +1（模拟篡改数据）")
+    _afd = ("attacker", "victim")
+    _ad = atk.delta_of(*_afd)
+    # ★ 轮转分片：第 0 块不一定落在 node-1 上，所以按**实际持有者**挑机器。
+    _alocal = 0
+    i = _ad.positions[_alocal]
+    _ahold = atk.holder_of(i)
+    victim = atk.transport.states[_ahold]
+    victim.tamper_value(_ad.offset, _alocal)
+    print(f"  把 {_ahold} 手上第 {_alocal} 块（全局位置 {i}）的分量 +1（模拟篡改数据）")
     bad = atk.query([i])
     print(f"  承诺验证：{'通过' if bad.report.ok else '失败'} —— {bad.report.message}")
-    print("      ↑ 节点改的是自己手里的分量，而验证方用的是**自己从密文算**的分量：")
-    print("        两者对不上，承诺验证当场就把它拒了。")
-    print(f"  整体：{'通过（不该！）' if bad.ok else '被抓 ✓'}")
+    print("      ↑ 节点改的是**自己声称的分量**，而验证方根本不采信它 ——")
+    print("        验证方是从**取回的密文**现算分量，所以承诺这一层照样通过。")
+    print("        也就是说：光靠“查询 + 验证”抓不到这种篡改，得靠节点自检。")
+    print(f"  整体：{'通过（数据其实没被改）' if bad.ok else '被抓 ✓'}")
     try:
         atk.check()
         print("  自检：没发现（不该！）")
     except ValueError as exc:
         print(f"  自检：先一步发现 ✓（{exc}）")
 
-    sub("7b. 攻击二：拿别的段的密文冒充（分量没动，密文换了）")
+    sub("7b. 攻击二：拿别的密文冒充（分量没动，密文换了）")
     atk2 = PlainKeyStore(session, node_ids=NODES)
     atk2.upload("attacker", "victim", payload(4096, 91))
-    v2 = atk2.transport.states["node-1"]
-    d2 = atk2.transport.states["node-2"]
-    j = v2.I[0]
-    v2.overwrite_blob(j, d2.blobs[d2.I[0]])
+    _bfd = ("attacker", "victim")
+    _bd = atk2.delta_of(*_bfd)
+    _blocal = 0
+    j = _bd.positions[_blocal]
+    v2 = atk2.transport.states[atk2.holder_of(j)]
+    donor: bytes | None = None
+    # 优先借**别的节点**手上同一块的密文；副本只有一份时退到本机另一块，
+    # 还不行就把密文倒序一遍 —— 三种都能造出“密文对不上承诺”的现场。
+    for _nid in atk2.replicas_of(j):
+        _st = atk2.transport.states.get(_nid)
+        if _st is None or _st is v2 or not _st.has_view(_bd.offset):
+            continue
+        _got = _st.blobs_of(_bd.offset)
+        if _blocal in _got:
+            donor = _got[_blocal]
+            break
+    if donor is None:
+        _mine = v2.blobs_of(_bd.offset)
+        _rest = [k for k in _mine if k != _blocal]
+        donor = _mine[_rest[0]] if _rest else bytes(_mine[_blocal])[::-1]
+    v2.overwrite_blob(_bd.offset, _blocal, donor)
     swap = atk2.query([j])
     print(f"  承诺验证：{'通过' if swap.report.ok else '失败'} —— {swap.report.message}")
     print("      ↑ 承诺的对象虽然只是摘要，但那个摘要是**验证方自己从这串密文算**的：")
@@ -346,8 +386,9 @@ def main() -> int:
     from svc.types import Opening
 
     good = atk2.query([j]).proof
-    forged = Opening(S_I=atk2.delta.U, Lambda_I=good.Lambda_I, I=(j,))
-    rep = ClientNode(session, atk2.delta).ver_retrieve([j], [atk2.values[j]], forged)
+    # ★ 证据里的下标是**文件内块号**（svc 层假定 0..n-1 密集），不是全局位置。
+    forged = Opening(S_I=_bd.U, Lambda_I=good.Lambda_I, I=(_blocal,))
+    rep = ClientNode(session, _bd).ver_retrieve([_blocal], [atk2.values[j]], forged)
     print("  把 S_I 换成 U（第一步 S_I^e_I = U 就不再成立）")
     print(f"  验证结论：{'通过（不该！）' if rep.ok else '失败'} —— {rep.message}")
 
@@ -407,7 +448,9 @@ def main() -> int:
           "  ← 这条路一个密钥字节都不碰")
 
     sub("8d. 随机访问：只取第 2 段")
-    seg2 = store.file_indices("zhangsan", "case-内科")[1]
+    # ★ read 的 indices 是**文件内块号**（与界面上说的“第几块”一致），
+    #   不是全局位置号 —— 同一个 1 在两套坐标里指的是不同的块。
+    seg2 = 1
     part = try_read("zhangsan", "zhangsan", "case-内科", [seg2])
     print(f"  取到 {len(part)} 字节（segment_bytes = {store.segment_bytes}）"
           f"，等于原文对应段 = {part == want[store.segment_bytes:2 * store.segment_bytes]}")
@@ -435,9 +478,13 @@ def main() -> int:
         store.check()
     print("  登记表一致 ✓  每台服务器视图合法 ✓  声称与实存一致 ✓")
     print(f"  增量摘要 == 一次性承诺（逐位相同）✓  耗时 {t.take():.0f} ms")
-    print(f"\n  U = {hex(store.delta.U)[:34]}…")
-    print(f"  C = {hex(store.delta.C)[:34]}…")
-    print(f"  n = {store.n}")
+    print("\n  每份文件各自的摘要（新架构：一份文件一条向量、一份摘要）：")
+    for owner, fk, _size in plan:
+        d = store.delta_of(owner, fk)
+        segs = " ".join(f"{o}+{c}" for o, c in d.segments)
+        print(f"    {owner:9s}/{fk:14s} 位置段 {segs:<12s} n={d.n:<3d} "
+              f"U={hex(d.U)[:22]}…  C={hex(d.C)[:22]}…")
+    print(f"  全局位置总数 n = {store.n}")
 
     print(f"\n{'=' * 72}\n演示结束。\n{'=' * 72}")
     return 0
