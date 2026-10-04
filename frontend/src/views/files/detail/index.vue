@@ -125,7 +125,7 @@ async function doZero() {
   try {
     await ElMessageBox.confirm(
       `把第 ${idx} 块的内容换成等长的全 0${len ? `（${len} 字节）` : ''}。\n\n` +
-        '这一块仍然在：全局下标不变、仍占节点存储、总块数也不变，' +
+        '这一块仍然在：块号与它占的位置都不变、仍占节点存储、总块数也不变，' +
         '事后完整性照样能验证通过。\n' +
         '只有你自己（所有者）解密时看得到那一串 0；块密钥会换成新的，' +
         '长度保持不变。\n\n原来的内容不可恢复，版本号 +1。',
@@ -219,7 +219,7 @@ onMounted(load)
           <div class="meta-item"><span class="k">大小</span><span class="mono">{{ fmtBytes(file.total_bytes) }}</span></div>
           <div class="meta-item"><span class="k">块数</span><span class="mono">{{ file.block_count }}</span></div>
           <div class="meta-item"><span class="k">版本</span><span class="mono">{{ file.version }}</span></div>
-          <div class="meta-item"><span class="k">全局下标</span><span class="mono">{{ span(file.indices) }}</span></div>
+          <div v-if="detailed" class="meta-item"><span class="k">位置（内部坐标）</span><span class="mono">{{ span(file.indices) }}</span></div>
           <div class="meta-item"><span class="k">δ_n</span><span class="mono">{{ file.delta_n }}</span></div>
           <div class="meta-item"><span class="k">δ 指纹</span><span class="mono">{{ file.delta_fp }}</span></div>
           <div class="meta-item"><LockTag :can-decrypt="file.can_decrypt" /></div>
@@ -249,7 +249,7 @@ onMounted(load)
         </p>
         <el-table :data="file.layout || []" size="small" border max-height="360">
           <el-table-column prop="block_idx" label="块号" width="70" align="center" />
-          <el-table-column label="全局下标" width="90" align="center">
+          <el-table-column v-if="detailed" label="位置（内部坐标）" width="130" align="center">
             <template #default="{ row }"><span class="mono">{{ row.global_index }}</span></template>
           </el-table-column>
           <el-table-column v-if="detailed" label="分量指纹（十六进制 · 悬浮看完整）" min-width="240">
@@ -317,10 +317,10 @@ onMounted(load)
                 <el-input-number v-model="dropBlocks" :min="1" :max="Math.max(1, file.block_count - 1)" />
               </div>
               <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">截断</el-button>
-              <el-alert type="warning" :closable="false" class="trunc-warn" title="只能删全局向量末尾">
+              <el-alert type="warning" :closable="false" class="trunc-warn" title="只删这份文件自己的末尾">
                 <template #default>
-                  <p style="font-size: 12px">① 只能删全局向量末尾的连续一段，所以实际上只有最后写进向量的那份文件删得动尾巴；别的会报 400，并告诉你是哪个下标卡住了。</p>
-                  <p style="font-size: 12px">② 不能删到一块不剩。此操作不可撤销。</p>
+                  <p style="font-size: 12px">① 新方案下每份文件各占**自己的位置段**，所以删的是这份文件自己的末尾，碰不到别的文件 —— 旧设计里“删中间一份要连后面一起删”的束缚已经不在了（那份文件本身没在全局末尾时会报 400）。</p>
+                  <p style="font-size: 12px">② 不能删到一块不剩（整份删除是另一件事）。此操作不可撤销。</p>
                 </template>
               </el-alert>
             </div>

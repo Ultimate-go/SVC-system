@@ -45,7 +45,12 @@ const porResult = ref(null)
 
 const retrying = ref(false)
 
-const onlineCount = computed(() => nodes.value.filter((n) => !n.unreachable && !n.fresh).length)
+// ★ 「在线」= **答上话**的台数（``/api/nodes`` 返回 unreachable 就表示连不上）。
+//   早先还多要求一个 ``!n.fresh`` —— 而 ``fresh`` 的意思是"这台机器上
+//   什么都没有"，空库时**每一台**都是 fresh，于是卡片会写「在线 0」，
+//   同时下面又写着「运行中 4 台」，自相矛盾（与 ``/api/status`` 的
+//   ``nodes`` 是同一类错误，那边已按“可达”来数）。
+const onlineCount = computed(() => nodes.value.filter((n) => !n.unreachable).length)
 
 const hasPending = computed(() => !!(pending.value?.pending || pending.value?.persist_pending))
 

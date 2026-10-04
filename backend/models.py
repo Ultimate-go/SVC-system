@@ -72,18 +72,49 @@ class CrsRow(Base):
         return {"N": self.N, "g": self.g, "l": self.l, "n_max": self.n_max}
 
 
-class GlobalRow(Base):
-    """全局摘要 :math:`\\delta = ((U, C), n)`。键值对表，三行。
+class MetaRow(Base):
+    """零散元数据（键值对）。现在只放**分片偏移**这类全系统唯一的标量。
+
+    ★ 摘要**不**在这里 —— 新方案里摘要是**逐文件**的，见 :class:`FileDeltaRow`。
+    这张表保留下来是因为分片偏移（``node_offset``）确实只有一个：
+    它决定“新块轮转从哪台开始”，与具体是哪份文件无关。
+    """
+
+    __tablename__ = "meta"
+
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class FileDeltaRow(Base):
+    """**一份文件一条**向量摘要 :math:`\\delta = ((U, C), n)`。
+
+    ★ 新方案（一文件一向量）里，摘要不再是全系统一个，而是**逐文件**的：
+    每份文件占一段全局位置（段起点就是 ``offset``，**永不回收**），
+    自己的 :math:`U, C, n` 只随自己变。所以这里的主键是
+    ``(owner, file_key)``，而不是以前那种“整个库只有一行”。
+
+    :param chunks: 位置段列表 ``[[起点, 长度], ...]``（JSON）。
+        一份文件的位置未必连续 —— 追加时原段末尾被后来的文件占住，
+        就只能**另起一段**。节点侧的所有“局部块号 → 素数”换算都靠它，
+        **落库时必须一起存上**，否则重启后位置视图会退化成“从 offset 起连续 n 个”。
+        空列表 = 单段，等价于 ``[[offset, n]]``。
 
     大整数一律用**十进制字符串** —— 与 :func:`core.session.crs_to_dict`
     的理由一样：跨语言传输时 Python 的任意精度 ``int`` 与 JS 的 ``Number``
     不是一回事，统一走字符串最省心。
     """
 
-    __tablename__ = "globals"
+    __tablename__ = "file_deltas"
 
-    key: Mapped[str] = mapped_column(String(32), primary_key=True)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
+    owner: Mapped[str] = mapped_column(String(64), primary_key=True)
+    file_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    #: 本文件在全局素数表里的**段起点**（唯一且稳定，段永不回收）。
+    offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delta_U: Mapped[str] = mapped_column(Text, nullable=False)
+    delta_C: Mapped[str] = mapped_column(Text, nullable=False)
+    delta_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunks_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
 
 # ---------------------------------------------------------------------------
@@ -225,17 +256,25 @@ class NodeBlobRow(Base):
 
 
 class NodeStateRow(Base):
-    """一台存储服务器的本地视图 :math:`(\\delta, st, I, F_I)`。
+    """一台存储服务器**在某一份文件上**的本地视图 :math:`(\\delta, st, I, F_I)`。
 
     节点**不存完整文件** —— 只有它那一段的下标、值与证据。
+
+    ★ 新方案里一台节点同时参与**好几份**文件，各自一段视图，所以要按
+    ``(node_id, offset)`` 区分（旧表只有 ``node_id`` 一个主键，那是
+    “全系统一条向量”时代的形状）。
     """
 
     __tablename__ = "node_state"
 
     node_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: 这份文件的段起点（与 ``FileDeltaRow.offset`` 对齐）。
+    offset: Mapped[int] = mapped_column(Integer, primary_key=True, default=0)
     delta_U: Mapped[str] = mapped_column(Text, nullable=False)
     delta_C: Mapped[str] = mapped_column(Text, nullable=False)
     delta_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 位置段 ``[[起点, 长度], ...]``（JSON）。空 = 单段。
+    delta_chunks: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     S_I: Mapped[str] = mapped_column(Text, nullable=False)
     Lambda_I: Mapped[str] = mapped_column(Text, nullable=False)
     #: 下标集合与对应的值，JSON 数组
@@ -265,8 +304,9 @@ class NodeRegistryRow(Base):
       * 新节点：``received_n = 0``，而它自己也是 ``n = 0`` → 一致 ⇒ 放行；
       * 老节点丢数据：``received_n = 10``（推过 10 块），而它 ``n = 0`` → 不一致 ⇒ 拒绝。
 
-    ``received_n`` 在**每次 bootstrap 通过闸门之后**刷新为当时的 ``store.n``，
-    不需要在写路径上更新（那会给每次上传多加一次写库）。
+    ``received_n`` 在**每次 bootstrap 通过闸门之后**刷新为当时的
+    **全局位置总数**（``store.n`` = ``registry.total_blocks()``）。新方案里段
+    永不回收，所以这个数**单调不减**，“推过 10 块却停在 n=0”仍然意味着丢数据。
     """
 
     __tablename__ = "node_registry"

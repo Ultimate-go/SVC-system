@@ -197,17 +197,25 @@ async function addToPool(row) {
   poolBusy.value = true
   poolTimings.value = null
   try {
+    const t0 = performance.now()
     const { data } = await evidenceApi.query(indices, false)
+    const ms = Math.round(performance.now() - t0)
     pool.addCard({
       label: `${row.owner}/${row.file_key}`,
       src: `来自文件列表 · ${row.block_count} 块`,
       result: data,
     })
     poolTimings.value = data.timings || null
+    // ★ 耗时提示：**单文件**的取证是“把各节点的凭证聚合起来”，与块数近乎
+    //   线性、很快；而一旦把**多份文件**的块放进同一次验证，就要在合并
+    //   位置集上重算一份证据（秒级）。第一次入池就把这件事说清楚，
+    //   免得用户以为“验证卡住了”。
     ElMessage.success(
       already
-        ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}）`
-        : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`,
+        ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}，用时 ${ms} ms）`
+        : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`
+            + `（用时 ${ms} ms）。跨文件验证会在合并位置集上重算证据，`
+            + `通常要 1~3 秒。`,
     )
   } catch {
     // 403 / 409 的中文理由已由拦截器原样弹出（“只有所有者”那条同样适用）
@@ -292,59 +300,39 @@ async function tryDecrypt(file) {
 }
 
 /**
- * 排在 ``row`` **之后**上传的那些文件（它们会被连带删掉）。
- *
- * 依据来自两条事实：① 各文件在向量上占连续区间；② 顺序就是上传顺序
- * （见 ``core/registry.py::alloc_file``）。所以“首块下标更大”的就是后面的。
- */
-function doomedAfter(row) {
-  const g0 = Math.min(...(row.indices || []))
-  return files.value.filter(
-    (f) => f.id !== row.id && Math.min(...(f.indices || [])) > g0,
-  )
-}
-
-/**
  * 删除整份文件（**只有所有者**）。
  *
- * ★ 方案只允许删“向量末尾”的连续区间，而各文件在向量上按上传顺序连续排列
- *   ⇒ 这次删除 = “从这份文件的第一块删到向量末尾”，会**连它之后上传的文件
- *   一起删掉**。所以确认框必须先把连带名单列出来 —— 不做静默连带。
+ * ★ **不再连带删别的文件**。旧设计里各文件挤在一条连续下标上，"删中间一份"
+ *   就得把它后面的全部一起删掉；新方案里每份文件各占自己的位置段
+ *   （位置互不重叠，也**永不回收**），所以删一份文件就是删**它自己**。
+ *   原来那套"列出连带名单 / 后面压着别人的文件就拒绝"的判断已经全部不成立 ——
+ *   留着只会让用户以为要连带删掉别人的东西而不敢操作（或者反过来被误导）。
  *
- * ★ 后面压着**别人的**文件时不能删：那就变成替别人删数据了。这里先自己算
- *   一遍提前说清（后端也会 409 再拦一道）。
+ * ★ 同时也**不再有 409**：删自己的东西碰不到别人的块。
+ *
+ * ★ 确认框仍然必须有：删除不可撤销，密文与封装过的块密钥都会真的没了。
+ *   这是**真的丢数据**，不能静默。
  */
+/**
+ * 位置段 → 可读区间：``[[0, 20], [48, 2]]`` → ``0-19、48-49``。
+ *
+ * ★ 为什么不写 ``0+20``：那是“偏移 + 块数”的记账写法，和尾部再拼一个
+ *   “20 块”放一起会变成 ``0+2020 块``，谁也读不出来。区间写法一眼能看懂，
+ *   而“共几块”已经有独立的「块数」列，不必在这里重复。
+ */
+function segText(segments) {
+  const out = (segments || []).map(([o, c]) => (c <= 1 ? `${o}` : `${o}-${o + c - 1}`))
+  return out.length ? out.join('、') : '—'
+}
+
 async function removeFile(row) {
-  const later = doomedAfter(row)
-  const others = later.filter((f) => !f.is_mine)
-  if (others.length) {
-    ElMessageBox.alert(
-      `这份文件后面还压着别人的 ${others.length} 份文件：${others
-        .slice(0, 5)
-        .map((f) => `${f.owner}/${f.file_key}`)
-        .join('、')}。\n\n` +
-        '方案只允许删「向量末尾」，要删它就得连别人的一起删 —— 那不能做。\n' +
-        '请让那位所有者先删掉他自己的文件。',
-      '不能删',
-      { type: 'warning' },
-    )
-    return
-  }
   const parts = [
-    `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块，全局下标 ${span(row.indices)}）。`,
+    `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块）。`,
+    '删除不可撤销：这份文件的密文、封装过的块密钥与账目都会从库里、从节点上删掉。',
+    '别的文件不受影响 —— 每份文件各占自己的位置段，删它不会动到任何别人。',
   ]
-  if (later.length) {
-    parts.push(
-      `按方案的限制，这次删除会连它之后上传的 ${later.length} 份文件一起删掉：` +
-        later.map((f) => `${f.owner}/${f.file_key}（${f.block_count} 块）`).join('；') +
-        '。',
-    )
-  } else {
-    parts.push('它正好排在向量末尾，所以只删这一份。')
-  }
-  parts.push('删除不可撤销：那些块的密文与封装过的块密钥都会从库里、从节点上删掉。')
   try {
-    await ElMessageBox.confirm(parts.join(''), '确认删除', {
+    await ElMessageBox.confirm(parts.join('\n'), '确认删除', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -354,11 +342,13 @@ async function removeFile(row) {
   }
   try {
     const { data } = await filesApi.remove(row.id)
-    const n = data.deleted_files.length - 1
-    ElMessage.success(`已删除 ${data.dropped_blocks} 块` + (n > 0 ? `（连带 ${n} 份文件）` : ''))
+    const n = (data.deleted_files || []).length
+    ElMessage.success(
+      `已删除 ${data.dropped_blocks} 块` + (n > 1 ? `（共 ${n} 份文件）` : ''),
+    )
     await load()
   } catch {
-    // 错误已由拦截器弹出（409 会説清是谁挡着）
+    // 错误已由拦截器弹出
   }
 }
 
@@ -524,8 +514,18 @@ onMounted(load)
           <el-table-column label="版本" width="70" align="center">
             <template #default="{ row }"><span class="mono">{{ row.version }}</span></template>
           </el-table-column>
-          <el-table-column label="全局下标" min-width="120">
-            <template #default="{ row }"><span class="mono">{{ span(row.indices) }}</span></template>
+          <el-table-column label="位置段" min-width="150">
+            <template #default="{ row }">
+              <!-- ★ 新方案（一文件一向量）：界面按「文件 / 第几块」说话，
+                   这里给的是**内部坐标**（这份文件在全局素数表里占的段）。
+                   段可能有好几截 —— 追加时原段末尾被后来的文件占住了，
+                   就只能另起一段，所以“块号”与“位置号”本来就不该画等号。
+                   ★ 渲染成**区间**（0-19）而不是 `偏移+块数`：后者写作 `0+20`，
+                   再拼上尾部那个“20 块”就变成 `0+2020 块` —— 读不出来。 -->
+              <span class="mono" :title="`内部坐标：${row.segments?.length || 0} 段`">
+                {{ segText(row.segments) }}
+              </span>
+            </template>
           </el-table-column>
           <el-table-column label="验证" width="80" align="center">
             <template #default>

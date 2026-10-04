@@ -161,7 +161,11 @@ def _digest_mod(delta: Digest, K, deltas, S_i, N: int) -> Digest:
         d = deltas[i]
         if d:
             C2 = C2 * pow(S_i[i], d, N) % N
-    return Digest(U=delta.U, C=C2, n=delta.n)
+    # ★ offset 必须一路带下去：丢了它就等于把文件挪回第 0 段，
+    # 之后所有验证都会失败（而且失败得很难归因）。
+    return Digest(
+        U=delta.U, C=C2, n=delta.n, offset=delta.offset, chunks=delta.chunks
+    )
 
 
 def _digest_add(delta: Digest, K, F_new, primegen, N: int) -> Digest:
@@ -169,14 +173,28 @@ def _digest_add(delta: Digest, K, F_new, primegen, N: int) -> Digest:
     S_cur, Lam_cur = delta.U, delta.C
     for j, v in zip(K, F_new):
         S_cur, Lam_cur = add_back(S_cur, Lam_cur, primegen.get(j), v, N)
-    return Digest(U=S_cur, C=Lam_cur, n=delta.n + len(K))
+    # ★ K 里是**全局位置号**，所以 primegen 直接用全局的那张表；
+    # offset 原样带下去（追加不改变本文件的段起点）。
+    return Digest(
+        U=S_cur,
+        C=Lam_cur,
+        n=delta.n + len(K),
+        offset=delta.offset,
+        chunks=delta.chunks,
+    )
 
 
 def _digest_del(delta: Digest, witness: UpdateWitness, K) -> Digest:
     r"""``del`` 之后的新摘要就是 :math:`\Upsilon_\Delta` 里那份 :math:`\pi_K`。"""
     if witness.pi_K is None:
         raise ValueError("del 的 Υ∆ 里必须带 π_K（它就是新摘要）")
-    return Digest(U=witness.pi_K.S_I, C=witness.pi_K.Lambda_I, n=delta.n - len(K))
+    return Digest(
+        U=witness.pi_K.S_I,
+        C=witness.pi_K.Lambda_I,
+        n=delta.n - len(K),
+        offset=delta.offset,
+        chunks=delta.chunks,
+    )
 
 
 def new_digest_for_update(
@@ -211,7 +229,10 @@ def new_digest_for_update(
     op, K = op_delta.op, witness.K
     if not K:
         raise ValueError("K 为空，推不出新摘要")
-    primegen, N = session.crs.primegen, session.crs.N
+    # ★ 用**本文件那段**的素数表：K 是文件内的局部块号 0..n-1，
+    #   「第 i 块 ↔ 素数表第 offset+i 个」这层关系由素数视图承担。
+    #   用错表不会报错，只会让 e_i 对不上，最后以 ShamirTrick 同源失败收场。
+    primegen, N = session.primegen_for(delta), session.crs.N
 
     if op == "mod":
         if len(witness.F_K) != len(K):
@@ -246,7 +267,7 @@ def _S_K(session, delta: Digest, node: StorageNode | None, K: Sequence[int]) -> 
     crs_n = session.crs_n_for(delta)
     return pow(
         session.crs.g,
-        crs_n.e_all // e_of(session.crs.primegen, K),
+        crs_n.e_all // e_of(session.primegen_for(delta), K),
         session.crs.N,
     )
 
@@ -340,7 +361,7 @@ def _push_mod(session, delta, node, op_delta: UpdateDelta, old_values) -> Pushed
     if K[-1] >= n:
         raise ValueError(f"下标 {K[-1]} 越界（当前 n = {n}）")
 
-    primegen, N = session.crs.primegen, session.crs.N
+    primegen, N = session.primegen_for(delta), session.crs.N
     old = dict(old_values) if old_values is not None else {
         i: node.view.value_of(i) for i in K
     }
@@ -353,7 +374,9 @@ def _push_mod(session, delta, node, op_delta: UpdateDelta, old_values) -> Pushed
     for i in K:
         if deltas[i]:
             C2 = C2 * pow(S_i[i], deltas[i], N) % N
-    new_delta = Digest(U=delta.U, C=C2, n=n)
+    new_delta = Digest(
+        U=delta.U, C=C2, n=n, offset=delta.offset, chunks=delta.chunks
+    )
 
     st_new, I_new, FI_new = _mod_node_state(node, K, F_new, deltas, S_i, primegen, N)
     witness = UpdateWitness(op="mod", K=K, S_K=S_K, F_K=tuple(old[i] for i in K))
@@ -397,13 +420,19 @@ def _push_add(session, delta, node, op_delta: UpdateDelta) -> PushedUpdate:
     if not F_new:
         raise ValueError("至少要追加一个位置")
     n, k = delta.n, len(F_new)
-    if n + k > session.n_max:
+    offset = int(getattr(delta, "offset", 0))
+    if offset + n + k > session.n_max:
         raise ValueError(
-            f"追加后长度 {n + k} 超过会话上限 n_max = {session.n_max}；"
-            f"隐藏阶群的可用位置在 Bootstrap 阶段就定死了"
+            f"追加后本文件要占到全局位置 {offset + n + k - 1}，"
+            f"超出全系统位置预算 n_max = {session.n_max}；"
+            f"段在 Bootstrap 阶段定死、且永不回收，用满只能重建 CRS"
         )
 
-    primegen, N = session.crs.primegen, session.crs.N
+    # ★ 本文件那段的素数表，不是全局第 0 段那张。
+    primegen, N = session.primegen_for(delta), session.crs.N
+    # 下标是**文件内**的局部块号 0..n-1：svc 层的算法全都假定下标密集
+    # （如 lambda_subset 里的 range(n)），所以「文件的第 i 块 ↔ 素数表第
+    # offset+i 个」只能由素数视图承担，下标本身不携段信息。
     K = tuple(range(n, n + k))
     e_K = e_of(primegen, K)
 
@@ -411,7 +440,16 @@ def _push_add(session, delta, node, op_delta: UpdateDelta) -> PushedUpdate:
     S_cur, Lam_cur = delta.U, delta.C
     for j, v in zip(K, F_new):
         S_cur, Lam_cur = add_back(S_cur, Lam_cur, primegen.get(j), v, N)
-    new_delta = Digest(U=S_cur, C=Lam_cur, n=n + k)
+    # ★ offset 必须带下去：丢了它就等于把这份文件挪回第 0 段。
+    #   后果比想象的严重：节点侧是按 offset 存视图的，于是新文件的
+    #   “空视图”会注册到 offset=0，把老文件那份视图**覆盖掉**。
+    new_delta = Digest(
+        U=S_cur,
+        C=Lam_cur,
+        n=n + k,
+        offset=delta.offset,
+        chunks=delta.chunks,
+    )
 
     # 新位置在**旧**累加器下的成员见证
     #
@@ -474,7 +512,13 @@ def _push_del(session, delta, node, op_delta: UpdateDelta, old_values) -> Pushed
 
     crs_n = session.crs_n_for(delta)
     pi_K = disagg(crs_n, list(node.I), list(node.FI), node.st, K)
-    new_delta = Digest(U=pi_K.S_I, C=pi_K.Lambda_I, n=n - k)
+    new_delta = Digest(
+        U=pi_K.S_I,
+        C=pi_K.Lambda_I,
+        n=n - k,
+        offset=delta.offset,
+        chunks=delta.chunks,
+    )
 
     old = dict(old_values) if old_values is not None else {
         i: node.view.value_of(i) for i in K
@@ -510,7 +554,7 @@ def apply_update(
     if tuple(op_delta.K) != tuple(witness.K):
         return AppliedUpdate(False, f"∆ 与 Υ∆ 的 K 不一致（{list(op_delta.K)} vs {list(witness.K)}）")
 
-    ok, why = witness.verify(session.crs.primegen, session.crs.N, delta.U)
+    ok, why = witness.verify(session.primegen_for(delta), session.crs.N, delta.U)
     if not ok:
         return AppliedUpdate(False, why)
 
@@ -550,7 +594,7 @@ def apply_update(
 
 def _apply_mod(session, delta, node, op_delta, witness):
     K, F_new = op_delta.K, op_delta.F_new
-    primegen, N = session.crs.primegen, session.crs.N
+    primegen, N = session.primegen_for(delta), session.crs.N
 
     if len(witness.F_K) != len(K):
         raise ValueError("Υ∆ 里的旧值个数与 K 不一致")
@@ -565,7 +609,7 @@ def _apply_mod(session, delta, node, op_delta, witness):
 
 def _apply_add(session, delta, node, op_delta, witness):
     F_new = op_delta.F_new
-    primegen, N = session.crs.primegen, session.crs.N
+    primegen, N = session.primegen_for(delta), session.crs.N
     if len(F_new) != len(witness.K):
         raise ValueError("∆ 里的新值个数与 K 不一致")
 

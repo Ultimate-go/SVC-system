@@ -87,29 +87,36 @@ class NodeRuntime:
     # -- 启动 / 收下公开参数 ------------------------------------------------
 
     def _reload(self) -> None:
-        """从自己的库恢复。**公开参数来自库里那几行，不重新生成。**"""
+        """从自己的库恢复。**公开参数来自库里那几行，不重新生成。**
+
+        ★ 新方案下一台节点可能同时参与好几份文件，所以这里是**逐份恢复**：
+        库里 ``state`` 表每份文件一行，密文按 ``(offset, 局部块号)`` 存。
+        """
         crs = self.db.load_crs()
         if crs is None:
             return
         self.session = GlobalSession(crs_from_dict(crs))
-        saved = self.db.load_state()
-        if saved is None:
-            self.state = NodeState(self.node_id, self.session, blobs=self.db.load_blobs())
-            return
-        U, C, n = saved["delta"]
-        S_I, Lam = saved["st"]
-        I = tuple(saved["I"])
-        self.state = NodeState(
-            self.node_id,
-            self.session,
-            LocalView(
-                delta=Digest(U=int(U), C=int(C), n=int(n)),
-                st=Opening(int(S_I), int(Lam), I),
-                I=I,
-                FI=tuple(saved["FI"]),
-            ),
-            blobs=self.db.load_blobs(),
-        )
+        self.state = NodeState(self.node_id, self.session)
+        states = self.db.load_states()
+        blobs = self.db.load_blobs()
+        for off, saved in states.items():
+            U, C, n = saved["delta"]
+            if int(n) == 0:
+                # ★ 老库（或半途失败）里可能留下一个 n=0 的空段。这种段在协调者
+                #   眼里**不存在**（它是直接删行的），读回来就成了分叉 ——
+                #   表现是启动自检报"停在 (off, 0)"并拒绝启动。跳过，顺手删行。
+                self.db.delete_state(int(off))
+                continue
+            S_I, Lam = saved["st"]
+            I = tuple(saved["I"])
+            self.state.restore(
+                off,
+                Digest(U=int(U), C=int(C), n=int(n), offset=int(off)),
+                Opening(int(S_I), int(Lam), I),
+                I,
+                tuple(saved["FI"]),
+                blobs=blobs.get(off, {}),
+            )
 
     def adopt_crs(self, crs_dict: dict) -> dict:
         """收下协调者给的公开参数。
@@ -141,7 +148,10 @@ class NodeRuntime:
                 n_max=int(crs_dict["n_max"]),
             )
             self.session = GlobalSession(crs_from_dict(crs_dict))
-            self.state = NodeState(self.node_id, self.session, blobs=self.db.load_blobs())
+            # 公开参数刚落地，把库里已有的视图一并恢复出来（可能有好几份文件）
+            self._reload()
+            if self.state is None:
+                self.state = NodeState(self.node_id, self.session)
             return {"ok": True, "changed": True, "node_id": self.node_id}
 
     def _need_session(self) -> GlobalSession:
@@ -162,20 +172,30 @@ class NodeRuntime:
             row["db"] = self.db.stats()
             return row
 
-    def retrieve(self, indices: list[int]) -> dict:
+    def retrieve(self, offset: int, indices: list[int]) -> dict:
+        """取回某些块的 ``(π_Q, 密文段)``。``indices`` 是它的**文件内局部块号**。"""
         with self._lock:
             self._need_session()
             assert self.state is not None
+            off = int(offset)
             want = sorted({int(i) for i in indices})
             if not want:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "下标集合不能为空")
-            missing = sorted(set(want) - set(self.state.I))
+            if not self.state.has_view(off):
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND,
+                    f"本节点没有 offset={off} 那份向量"
+                    f"（现持有 {list(self.state.offsets)}）",
+                )
+            held = self.state.I_of(off)
+            missing = sorted(set(want) - set(held))
             if missing:
                 raise HTTPException(
                     status.HTTP_404_NOT_FOUND,
-                    f"本节点不持有下标 {missing}（持有 {list(self.state.I)}）",
+                    f"本节点在 offset={off} 那份里不持有下标 {missing}"
+                    f"（持有 {list(held)}）",
                 )
-            pi_Q, cts = _retrieve_from(self.state, want)
+            pi_Q, cts = _retrieve_from(self.state, off, want)
             return {
                 "node_id": self.node_id,
                 "indices": want,
@@ -187,7 +207,7 @@ class NodeRuntime:
                 "blobs": [ct.hex() for ct in cts],
             }
 
-    def pos_prove(self, indices: list[int]) -> dict:
+    def pos_prove(self, offset: int, indices: list[int]) -> dict:
         """回答一次**存储证明**（PoR）挑战 —— 只回自己那一份。
 
         ``Q := I ∩ r``。一个下标都不沾就返回**空份额**（``proof`` 为 ``None``）——
@@ -203,8 +223,9 @@ class NodeRuntime:
             want = sorted({int(i) for i in indices})
             if not want:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "挑战下标不能为空")
-            ch = Challenge(indices=tuple(want), n=self.state.delta.n)
-            proof = pos_prove(self.state.node(), ch)
+            off = int(offset)
+            ch = Challenge(indices=tuple(want), n=self.state.delta_of(off).n)
+            proof = pos_prove(self.state.node(off), ch)
             if not proof.has_proof():
                 return {
                     "node_id": self.node_id,
@@ -247,29 +268,33 @@ class NodeRuntime:
             assigned = [int(x) for x in payload.get("assigned", [])]
             blobs = {int(k): bytes.fromhex(v) for k, v in payload.get("blobs", {}).items()}
 
-            if self.state.has_state and self.state.delta != delta_old:
+            # ★ 按 offset 定位“这份文件”：一台节点可能同时参与好几份，
+            #   各有一份视图。``delta_old.offset`` 就是这份文件的段起点。
+            off = int(delta_old.offset)
+            if self.state.has_view(off) and self.state.delta_of(off) != delta_old:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    f"本节点停在 n={self.state.delta.n}，但协调者认为它在 "
+                    f"本节点在 offset={off} 那份文件上停在 n="
+                    f"{self.state.delta_of(off).n}，但协调者认为它在 "
                     f"n={delta_old.n} —— 它漏掉了一次更新，需要重新同步",
                 )
 
             try:
-                if not self.state.has_state:
-                    # 第一次被指派任务：从空视图起步（π_∅ = (U_n, C_n)）
+                if not self.state.has_view(off):
+                    # 这份文件还没参与过：从空视图起步（π_∅ = (U_n, C_n)）
                     self.state.adopt_empty(delta_new)
                 else:
-                    self.state.adapt(op_delta, witness)
+                    self.state.adapt(off, op_delta, witness, delta_new)
             except NodeRejected as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, f"拒绝更新：{exc}") from exc
 
             # ★ 节点**独立算出**的摘要必须与协调者算的逐位相同。
             #   这一步不能省：盲信协调者给的 delta_new 就等于放弃了
             #   "节点自己跟上更新"这条性质。
-            if self.state.delta != delta_new:
+            if self.state.delta_of(off) != delta_new:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    f"本节点算出的摘要与协调者不一致（{self.state.delta.n} vs "
+                    f"本节点算出的摘要与协调者不一致（{self.state.delta_of(off).n} vs "
                     f"{delta_new.n}）—— 更新密钥或新值有问题",
                 )
 
@@ -280,30 +305,32 @@ class NodeRuntime:
                     assigned=assigned,
                     values_all=tuple(op_delta.F_new),
                     blobs=blobs,
+                    delta_new=delta_new,
                 )
             except (NodeRejected, ValueError) as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, f"合并失败：{exc}") from exc
 
-            if not self.state.check():
+            if not self.state.check(off):
                 raise HTTPException(
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     "应用更新后本地视图不合法 —— 拒绝落库",
                 )
 
-            # 落库：状态整行覆写，密文只写新增的
+            # 落库：状态整行覆写（这份文件一行），密文只写新增的
             self.db.save_state(
-                delta=self.state.delta,
-                st=self.state.st,
-                I=self.state.I,
-                FI=self.state.FI,
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
             )
-            self.db.save_blobs(blobs)
+            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
-                "n": self.state.delta.n,
-                "held": len(self.state.I),
-                "span": self.state.describe()["span"],
+                "n": self.state.delta_of(off).n,
+                "held": len(self.state.I_of(off)),
+                "span": self.state.describe(offset=off)["span"],
             }
 
     def update(self, payload: dict) -> dict:
@@ -335,58 +362,63 @@ class NodeRuntime:
                     f"/node/update 只接受 mod，收到 {op_delta.op!r}"
                     f"（add 走 /node/append；del 走 /node/delete —— 它的 Υ∆ 要带 π_K）",
                 )
-            if not self.state.has_state:
+            off = int(delta_new.offset)
+            if not self.state.has_view(off):
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    "本节点还没有任何状态，改不了 —— mod 只能作用于已经分发下去的数据",
+                    "本节点还没有 offset="
+                    f"{off} 那份向量的状态，改不了 —— mod 只能作用于已分发下去的数据",
                 )
 
             blobs = {
                 int(k): bytes.fromhex(v) for k, v in payload.get("blobs", {}).items()
             }
 
+            off = int(delta_new.offset)
+
             try:
-                self.state.adapt(op_delta, witness)
+                self.state.adapt(off, op_delta, witness, delta_new)
             except NodeRejected as exc:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"拒绝更新：{exc}"
                 ) from exc
 
             # ★ 与 append 同一道交叉验证：节点独立算出的摘要必须与协调者逐位相同。
-            if self.state.delta != delta_new:
+            if self.state.delta_of(off) != delta_new:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    f"本节点算出的摘要与协调者不一致（{self.state.delta.n} vs "
+                    f"本节点算出的摘要与协调者不一致（{self.state.delta_of(off).n} vs "
                     f"{delta_new.n}）—— 更新密钥或新值有问题",
                 )
 
             try:
-                self.state.replace_blobs(blobs)
+                self.state.replace_blobs(off, blobs)
             except NodeRejected as exc:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"换密文失败：{exc}"
                 ) from exc
 
-            if not self.state.check():
+            if not self.state.check(off):
                 raise HTTPException(
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     "应用更新后本地视图不合法 —— 拒绝落库",
                 )
 
-            # 落库：状态整行覆写（C 变了），密文按主键 upsert
+            # 落库：状态整行覆写（C 变了），密文按 (offset, 局部块号) upsert
             self.db.save_state(
-                delta=self.state.delta,
-                st=self.state.st,
-                I=self.state.I,
-                FI=self.state.FI,
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
             )
-            self.db.save_blobs(blobs)
+            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
-                "n": self.state.delta.n,
-                "held": len(self.state.I),
-                "span": self.state.describe()["span"],
+                "n": self.state.delta_of(off).n,
+                "held": len(self.state.I_of(off)),
+                "span": self.state.describe(offset=off)["span"],
             }
 
     def drop(self, payload: dict) -> dict:
@@ -405,7 +437,8 @@ class NodeRuntime:
         """
         with self._lock:
             self._need_session()
-            if self.state is None or not self.state.has_state:
+            off = int(payload.get("offset", -1))
+            if self.state is None or not self.state.has_view(off):
                 return {
                     "ok": True,
                     "node_id": self.node_id,
@@ -413,26 +446,42 @@ class NodeRuntime:
                     "held": 0,
                     "span": "—",
                     "removed": 0,
-                    "note": "本节点还没有状态，无需交回",
+                    "note": "本节点不参与这份向量，无需交回",
                 }
             positions = [int(x) for x in payload.get("positions", [])]
             if not positions:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, "要交回的下标不能为空"
                 )
+            # ★ 线路上来的是**全局位置号**（协调者记账用那一套），而本地视图
+            #   ``I`` 与密文表用的是**文件内局部块号**。两套下标长得一样，
+            #   混用**不会报错**，只会悄悄删错块（然后在 check 里以
+            #   “本地视图不合法”收场）。转换口径与 ``LocalTransport.drop``
+            #   逐字一致，否则同进程与跨进程会走出两种行为。
+            idx_of = {
+                g: i for i, g in enumerate(self.state.delta_of(off).positions)
+            }
             try:
-                out = self.state.drop(positions)
+                local = [idx_of[p] for p in positions]
+            except KeyError as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"要交回的位置 {exc.args[0]} 不属于本节点这份文件",
+                ) from exc
+            try:
+                out = self.state.drop(off, local)
             except NodeRejected as exc:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"交回失败：{exc}"
                 ) from exc
             self.db.save_state(
-                delta=self.state.delta,
-                st=self.state.st,
-                I=self.state.I,
-                FI=self.state.FI,
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
             )
-            removed = self.db.delete_blobs(out["dropped"])
+            removed = self.db.delete_blobs(off, out["dropped"])
             return {**out, "node_id": self.node_id, "removed": removed}
 
     def adopt(self, payload: dict) -> dict:
@@ -478,29 +527,31 @@ class NodeRuntime:
             }
             if not positions:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "要接收的下标不能为空")
+            off = int(payload.get("offset", -1))
             try:
-                out = self.state.adopt(positions, values, proof, blobs=blobs)
+                out = self.state.adopt(off, positions, values, proof, blobs=blobs)
             except NodeRejected as exc:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"接收失败：{exc}"
                 ) from exc
-            if not self.state.check():
+            if not self.state.check(off):
                 raise HTTPException(
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     "接收后本地视图不合法 —— 拒绝落库",
                 )
             # 状态整行覆写（I / F_I 都变大了），密文只写新收的这几段
             self.db.save_state(
-                delta=self.state.delta,
-                st=self.state.st,
-                I=self.state.I,
-                FI=self.state.FI,
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
             )
-            self.db.save_blobs(blobs)
+            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
-                "n": self.state.delta.n,
+                "n": self.state.delta_of(off).n,
                 "adopted": out["adopted"],
                 "held": out["held"],
                 "span": out["span"],
@@ -524,7 +575,8 @@ class NodeRuntime:
         """
         with self._lock:
             self._need_session()
-            if self.state is None or not self.state.has_state:
+            off = int(payload.get("offset", -1))
+            if self.state is None or not self.state.has_view(off):
                 return {
                     "ok": True,
                     "node_id": self.node_id,
@@ -532,7 +584,7 @@ class NodeRuntime:
                     "held": 0,
                     "span": "—",
                     "removed": 0,
-                    "note": "本节点还没有状态，无需跟上（它本来就没有 δ 要推进）",
+                    "note": "本节点不参与这份向量，无需跟上",
                 }
             delta_new = _delta_in(payload["delta_new"])
             op_delta = _op_in(payload["op_delta"])
@@ -544,27 +596,46 @@ class NodeRuntime:
                     f"（add 走 /node/append；mod 走 /node/update）",
                 )
             # 必须在 apply_delete **之前**记下来：它会把 I 换成新的（更小的）那个
-            gone = sorted(set(op_delta.K) & set(self.state.I))
+            gone = sorted(set(op_delta.K) & set(self.state.I_of(off)))
             try:
-                self.state.apply_delete(op_delta, witness, delta_new)
+                self.state.apply_delete(off, op_delta, witness, delta_new)
             except NodeRejected as exc:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"拒绝删除更新：{exc}"
                 ) from exc
             # （apply_delete 内部已经做完"节点自己算的摘要 == 协调者给的"这道交叉校验）
+            removed = self.db.delete_blobs(off, gone)
+            # ★ 整段被删光（n = 0）时，apply_delete 已经把这一段**整个摘掉**了 ——
+            #   这时绝不能再 delta_of / I_of / describe 去读它（那几个都按 off 查，
+            #   段没了就是 KeyError，表现成 /node/delete 回 500，而协调者只知道
+            #   "有节点没能跟上这次删除"，真正的报错句一点也看不到）。
+            #   该做的是**跟着把它从库里删掉**：协调者那边本来就是直接删行的，
+            #   两边对"现在有哪些段"必须一致，否则节点重启时就分叉了。
+            if not self.state.has_view(off):
+                self.db.delete_state(off)
+                return {
+                    "ok": True,
+                    "node_id": self.node_id,
+                    "n": 0,
+                    "held": 0,
+                    "span": "—",
+                    "removed": removed,
+                    "dropped": list(gone),
+                    "note": "这一段已被删空，节点已把它整个摘掉",
+                }
             self.db.save_state(
-                delta=self.state.delta,
-                st=self.state.st,
-                I=self.state.I,
-                FI=self.state.FI,
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
             )
-            removed = self.db.delete_blobs(gone)
             return {
                 "ok": True,
                 "node_id": self.node_id,
-                "n": self.state.delta.n,
-                "held": len(self.state.I),
-                "span": self.state.describe()["span"],
+                "n": self.state.delta_of(off).n,
+                "held": len(self.state.I_of(off)),
+                "span": self.state.describe(offset=off)["span"],
                 "removed": removed,
                 "dropped": list(gone),
             }
@@ -583,7 +654,17 @@ class NodeRuntime:
 # ---------------------------------------------------------------------------
 
 def _delta_in(o: dict) -> Digest:
-    return Digest(U=int(o["U"]), C=int(o["C"]), n=int(o["n"]))
+    # ★ offset 必带：它是“哪一份向量”的标识（节点按它存视图）。
+    #   缺了它，新文件会退回第 0 段，把老文件那份视图覆盖掉。
+    raw = o.get("chunks") or []
+    return Digest(
+        U=int(o["U"]),
+        C=int(o["C"]),
+        n=int(o["n"]),
+        offset=int(o.get("offset", 0)),
+        # ★ 位置段必须一起解 —— 节点靠它建“局部块号 → 素数”的视图。
+        chunks=tuple((int(a), int(b)) for a, b in raw),
+    )
 
 
 def _op_in(o: dict) -> UpdateDelta:
@@ -617,14 +698,15 @@ def _witness_in(o: dict) -> UpdateWitness:
     )
 
 
-def _retrieve_from(state: NodeState, want: list[int]):
+def _retrieve_from(state: NodeState, offset: int, want: list[int]):
     """取 ``(π_Q, 密文段)``。走 ``NodeState.retrieve`` + 自己的密文表。
 
     ★ 回给调用方的是**密文**而不是分量 —— 分量一律由验证方自己从密文重算，
     节点声称的那一份不参与判定（见 ``core/store.py`` 模块说明）。
     """
-    _F_Q, pi_Q = state.retrieve(want)
-    cts = tuple(state.blobs[i] for i in want)
+    off = int(offset)
+    _F_Q, pi_Q = state.retrieve(off, want)
+    cts = tuple(state.blobs_of(off)[i] for i in want)
     return pi_Q, cts
 
 
@@ -663,7 +745,7 @@ def create_node_app(node_id: str, data_dir: str | Path, *, token: str) -> FastAP
 
     app = FastAPI(
         title=f"VDS 存储节点 {node_id}",
-        description="一台存储服务器：只存全局向量的一段，自己算自己的证据。",
+        description="一台存储服务器：只存每份文件的一段，自己算自己的证据。",
         version="0.2.0",
         default_response_class=Utf8JSONResponse,
         # ★ 全局依赖：**所有**路由都要令牌，包括以后新加的。
@@ -682,7 +764,7 @@ def create_node_app(node_id: str, data_dir: str | Path, *, token: str) -> FastAP
             "ok": True,
             "node_id": r.node_id,
             "has_crs": r.session is not None,
-            "has_state": bool(r.state and r.state.has_state),
+            "has_state": bool(r.state and r.state.offsets),
             "db": r.db.stats(),
         }
 
@@ -696,11 +778,15 @@ def create_node_app(node_id: str, data_dir: str | Path, *, token: str) -> FastAP
 
     @app.post("/node/retrieve")
     def retrieve(payload: dict, request: Request):
-        return rt(request).retrieve(payload.get("indices", []))
+        return rt(request).retrieve(
+            int(payload.get("offset", -1)), payload.get("indices", [])
+        )
 
     @app.post("/node/pos")
     def pos_prove_route(payload: dict, request: Request):
-        return rt(request).pos_prove(payload.get("indices", []))
+        return rt(request).pos_prove(
+            int(payload.get("offset", -1)), payload.get("indices", [])
+        )
 
     @app.post("/node/append")
     def append(payload: dict, request: Request):

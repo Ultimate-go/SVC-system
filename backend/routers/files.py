@@ -131,6 +131,10 @@ def can_decrypt(user: UserRow, row: FileRow) -> bool:
 def _file_public(row: FileRow, mgr: StoreManager) -> dict:
     store = mgr._require()
     indices = store.file_indices(row.owner, row.file_key)
+    # ★ 这份文件自己的摘要。注意：本函数与 manager.list_files() 是**两份**
+    #   序列化实现，字段容易分叉 —— 列表页要的 segments 就只长在那一份上，
+    #   而路由走的是本函数，于是界面上「位置段」永远显示 "—"。
+    _fd_row = store.delta_of(row.owner, row.file_key)
     return {
         "id": row.id,
         "owner": row.owner,
@@ -164,6 +168,13 @@ def _file_public(row: FileRow, mgr: StoreManager) -> dict:
         # ★ 但只看 n 不够：**改块不改 n、却改承诺 C**（见 manager.modify_block）。
         #   所以再给一个 δ 指纹；前端判"手里那张卡作废没有"要按它判。
         "delta_fp": mgr.delta_fingerprint(),
+        # ★ 这份文件在全局位置轴上占的段（追加会让它变成好几截）。
+        #   文件列表的「位置段」列渲染的就是它；没有这几个字段，那一列只能是 "—"。
+        "offset": int(_fd_row.offset),
+        "n": int(_fd_row.n),
+        "segments": [[int(a), int(b)] for a, b in _fd_row.segments],
+        #: 逐文件的 δ 指纹（与上面那个全局的分开）：判"这份文件的旧证据还行吗"用它。
+        "file_delta_fp": mgr.delta_fingerprint((row.owner, row.file_key)),
 
     }
 
@@ -560,13 +571,12 @@ def delete_file(
 ):
     r"""删掉一份文件（**只有所有者**能做）。
 
-    ★ 方案的 ``del`` 只能删**向量末尾**的连续区间，而各文件在向量上按
-    **上传顺序**连续排列，所以这次删除 = "从这份文件的第一块删到向量末尾"：
+    ★ 新架构下它**只删这份文件自己**：每份文件各占自己的位置段（互不重叠，
+    而且位置段**永不回收**），所以"删中间一份要把后面的全删掉"这条束缚
+    已经不存在了 —— 连带删除、连带名单、409 都跟着消失：
 
-    * 它会**一并删掉它之后上传的那些文件** —— 返回值里如实列出被连带的
-      文件名，界面必须显示出来（不做静默连带）；
-    * 如果它后面压着**别人的**文件，这次删除会被拒（409）：不能替别人删
-      数据，要么请那位所有者先删，要么整库重置；
+    * 不会再连累任何别的文件（返回值里的 ``deleted_files`` 正常只有它自己）；
+    * 不会再因为"后面压着别人的文件"而回 409；
     * 删除**真的丢数据**（密文、封装过的块密钥、文件账目一起没），
       面板上先让用户确认，这一层不再二次拦截。
 

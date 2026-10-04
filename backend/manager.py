@@ -61,8 +61,9 @@ from .db import Database
 from .models import (
     BlockRow,
     CrsRow,
+    FileDeltaRow,
     FileRow,
-    GlobalRow,
+    MetaRow,
     NodeBlobRow,
     NodeRegistryRow,
     NodeStateRow,
@@ -77,16 +78,15 @@ __all__ = [
     "DecryptDenied",
 ]
 
-G_DELTA_U = "delta_U"
-G_DELTA_C = "delta_C"
-G_DELTA_N = "delta_n"
-
 #: 分片轮转的偏移量（模节点台数）。
 #:
 #: 必须落库：不存的话重启后偏移归零，之后再传小文件又永远从第 1、2 台
 #: 开始堆，后几台长期空闲 —— 而 :meth:`VectorStore._plan` 的注释
 #: 明确承诺了"连续多次小上传也能覆盖到所有服务器"。
 G_NODE_OFFSET = "node_offset"
+
+# ★ 摘要**不再**放在这里：新方案里摘要是逐文件的，见 ``FileDeltaRow``。
+#   这张 ``meta`` 表只留“全系统唯一”的标量。
 
 
 # 密钥模型（原先这里是"用哪个 ABE 实现"的说明，连同 ``VDS_ABE_SCHEME`` 一
@@ -406,7 +406,7 @@ class StoreManager:
             )
         return seg
 
-    def delta_fingerprint(self) -> str:
+    def delta_fingerprint(self, file_id: tuple[str, str] | None = None) -> str:
         """当前 δ 的短指纹（12 位十六进制）: ``sha256("U:C:n")[:12]``。
 
         为什么必须有它、而不能只看 ``n``：**改块不改变 n，却会改变承诺 C**
@@ -416,8 +416,14 @@ class StoreManager:
         它不是密码学承诺，只是给界面用的一把尺子。
         """
         store = self._require()
-        raw = f"{store.delta.U}:{store.delta.C}:{store.delta.n}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:12]
+        if file_id is not None:
+            d = store.delta_of(*file_id)
+            return hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()[:12]
+        each = sorted(
+            hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()
+            for d in store.deltas.values()
+        )
+        return hashlib.sha256("\n".join(each).encode()).hexdigest()[:12]
 
     def _make_transport(self) -> NodeTransport | None:
         """没配 ``node_urls`` → 单进程模式（返回 ``None``，由 ``VectorStore`` 自建）。"""
@@ -505,8 +511,16 @@ class StoreManager:
 
         bad: list[str] = []
         down: list[str] = []
-        #: 与协调者对齐的节点 —— 通过之后要把它们的 ``received_n`` 刷成当前 n。
+        #: 与协调者对齐的节点 —— 通过之后要把它们的 ``received_n`` 刷成当前
+        #: **全局位置总数**（旧的“全系统一条向量”时它就是块的个数）。
         in_sync: list[str] = []
+        # ★ 新方案里每份文件一条向量，所以闸门要比的是“**每份文件**的 n”，
+        #   而不是一个全局的 n。节点侧 ``describe()`` 已经把每份文件各列一行
+        #   （``vectors``），这里把两边的 ``offset -> n`` 对齐比。
+        want_n = {
+            int(store.delta_of(*fid).offset): int(store.delta_of(*fid).n)
+            for fid in store.files
+        }
         for row in store.transport.report():
             nid = row["node_id"]
             if row.get("unreachable"):
@@ -514,18 +528,19 @@ class StoreManager:
                 continue
             reg = db.get(NodeRegistryRow, nid)
             expect = reg.received_n if reg is not None else 0
-            if row["n"] == store.n:
+            got = {int(v["offset"]): int(v["n"]) for v in row.get("vectors", [])}
+            if got == want_n:
                 in_sync.append(nid)
-            elif row["n"] == expect:
+            elif not got and expect == 0:
                 # 新加入、还没分到任何块 —— 合法。块照样只落在它加入之后写入的那些上。
                 continue
             else:
                 bad.append(
-                    f"{nid} 停在 n={row['n']}，协调者在 n={store.n}"
-                    f"（登记表记的是 n={expect}）"
+                    f"{nid} 停在 {sorted(got.items())}，协调者是 "
+                    f"{sorted(want_n.items())}（登记表记的是全局位置数 {expect}）"
                 )
                 continue
-            if not row["valid"]:
+            if not row.get("valid", True):
                 bad.append(f"{nid} 声称持有的下标与实际密文对不上")
 
         if not bad and len(down) == len(store.node_ids):
@@ -564,36 +579,51 @@ class StoreManager:
         )
 
     def _reload(self, store: VectorStore, db) -> None:
-        """从库里的行重建整个向量。"""
-        g = {r.key: r.value for r in db.execute(select(GlobalRow)).scalars()}
-        store.delta = Digest(
-            U=int(g.get(G_DELTA_U, str(store.session.crs.g))),
-            C=int(g.get(G_DELTA_C, "1")),
-            n=int(g.get(G_DELTA_N, "0")),
-        )
+        """从库里的行重建整个向量（**逐份文件**）。"""
+        meta = {r.key: r.value for r in db.execute(select(MetaRow)).scalars()}
         # 分片偏移也要恢复。取模是为了容错：节点台数改过的话，
         # 旧偏移未必落在合法范围内，取模总比抛异常好（它只影响均匀度）。
-        store._offset = int(g.get(G_NODE_OFFSET, "0")) % max(1, len(store.node_ids))
+        store._offset = int(meta.get(G_NODE_OFFSET, "0")) % max(1, len(store.node_ids))
 
+        # ① 摘要：一份文件一行（含位置段）。
+        for r in db.execute(select(FileDeltaRow)).scalars():
+            fid = (r.owner, r.file_key)
+            chunks = tuple(
+                (int(a), int(b)) for a, b in json.loads(r.chunks_json or "[]")
+            )
+            store.deltas[fid] = Digest(
+                U=int(r.delta_U),
+                C=int(r.delta_C),
+                n=int(r.delta_n),
+                offset=int(r.offset),
+                chunks=chunks,
+            )
+
+        # ② 位置段登记表 + 分量 / 主副本 / 副本表。
+        #    ★ 必须按 (global_index 升序) 逐份文件喂给 registry：它靠“挨着上一段
+        #      末尾就接着长”把原来的段形状复原回来（段永不回收，不会撞别人）。
         buckets: dict[int, list[BlockRow]] = {}
         for b in db.execute(select(BlockRow).order_by(BlockRow.global_index)).scalars():
-            idx = store.registry.alloc_block(b.owner, b.file_key, b.block_idx)
-            if idx != b.global_index:
-                raise RuntimeError(
-                    f"登记表重建错位：期望下标 {b.global_index}，得到 {idx}"
-                )
-            store.values[idx] = int(b.element)
-            store._holder[idx] = b.holder
-            # 老行没写过 replicas（默认 "[]"）⇒ 退化成“只有主副本一份”。
-            # 这样开副本之前传的文件照样能读，不会被新特性卡住。
-            copies = tuple(json.loads(b.replicas or "[]")) or (b.holder,)
-            if copies[0] != b.holder:
-                raise RuntimeError(
-                    f"下标 {idx} 的副本列表 {list(copies)} 与主副本 {b.holder!r} 不一致"
-                )
-            store._replicas[idx] = copies
             buckets.setdefault(b.file_id, []).append(b)
+        for rows in buckets.values():
+            rows.sort(key=lambda r: r.block_idx)
+            first = rows[0]
+            for r in rows:
+                pos = int(r.global_index)
+                store.registry.restore_position(first.owner, first.file_key, pos)
+                store.values[pos] = int(r.element)
+                store._holder[pos] = r.holder
+                # 老行没写过 replicas（默认 "[]"）⇒ 退化成“只有主副本一份”。
+                # 这样开副本之前传的文件照样能读，不会被新特性卡住。
+                copies = tuple(json.loads(r.replicas or "[]")) or (r.holder,)
+                if copies[0] != r.holder:
+                    raise RuntimeError(
+                        f"位置 {pos} 的副本列表 {list(copies)} "
+                        f"与主副本 {r.holder!r} 不一致"
+                    )
+                store._replicas[pos] = copies
 
+        # ③ 文件账目。
         for fid, rows in buckets.items():
             rows.sort(key=lambda r: r.block_idx)
             first = rows[0]
@@ -611,16 +641,47 @@ class StoreManager:
         """
         states: dict[str, dict] = {}
         for r in db.execute(select(NodeStateRow)).scalars():
-            states[r.node_id] = {
-                "delta": (r.delta_U, r.delta_C, r.delta_n),
-                "st": (r.S_I, r.Lambda_I),
-                "I": r.I,
-                "FI": r.FI,
-                "blobs": {},
-            }
+            entry = states.setdefault(r.node_id, {"blobs": {}, "vectors": []})
+            entry["vectors"].append(
+                {
+                    "offset": int(r.offset),
+                    "delta": (r.delta_U, r.delta_C, r.delta_n),
+                    # ★ 位置段必须一起恢复（见 ``_persist_nodes``）。
+                    "chunks": json.loads(r.delta_chunks or "[]"),
+                    "st": (r.S_I, r.Lambda_I),
+                    "I": r.I,
+                    "FI": r.FI,
+                    "blobs": {},
+                }
+            )
+        # ★ 密文表（``node_blobs``）的键是**全局位置号**，而节点视图要的是
+        #   **文件内局部块号** —— 这里用各文件的位置段反查一次。
+        #   不做这一步的话，重启后节点会“声称持有下标 i、却查不到 i 的密文”，
+        #   check 会当场判它不合法。
+        pos_to_local: dict[int, tuple[int, int]] = {}
+        for r in db.execute(select(FileDeltaRow)).scalars():
+            d = Digest(
+                U=int(r.delta_U),
+                C=int(r.delta_C),
+                n=int(r.delta_n),
+                offset=int(r.offset),
+                chunks=tuple(
+                    (int(a), int(b)) for a, b in json.loads(r.chunks_json or "[]")
+                ),
+            )
+            for li, g in enumerate(d.positions):
+                pos_to_local[int(g)] = (int(r.offset), li)
         for b in db.execute(select(NodeBlobRow)).scalars():
-            if b.node_id in states:
-                states[b.node_id]["blobs"][b.global_index] = b.ciphertext
+            if b.node_id not in states:
+                continue
+            hit = pos_to_local.get(int(b.global_index))
+            if hit is None:
+                continue
+            off, li = hit
+            for v in states[b.node_id]["vectors"]:
+                if int(v["offset"]) == off:
+                    v["blobs"][li] = b.ciphertext
+                    break
 
         importer = getattr(store.transport, "import_states", None)
         if states and importer is None:
@@ -637,18 +698,45 @@ class StoreManager:
     # -------------------------------------------------------------------
 
     def _persist_globals(self, db) -> None:
+        """落盘**逐文件**摘要与位置段（名字保留：它管的是“账目”这一层）。
+
+        ★ 新方案里摘要是逐文件的，所以这里不再是一行，而是每份文件一行。
+        库里多出来、而 store 里已经没有的行（删过文件）会被删掉。
+        """
         store = self._require()
-        for key, value in (
-            (G_DELTA_U, store.delta.U),
-            (G_DELTA_C, store.delta.C),
-            (G_DELTA_N, store.delta.n),
-            (G_NODE_OFFSET, store._offset),
-        ):
-            row = db.get(GlobalRow, key)
+        seen: set[tuple[str, str]] = set()
+        for fid, delta in store.deltas.items():
+            owner, file_key = fid
+            seen.add(fid)
+            chunks = json.dumps([[int(a), int(b)] for a, b in delta.chunks])
+            row = db.get(FileDeltaRow, (owner, file_key))
             if row is None:
-                db.add(GlobalRow(key=key, value=str(value)))
+                db.add(
+                    FileDeltaRow(
+                        owner=owner,
+                        file_key=file_key,
+                        offset=int(delta.offset),
+                        delta_U=str(delta.U),
+                        delta_C=str(delta.C),
+                        delta_n=int(delta.n),
+                        chunks_json=chunks,
+                    )
+                )
             else:
-                row.value = str(value)
+                row.offset = int(delta.offset)
+                row.delta_U = str(delta.U)
+                row.delta_C = str(delta.C)
+                row.delta_n = int(delta.n)
+                row.chunks_json = chunks
+        for row in db.execute(select(FileDeltaRow)).scalars():
+            if (row.owner, row.file_key) not in seen:
+                db.delete(row)
+        # 分片偏移（全系统唯一，放 meta 表）
+        mrow = db.get(MetaRow, G_NODE_OFFSET)
+        if mrow is None:
+            db.add(MetaRow(key=G_NODE_OFFSET, value=str(store._offset)))
+        else:
+            mrow.value = str(store._offset)
 
     def _persist_nodes(self, db, indices: Sequence[int]) -> None:
         """落盘节点状态（**仅本地模式**）；跨进程时节点自己管。
@@ -674,20 +762,27 @@ class StoreManager:
 
         db.execute(delete(NodeStateRow))
         for nid, blob in snap.items():
-            U, C, n = blob["delta"]
-            S_I, Lam = blob["st"]
-            db.add(
-                NodeStateRow(
-                    node_id=nid,
-                    delta_U=str(U),
-                    delta_C=str(C),
-                    delta_n=int(n),
-                    S_I=str(S_I),
-                    Lambda_I=str(Lam),
-                    I_json=json.dumps(list(blob["I"])),
-                    FI_json=json.dumps(list(blob["FI"])),
+            for v in blob["vectors"]:
+                U, C, n = v["delta"]
+                S_I, Lam = v["st"]
+                db.add(
+                    NodeStateRow(
+                        node_id=nid,
+                        offset=int(v["offset"]),
+                        delta_U=str(U),
+                        delta_C=str(C),
+                        delta_n=int(n),
+                        # ★ 位置段必须落库：重启后重建节点视图就靠它，
+                        #   丢一次，之后每一次更新都会因 e_i 取错而失败。
+                        delta_chunks=json.dumps(
+                            [[int(a), int(b)] for a, b in v.get("chunks", ())]
+                        ),
+                        S_I=str(S_I),
+                        Lambda_I=str(Lam),
+                        I_json=json.dumps(list(v["I"])),
+                        FI_json=json.dumps(list(v["FI"])),
+                    )
                 )
-            )
         for i in indices:
             gidx = int(i)
             # ★ 每一份副本都要落库。只写主副本的话，重启后别的副本拿到的
@@ -1443,10 +1538,15 @@ class StoreManager:
             g0 = int(rec.indices[0])
             # ★ K 与"连带名单"都在删之前就算好：这样 _finish 在**补推路径**上
             #   也能用（那时 store 里的文件账目已经被摘掉了，已经推不出来）。
-            K = tuple(range(g0, n_before))
-            doomed = tuple(
-                k for k, r in store.files.items() if r.indices and r.indices[0] >= g0
-            )
+            #
+            #   ⚠️ K **不能**写成 `tuple(range(g0, n_before))`（"从这份文件的第一块
+            #   一直数到向量末尾"）：位置段**永不回收**，删过的位置会留下空洞。
+            #   实测一个"删掉又重传"的探针文件 —— 它拿到位置 11、而块数也是 11，
+            #   于是 range(11, 11) 是空集，自检当场报"连带名单不一致"。
+            #   新方案下删一份文件就是删**它自己的全部位置**，核心层正是这么算的
+            #   （见 core/store.py::delete_from），两边必须用同一个来源。
+            K = tuple(rec.indices)
+            doomed = ((owner, file_key),)
             foreign = sorted(k for k in doomed if k[0] != owner)
             if foreign:
                 raise Conflict(
@@ -1500,8 +1600,17 @@ class StoreManager:
             except ValueError as exc:
                 raise OutOfRange(str(exc)) from exc
             if got_K != K or set(got_doomed) != set(doomed):  # pragma: no cover
+                # ★ 只说"不一致"而不说**差在哪**，等于没说：这条自检第一次真的
+                #   触发时，我盯着它只能猜（它连是哪两个集合都没打出来）。
+                #   把两边的数和上下文一起摆出来。
                 raise RuntimeError(
-                    "删之前算出的连带名单与核心层报的不一致 —— 这是实现自检"
+                    "删之前算出的连带名单与核心层报的不一致 —— 这是实现自检：\n"
+                    f"  核心层：K={list(got_K)}"
+                    f"  文件={sorted('/'.join(k) for k in got_doomed)}\n"
+                    f"  这里算：K={list(K)}"
+                    f"  文件={sorted('/'.join(k) for k in doomed)}\n"
+                    f"  这份文件的第一块 g0={g0}，删前向量长度 n={n_before}，"
+                    f"账目里的块数={len(rec.indices)}"
                 )
 
             with stage("落库（删除文件与块）"):
@@ -1534,12 +1643,26 @@ class StoreManager:
             except ValueError as exc:
                 raise OutOfRange(str(exc)) from exc
             return {
-                #: 取这份证据时的全局块数。前端拿它判断"手里的旧证据是否已作废"：
-                #: 上传会让 n 变，而 π_I 是 n 的函数 —— n 一变，旧证据全失效。
-                "delta_n": store.delta.n,
-                #: 而光看 n 不够：**改块不改 n，却改承诺 C**。所以再给一个 δ 指纹，
-                #: 前端按它判"这张卡还行吗"。
+                #: 这份证据覆盖到的**全局位置总数**（= 所有文件块数之和 + 历史空洞）。
+                #: 新方案里每份文件自己一条向量，所以这里只是一个总量；
+                #: 每份文件自己的 ``n`` / 指纹在下面的 ``files`` 里。
+                "delta_n": store.n,
+                #: 整库账目的指纹 —— 任何一份文件的 (U, C, n) 变了它都会变。
                 "delta_fp": self.delta_fingerprint(),
+                #: ★ 这次查询覆盖到哪些文件、各自是什么状态（前端按
+                #:   “文件 / 第几块”展示，并据此判断手里的旧证据作废没有）。
+                "files": [
+                    {
+                        "owner": own,
+                        "file_key": fk,
+                        "offset": store.delta_of(own, fk).offset,
+                        "n": store.delta_of(own, fk).n,
+                        "delta_fp": self.delta_fingerprint((own, fk)),
+                    }
+                    for own, fk in sorted(
+                        {(r.owner, r.file_key) for r in r.refs}
+                    )
+                ],
                 #: ★ 这份结论**没覆盖**哪些块（只在开了 allow_partial 时才可能非空）。
                 "missing": list(r.missing),
                 "partial": r.partial,
@@ -1566,9 +1689,12 @@ class StoreManager:
                 "holders": {str(k): v for k, v in r.holders.items()},
                 "refs": [
                     {
-                        "global_index": store.registry.index_of(
-                            ref.owner, ref.file_key, ref.block_idx
-                        ),
+                        # ★ 全局位置 = 该文件的第 block_idx 块的位置。
+                        #   新方案里“文件内块号”与“全局位置”是两套下标，
+                        #   换算是 positions_of(...)[block_idx]。
+                        "global_index": store.registry.positions_of(
+                            ref.owner, ref.file_key
+                        )[ref.block_idx],
                         "owner": ref.owner,
                         "file_key": ref.file_key,
                         "block_idx": ref.block_idx,
@@ -1602,8 +1728,27 @@ class StoreManager:
                         got[k] for k in block_indices if 0 <= k < len(got)
                     ]
                 picked.extend(chosen)
+                d = store.delta_of(owner, file_key)
                 detail.append(
-                    {"owner": owner, "file_key": file_key, "indices": chosen}
+                    {
+                        "owner": owner,
+                        "file_key": file_key,
+                        # ★ 统一到「**文件 / 第几块**」这套话语 —— 前端不该看见
+                        #   全局位置号（那是记账用的内部坐标）。全局位置仍然给出来，
+                        #   供需要精确引用位置的人用。
+                        "offset": int(d.offset),
+                        "n": int(d.n),
+                        "block_count": len(got),
+                        "delta_fp": self.delta_fingerprint((owner, file_key)),
+                        "block_indices": [
+                            int(k)
+                            for k in (
+                                range(len(got)) if block_indices is None else block_indices
+                            )
+                            if 0 <= k < len(got)
+                        ],
+                        "indices": [int(i) for i in chosen],
+                    }
                 )
             if not picked:
                 raise OutOfRange("没有选中任何块")
@@ -1659,14 +1804,30 @@ class StoreManager:
                 )
 
             pi_I = Opening(int(evidence["S_I"]), int(evidence["Lambda_I"]), I)
-            crs_n = store.session.crs_n_for(store.delta)
+            # ★ 按文件取 crs_n：新方案里每份文件一条向量，素数视图必须与
+            #   这批下标所属的那份文件一致。跨文件就先报错 ——
+            #   拿另一份文件的视图去 disagg 会算出一个“看起来正常”的证据。
+            _fids = sorted(
+                {(r.owner, r.file_key) for r in [store.describe(g) for g in I]}
+            )
+            if len(_fids) != 1:
+                raise OutOfRange(
+                    f"这套接口一次只支持「一份文件」的下标，"
+                    f"收到的证据覆盖了 {len(_fids)} 份文件：{_fids}"
+                )
+            # ★ 这份文件自己的摘要必须**接住**：它有三个用处 —— 取 crs_n、
+            #   交给 ClientNode 去验、以及报「请重新取一次」时读它的 n。
+            #   写成 `crs_n = ...crs_n_for(store.delta_of(*_fids[0]))` 看着等价，
+            #   但下面构造 ClientNode 时会引用一个不存在的 _fd（NameError → 500）。
+            _fd = store.delta_of(*_fids[0])
+            crs_n = store.session.crs_n_for(_fd)
             with stage("拆出子集证据（svc.disagg）"):
                 pi_K = svc_disagg(crs_n, I, vals_I, pi_I, K_set)
 
             val_of = dict(zip(I, vals_I))
             F_K = tuple(val_of[i] for i in K_set)
             with stage("验证拆出来的证据（VerRetrieve）"):
-                report = ClientNode(store.session, store.delta).ver_retrieve(
+                report = ClientNode(store.session, _fd).ver_retrieve(
                     list(K_set), list(F_K), pi_K
                 )
             if not report.ok:
@@ -1676,7 +1837,7 @@ class StoreManager:
                     f"  最可能的原因是「这份证据是在旧的 δ 上取的」——\n"
                     f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让"
                     f"之前取到的证据失效。\n"
-                    f"  请重新取一次（当前 n = {store.delta.n}）。"
+                    f"  请重新取一次（当前 n = {_fd.n}）。"
                 )
 
             # 响应与 /api/query **保持同构** —— 前端那张卡片能直接复用，
@@ -1688,7 +1849,8 @@ class StoreManager:
             #   * cert_count = 0、nodes_used = [] —— 分解确实一份凭证都没收，
             #     填假数字才是骗人。
             return {
-                "delta_n": store.delta.n,
+                #: 这份结论覆盖到的**全局位置总数**。
+                "delta_n": store.n,
                 "delta_fp": self.delta_fingerprint(),
                 "indices": list(K_set),
                 "values": [str(v) for v in F_K],
@@ -1708,14 +1870,14 @@ class StoreManager:
                 "holders": {str(i): store.holder_of(i) for i in K_set},
                 "refs": [
                     {
-                        "global_index": store.registry.index_of(
-                            ref.owner, ref.file_key, ref.block_idx
-                        ),
+                        "global_index": store.registry.positions_of(
+                            ref.owner, ref.file_key
+                        )[ref.block_idx],
                         "owner": ref.owner,
                         "file_key": ref.file_key,
                         "block_idx": ref.block_idx,
                     }
-                    for ref in store.registry.blocks_of(K_set)
+                    for ref in [store.describe(g) for g in K_set]
                 ],
                 "cert_count": 0,
                 "nodes_used": [],
@@ -1751,8 +1913,20 @@ class StoreManager:
         """
         with self._lock:
             store = self._require()
-            crs_n = store.session.crs_n_for(store.delta)
-            C = store.delta.C
+            # ★ 这套接口一次只支持**一份文件**：先把卡片里出现过的下标并起来，
+            #   再看它们是不是都落在同一份文件里。
+            #   （迁到"一文件一向量"时这里漏了这行定义 —— 直接 NameError。
+            #   跨文件的一次性验证走 /api/query，所以一直没暴露出来。）
+            K_set = {int(i) for c in cards for i in c.get("indices", ())}
+            fids2 = sorted({(r.owner, r.file_key) for r in [store.describe(g) for g in K_set]})
+            if len(fids2) != 1:
+                raise OutOfRange(
+                    f"这套接口一次只支持「一份文件」的下标，"
+                    f"收到的下标跨了 {len(fids2)} 份文件：{fids2}"
+                )
+            _fd2 = store.delta_of(*fids2[0])
+            crs_n = store.session.crs_n_for(_fd2)
+            C = _fd2.C
 
             cases = []
             for c in cards:
@@ -1789,7 +1963,8 @@ class StoreManager:
                     agree = all(bool(x.ok) for x in sep) == bool(rep.ok)
 
             return {
-                "delta_n": store.delta.n,
+                #: 这份结论覆盖到的**全局位置总数**。
+                "delta_n": store.n,
                 "delta_fp": self.delta_fingerprint(),
                 "ok": bool(rep.ok),
                 "code": int(rep.code),
@@ -2024,9 +2199,27 @@ class StoreManager:
                 "prime_bits": store.session.l + 1,
             },
             "delta": {
-                "n": store.delta.n,
-                "U": str(store.delta.U),
-                "C": str(store.delta.C),
+                #: ★ 摘要现在是**逐文件**的，所以这里给的是“全库账目”的汇总：
+                #:   总量 + 每份文件各自的 offset / n / 指纹。
+                #:
+                #: ``n`` 是**旧字段，保留兼容**：在新架构里它等于
+                #: ``registry.total_blocks()``（= 各文件块数之和 + 历史空洞），
+                #: 也就是“全局位置总数”。旧代码里那句“当前向量长度”在单文件
+                #: 场景下数值不变，所以无需迁移；要按文件看就看 ``files``。
+                "n": store.n,
+                "n_total": store.n,
+                "files": [
+                    {
+                        "owner": own,
+                        "file_key": fk,
+                        "offset": store.delta_of(own, fk).offset,
+                        "n": store.delta_of(own, fk).n,
+                        "delta_fp": self.delta_fingerprint((own, fk)),
+                        "U": str(store.delta_of(own, fk).U),
+                        "C": str(store.delta_of(own, fk).C),
+                    }
+                    for own, fk in sorted(store.deltas)
+                ],
             },
             "files": len(store.files),
             "blocks": store.n,
@@ -2052,7 +2245,12 @@ class StoreManager:
             #   集群页都靠它 —— 偏偏"kill 一台看降级"就是要在这两页上演示的。
             #   改成复用同一份报告后降到 ~3.3 s（剩下的是那台死节点的 TCP 超时本身
             #   与三台活节点的密码学自检，那两项都是该付的）。
-            "nodes": len([r for r in report if not r.get("fresh")]),
+            # ★ 这里的 ``nodes`` 是「**在线台数**」（界面上的「N NODES / 个节点在线」），
+            #   不是「参与存储的台数」。节点报的 ``fresh`` 意思是“这台机器上
+            #   什么都没有”（见 `core/node_state.py::_describe_one`）—— 空库时
+            #   **每一台**都是 fresh，照它数会得到 0 台在线，于是总览页会出现
+            #   「0 NODES」配着「系统运行正常」这种自相矛盾。所以按“答上话了”数。
+            "nodes": len([r for r in report if not r.get("unreachable")]),
             "nodes_down": [r["node_id"] for r in report if r.get("unreachable")],
             "mode": "distributed" if self.settings.distributed else "single-process",
             "transport": type(store.transport).__name__,
@@ -2082,12 +2280,17 @@ class StoreManager:
     def registry_info(self, global_index: int) -> dict:
         """全局下标 → "这是谁的第几块、存在哪台"。"""
         store = self._require()
-        ref = store.registry.describe(global_index)
+        ref = store.describe(global_index)
+        d = store.delta_of(ref.owner, ref.file_key)
         return {
             "global_index": global_index,
             "owner": ref.owner,
             "file_key": ref.file_key,
             "block_idx": ref.block_idx,
+            #: ★ 新架构：把位置翻成「文件 / 第几块」所需的全部信息
+            "offset": int(d.offset),
+            "n": int(d.n),
+            "delta_fp": self.delta_fingerprint((ref.owner, ref.file_key)),
             "holder": store.holder_of(global_index),
             #: 全部持有者（主副本在前）。单副本时就是 ``[holder]``。
             "replicas": list(store.replicas_of(global_index)),
@@ -2101,6 +2304,7 @@ class StoreManager:
         store = self._require()
         out: list[dict] = []
         for (owner, file_key), rec in store.files.items():
+            d = store.delta_of(owner, file_key)
             out.append(
                 {
                     "owner": owner,
@@ -2110,6 +2314,13 @@ class StoreManager:
                     "segment_bytes": rec.segment_bytes,
                     "content_digest": rec.content_digest,
                     "indices": list(rec.indices),
+                    #: ★ 新方案（一文件一向量）：段起点、块数、位置段、指纹。
+                    #:   界面按「文件 / 第几块」展示，这几个就是它背后的依据；
+                    #:   位置段还解释了“为什么块号与位置号对不上”。
+                    "offset": int(d.offset),
+                    "n": int(d.n),
+                    "segments": [[int(a), int(b)] for a, b in d.segments],
+                    "delta_fp": self.delta_fingerprint((owner, file_key)),
                     # 只是**方便显示**的边界值。追加之后一个文件的下标可能带缺口
                     # （两次追加之间别的文件也占了位置），所以 first..last 之间
                     # 可能夹着别人的块 —— 要真集合只能用上面的 indices。
@@ -2117,7 +2328,7 @@ class StoreManager:
                     "last_index": rec.indices[-1],
                 }
             )
-        out.sort(key=lambda d: d["first_index"])
+        out.sort(key=lambda x: x["offset"])
         return out
 
     def _leaving_nodes(self) -> tuple[str, ...]:

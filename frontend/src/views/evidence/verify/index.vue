@@ -2,7 +2,8 @@
 /**
  * 完整性验证（验证不受限）。
  *
- * - 输入全局下标（支持 0-3, 8 区间语法）+ 允许部分结果开关。
+ * - **选文件 + 填第几块**验证（块号支持 0-3, 8 区间语法）+ 允许部分结果开关。
+ *   ★ 全局下标是**内部坐标**，只留在"高级"里 —— 主路径上不让它出现。
  * - 展示结论（承诺验证的 code_name）、proof.size_bytes、holders、refs、missing。
  * - 「按指标筛选文件」：所有者、文件标识（包含 / 精确）、块数区间、大小区间、
  *   版本下限、只看我能解密的、只看还没收进集合的……筛出来的是一份**文件清单**
@@ -11,8 +12,8 @@
  *   关掉浏览器再回来还在。集合里每一块都记着"它是谁的第几块"（详情里看）。
  *   点「验证集合里的全部块」才真的去取数据 —— **一次** ``POST /api/query``
  *   把整个集合验一遍，并给出报告。
- * - 「按全局下标验证」：直接输入下标（支持 0-3, 8 区间语法）。
- * - 「按全局下标查登记表」。
+ * - 「按文件 + 第几块验证」：选文件、填块号（支持 0-3, 8 区间语法）。
+ * - 「查登记表」（高级）：全局下标 → 谁的第几块 —— 它本身就是个看内部坐标的工具。
  * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
  *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
@@ -26,7 +27,8 @@ import { usePoolStore } from '../../../stores/pool'
 import { useThemeStore } from '../../../stores/theme'
 import { systemApi } from '../../../api/system'
 import { fmtBytes, span } from '../../../utils/format'
-import { parseIndexRange } from '../../../utils/validate'
+// ★ 界面上要的是"第几块"（parseBlockRange）；全局下标只是**高级**里的逃生口
+import { parseBlockRange, parseIndexRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import DetailToggle from '../../../components/common/DetailToggle.vue'
 import VerifyResult from '../../../components/security/VerifyResult.vue'
@@ -46,6 +48,23 @@ const indicesInput = ref('0-3, 8')
 const allowPartial = ref(false)
 const running = ref(false)
 const result = ref(null)
+
+/* ---- 验证入口：**选文件 + 第几块**（主交互）----
+ *
+ * ★ 原来这里要用户填"全局下标"，而全局下标是**内部坐标**（由上传顺序决定）：
+ *   想知道"第 2 份文件的第 1 块"是多少，得把前面所有文件占的位置加起来 ——
+ *   用户既算不准，错了也看不出来。现在界面上只有文件名与块号，
+ *   块号→全局下标 的换算交给后端（``/api/query/files``）。
+ *
+ * ★ 文件列表**直接用本页已有的 ``allFiles``**（下方过滤/篮子用的就是它），
+ *   不再另拉一份 —— 两份列表会出现"这边刚传的文件那边还没有"。
+ *
+ * 全局下标没有彻底删掉，而是收进"高级"：查登记表、对日志、复现问题时
+ * 还是要知道内部坐标的，但不能把它摆在主路径上。
+ */
+const verifyFileId = ref(null)
+const verifyBlocks = ref('0')
+const advancedMode = ref(false)
 
 // ---------------------------------------------------------------------------
 // 多指标筛选（只列文件：不取数据、不验证）
@@ -244,15 +263,36 @@ const basketResult = ref(null)
 const basketError = ref('')
 
 /** 主界面**极简**：只给"多少块、几份文件"和几个下标芯片；详情要展开才铺。 */
-const basketChips = computed(() => basket.indices.slice(0, 24))
-const basketRest = computed(() => Math.max(0, basket.size - basketChips.value.length))
+// ★ 主界面给的是**界面坐标**（哪份文件的第几块），不再铺内部坐标（全局位置）——
+//   这是"选文件 + 第几块"那条主交互的一部分：一串全局位置号用户既看不懂、
+//   也没法核对，它是上传顺序的副产物。
 const basketGroups = computed(() => basket.groups)
+const basketChips = computed(() =>
+  basket.groups.slice(0, 8).map((g) => {
+    const bs = g.items.map((x) => x.block_idx).filter((b) => typeof b === 'number')
+    return {
+      key: g.name,
+      label:
+        g.owner && g.file_key
+          ? `${g.file_key}${bs.length ? ` 第 ${span(bs)} 块` : ''}`
+          : g.name,
+      blocks: g.blocks,
+    }
+  }),
+)
+const basketRest = computed(() =>
+  Math.max(0, basketGroups.value.length - basketChips.value.length),
+)
 
 /**
  * 集合里的每一块现在在哪 —— 从集合自己的来源记录来（不再问登记表）。
  *
  * ★ 这就是"下标为主、同时标出它是谁的第几块"那条要求：主界面只给下标，
  *   这一条给了来源，展开详情才看它。
+ *
+ * ★ 订正：主界面**不再**铺内部坐标 —— 上面那排芯片已经改成"哪份文件 第几块"，
+ *   本条只用在**展开的明细**里（逐块来源）。全局位置是诊断视角的事，
+ *   留在「高级」与「查登记表」。
  */
 function sourceOf(it) {
   if (!it.owner || !it.file_key) return '来源未知'
@@ -266,6 +306,16 @@ async function verifyBasket() {
   }
   if (basket.size > 8192) {
     ElMessage.warning(`集合里有 ${basket.size} 块，超过单次上限 8192 —— 请分批验`)
+    return
+  }
+  // ★ 一次验证只能覆盖**同一份文件**：证据是「这份文件的 n」的函数，
+  //   跨文件的块聚不成一份证据（后端会明确回 400）。
+  //   拦在这里，比让用户提交后看到一句 400 好。
+  if (basket.fileCount > 1) {
+    ElMessage.warning(
+      `集合里现在有 ${basket.fileCount} 份文件 —— 一次验证只能覆盖「同一份文件」。` +
+        '请用下面的「移除这组」只留一份，或者按文件分批验。',
+    )
     return
   }
   basketRunning.value = true
@@ -333,27 +383,59 @@ const regResult = ref(null)
 const regRunning = ref(false)
 
 async function runQuery() {
-  let indices
-  try {
-    indices = parseIndexRange(indicesInput.value)
-  } catch (e) {
-    ElMessage.warning(e.message)
-    return
+  // 「高级」里填的是全局下标；主路径上填的是"第几块"。
+  let indices = null
+  let blocks = null
+  let picked = null
+  if (advancedMode.value) {
+    try {
+      indices = parseIndexRange(indicesInput.value)
+    } catch (e) {
+      ElMessage.warning(e.message)
+      return
+    }
+    if (!indices.length) {
+      ElMessage.warning('请输入下标')
+      return
+    }
+  } else {
+    picked = (allFiles.value || []).find((f) => f.id === verifyFileId.value) || null
+    if (!picked) {
+      ElMessage.warning('先选一份文件')
+      return
+    }
+    try {
+      blocks = parseBlockRange(verifyBlocks.value, picked.block_count)
+    } catch (e) {
+      ElMessage.warning(e.message)
+      return
+    }
+    if (!blocks.length) {
+      ElMessage.warning('请输入第几块')
+      return
+    }
   }
-  if (!indices.length) {
-    ElMessage.warning('请输入下标')
-    return
-  }
+
   running.value = true
   result.value = null
   try {
-    const { data } = await evidenceApi.query(indices, allowPartial.value)
+    // ★ 界面坐标 → 内部坐标的**唯一转换点**：块号交给后端，由它按这份文件的
+    //   位置段换（前端不复现那份映射，免得多一处会分叉的真相）。
+    const { data } = advancedMode.value
+      ? await evidenceApi.query(indices, allowPartial.value)
+      : await evidenceApi.queryFiles([[picked.owner, picked.file_key]], blocks)
     result.value = data
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
     pool.syncDelta({ fp: data?.delta_fp, n: data?.delta_n })
-    // 收进证据池
-    pool.addCard({ label: `查询：${indices.join(',')}`, src: '完整性验证', result: data })
+    // 收进证据池（标签用界面坐标写，池子里就不会冒出全局下标）
+    pool.addCard({
+      label: advancedMode.value
+        ? `查询：${indices.join(',')}`
+        : `查询：${picked.file_key} 第 ${span(blocks)} 块`,
+      src: '完整性验证',
+      result: data,
+    })
   } catch (e) {
     result.value = { ok: false, verify: { ok: false, code_name: '', message: e?.response?.data?.detail || '查询失败' } }
   } finally {
@@ -371,12 +453,28 @@ async function runQuery() {
  *   （每个全局下标 → 哪个文件的第几块），拿不到归属时如实说“没有归属信息”。
  */
 const resultFiles = computed(() => {
+  // ★ 优先用响应里的 files：它直接说"哪份文件的第几块"（block_indices），
+  //   而这正是界面该说的话。退回 refs 只是为了兼容旧的响应形状。
+  const out = []
+  for (const f of result.value?.files || []) {
+    const blocks = f.block_indices || f.indices || []
+    out.push({
+      name: `${f.owner} / ${f.file_key}`,
+      blocks: blocks.length,
+      scope: blocks.length ? `本次覆盖第 ${span(blocks)} 块` : '本次覆盖 0 块',
+    })
+  }
+  if (out.length) return out
   const map = new Map()
   for (const r of result.value?.refs || []) {
     const name = `${r.owner} / ${r.file_key}`
     map.set(name, (map.get(name) || 0) + 1)
   }
-  return [...map.entries()].map(([name, blocks]) => ({ name, blocks }))
+  return [...map.entries()].map(([name, blocks]) => ({
+    name,
+    blocks,
+    scope: `本次覆盖 ${blocks} 块`,
+  }))
 })
 
 
@@ -404,11 +502,36 @@ async function runRegistry() {
     <PageHeader title="完整性验证" subtitle="谁都能验证，登录即可" />
 
     <div class="panel mb-3">
-      <h4 class="sec-title">按全局下标验证</h4>
+      <h4 class="sec-title">按文件 + 第几块验证</h4>
       <div class="query-form">
-        <el-input v-model="indicesInput" placeholder="如 0-3, 8" style="width: 260px" @keyup.enter="runQuery" />
+        <template v-if="!advancedMode">
+          <el-select v-model="verifyFileId" placeholder="选一份文件" style="width: 240px" filterable>
+            <el-option
+              v-for="f in allFiles"
+              :key="f.id"
+              :value="f.id"
+              :label="`${f.file_key}（${f.owner}，${f.block_count} 块）`"
+            />
+          </el-select>
+          <el-input
+            v-model="verifyBlocks"
+            placeholder="第几块，如 0-3, 8"
+            style="width: 200px"
+            @keyup.enter="runQuery"
+          />
+        </template>
+        <el-input
+          v-else
+          v-model="indicesInput"
+          placeholder="全局下标，如 0-3, 8"
+          style="width: 260px"
+          @keyup.enter="runQuery"
+        />
         <el-switch v-model="allowPartial" active-text="允许部分结果" />
         <el-button type="primary" :loading="running" @click="runQuery">验证</el-button>
+        <el-button link type="primary" @click="advancedMode = !advancedMode">
+          {{ advancedMode ? '← 改用文件 + 块号' : '高级：直接填全局下标' }}
+        </el-button>
       </div>
 
       <div v-if="result" class="mt-3">
@@ -418,10 +541,12 @@ async function runRegistry() {
           <span class="cur-lbl">当前文件与块数</span>
           <template v-if="resultFiles.length">
             <span v-for="f in resultFiles" :key="f.name" class="cur-item mono">
-              {{ f.name }}<span class="text-3"> · 本次覆盖 {{ f.blocks }} 块</span>
+              {{ f.name }}<span class="text-3"> · {{ f.scope }}</span>
             </span>
           </template>
-          <span v-else class="cur-item text-3">这份证据没有文件归属信息（只按全局下标取的）</span>
+          <span v-else class="cur-item text-3">
+            这份证据没带文件归属信息（只有“高级：直接填全局下标”时才会这样）
+          </span>
           <span class="cur-total mono">合计 {{ result.indices?.length || 0 }} 块</span>
         </div>
         <div v-if="result.missing?.length" class="missing">
@@ -570,8 +695,8 @@ async function runRegistry() {
 
       <!-- 主界面：极简 —— 只给合计 + 几个下标芯片 -->
       <div v-if="basket.size" class="basket-mini">
-        <span v-for="i in basketChips" :key="i" class="chip mono">{{ i }}</span>
-        <span v-if="basketRest" class="chip mono text-3">还有 {{ basketRest }} 块…</span>
+        <span v-for="c in basketChips" :key="c.key" class="chip mono">{{ c.label }}</span>
+        <span v-if="basketRest" class="chip mono text-3">还有 {{ basketRest }} 份文件…</span>
       </div>
       <div v-else class="note">集合是空的 —— 在上面筛一遍，把要验的文件收进来。</div>
 
@@ -604,15 +729,16 @@ async function runRegistry() {
       <div class="query-form mt-2">
         <el-button
           type="primary"
-          :disabled="!basket.size"
+          :disabled="!basket.size || basket.fileCount > 1"
           :loading="basketRunning"
           @click="verifyBasket"
         >验证集合里的全部块（{{ basket.size }} 块 · {{ basket.fileCount }} 份文件）</el-button>
         <el-switch v-model="basketAllowPartial" active-text="允许部分结果" />
       </div>
       <p class="note">
-        一次请求把整个集合验完：所有块都在同一条向量里，所以任意下标子集都能聚成
-        <strong>一份</strong>证据、一次验证。验完的报告在下面，也会自动进证据池。
+        一次请求把整个集合验完：<strong>同一份文件</strong>内的任意下标子集都能聚成
+        <strong>一份</strong>证据、一次验证（新架构下一份文件一条向量）。
+        所以集合里必须只有一份文件 —— 跨文件的集合请分批验。验完的报告在下面，也会自动进证据池。
       </p>
 
       <div v-if="basketError" class="file-error">{{ basketError }}</div>

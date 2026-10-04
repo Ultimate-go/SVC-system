@@ -62,7 +62,9 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="节点详情" :subtitle="`node-${nodeId}`" />
+    <!-- ★ nodeId 就是 node_id（已是 node-1 这种形式），别再拼一次前缀 ——
+         早先写成 `node-${nodeId}`，标题会变成 node-node-1。 -->
+    <PageHeader title="节点详情" :subtitle="nodeId" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else-if="node">

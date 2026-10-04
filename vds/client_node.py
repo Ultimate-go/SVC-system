@@ -157,7 +157,7 @@ class ClientNode:
 
         # 与存储节点用的是同一个 UpdateWitness.verify
         ok, why = witness.verify(
-            self.session.crs.primegen, self.session.crs.N, self.delta.U
+            self.session.primegen_for(self.delta), self.session.crs.N, self.delta.U
         )
         if not ok:
             return AppliedUpdate(False, why)

@@ -23,7 +23,7 @@ from svc.types import Opening, fingerprint
 __all__ = ["Digest", "LocalView"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Digest:
     """文件摘要 :math:`\\delta = ((U, C), n)`。
 
@@ -35,15 +35,91 @@ class Digest:
 
     客户端只需要保存这**一个**摘要（两个群元素 + 一个整数），
     就能验证任意子集的检索结果 —— 这是整个 VDS 的意义所在。
+
+    .. important::
+
+       **相等性只看** ``(U, C, n, offset)`` —— ``chunks`` **不参与**。
+
+       理由：``chunks`` 是“这份文件占了哪些位置段”的**本地记录**，只有
+       协调者（唯一知道全局位置分配的人）才有。存储节点手里的 δ 是从
+       公开参数 + 自己那份状态算出来的，它既不必要也不可能知道别的文件
+       占到哪里 —— 而在节点眼里，两个 ``(U, C, n)`` 相同的 δ 就是同一个
+       摘要。如果拿 ``chunks`` 去比，会得到“打印出来一模一样却判定不等”
+       那种见鬼的错误（节点侧明明算对了却被当成没跟上）。
+
+       需要比段信息时显式比 :attr:`chunks` 或 :attr:`segments`。
     """
 
     U: int
     C: int
     n: int
+    #: ★ 新方案（一文件一向量）：本文件在**全局素数表**里的段起点。
+    #:
+    #: 文件的第 ``i`` 块对应素数 :math:`e_{offset+i}`，于是
+    #:
+    #: .. math:: U = g^{\\prod_{offset \\le j < offset+n} e_j}
+    #:
+    #: 是**区间积**而不是前缀积（设计 B 的 :math:`e_{[n]}` 才是前缀积）。
+    #: 段由协调者单调分配、**永不回收**，所以 ``offset`` 一旦定了就不再变；
+    #: 变的是 ``n``（追加/截断）。
+    #:
+    #: 设计 B（全系统一条向量）里恒为 0，旧数据反序列化时也按 0 处理 ——
+    #: 于是"每个文件都有自己的段"这条新语义不会让旧库立刻失效。
+    offset: int = 0
+
+    #: ★ 本文件占用的**位置段列表** ``((起点, 长度), ...)``，按时间顺序。
+    #:
+    #: 为什么需要它：位置段**永不回收**（回收会让同一个位置对应上两个不同的
+    #: 素数，而两份承诺可能同时存在）。于是「给一份老文件追加块」时，它原段的
+    #: 末尾可能已经被后来的文件占住了 —— 新块只能**另起一段**。也就是说
+    #: 一份文件的位置未必是一段连续区间，而是若干段的并集。
+    #:
+    #: 数学上丝毫不受影响：:math:`E_{\text{file}} = \prod_{j \in P} e_j`，
+    #: 位置集合 :math:`P` 是一段还是几段都无所谓。
+    #:
+    #: ``()`` 表示「单段」，等价于 ``((offset, n),)`` —— 于是旧数据（以及
+    #: 绝大多数只上传过一次的文件）不必额外记录任何东西。
+    chunks: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def segments(self) -> tuple[tuple[int, int], ...]:
+        """归一化后的位置段列表（``()`` → ``((offset, n),)``）。"""
+        if self.chunks:
+            return tuple(self.chunks)
+        return () if self.n == 0 else ((self.offset, self.n),)
+
+    @property
+    def positions(self) -> tuple[int, ...]:
+        """本文件占用的**全部全局位置号**，按逻辑块号顺序展开。
+
+        第 ``i`` 块的全局位置就是 ``positions[i]`` —— :mod:`svc` 层看到的
+        「密集下标 ``i``」（0 基）与「全局位置」之间的桥就在这一处：
+        前者是算法要的，后者才是素数表的地址。
+        """
+        if not self.chunks:
+            return tuple(range(self.offset, self.offset + self.n))
+        out: list[int] = []
+        for off, cnt in self.chunks:
+            out.extend(range(off, off + cnt))
+        return tuple(out)
+
+    def _key(self) -> tuple[int, int, int, int]:
+        """相等/哈希的依据：``(U, C, n, offset)`` —— **不含** ``chunks``。"""
+        return (self.U, self.C, self.n, self.offset)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Digest):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __hash__(self) -> int:
+        return hash(self._key())
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        off = "" if self.offset == 0 else f", offset={self.offset}"
         return (
-            f"Digest(n={self.n}, U={fingerprint(self.U)}, C={fingerprint(self.C)})"
+            f"Digest(n={self.n}{off}, U={fingerprint(self.U)}, "
+            f"C={fingerprint(self.C)})"
         )
 
 

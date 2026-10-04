@@ -110,7 +110,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
         <ul>
           <li><span class="intro-dot" />谁都能验证，只有所有者能解密</li>
           <li><span class="intro-dot" />不靠承诺，靠可验证</li>
-          <li><span class="intro-dot" />384 个算法回归测试钉住密码学</li>
+          <li><span class="intro-dot" />证据恒为两个群元素（≤ 256 字节）</li>
         </ul>
       </section>
 

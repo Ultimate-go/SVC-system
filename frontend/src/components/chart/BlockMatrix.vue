@@ -24,6 +24,13 @@ const props = defineProps({
 
 const nodeIds = computed(() => props.nodes.map((n) => n.node_id))
 
+/**
+ * 有没有 layout（每块的 replicas）决定了我们**知道多少**：
+ * 有 layout 才分得出主副本 / 副本，没 layout 只知道在不在。
+ * 图例得跟着变，否则会凭空承诺一个图上永远不会出现的颜色。
+ */
+const hasLayout = computed(() => Array.isArray(props.layout) && props.layout.length > 0)
+
 // 每个全局下标 → { holder, replicas, element }
 const cellInfo = computed(() => {
   const map = {}
@@ -41,9 +48,16 @@ const cellInfo = computed(() => {
   return map
 })
 
-/** 格子的悬浮提示：带分量时把指纹也写上去。 */
+/**
+ * 格子的悬浮提示。
+ *
+ * ★ 必须先说清这格是什么状态：早先的写法不管状态一律写「块 N @ 节点」，
+ *   于是「不在我这」的格子也在宣称自己存着这一块 —— 和格子颜色自相矛盾。
+ */
 function cellTip(gi, nid) {
-  const head = `块 ${gi} @ ${nid}`
+  const state = cellState(gi, nid)
+  if (state === 'none') return `块 ${gi} 不在 ${nid}`
+  const head = `块 ${gi} @ ${nid}（${state === 'primary' ? '主副本' : '副本'}）`
   const el = cellInfo.value[gi]?.element
   return el ? `${head} · 分量指纹 ${hexFp(el, 16)}` : head
 }
@@ -100,8 +114,8 @@ function cellState(gi, nid) {
       </table>
     </div>
     <div class="legend">
-      <span class="lg"><span class="dot primary" />主副本</span>
-      <span class="lg"><span class="dot replica" />副本</span>
+      <span class="lg"><span class="dot primary" />{{ hasLayout ? '主副本' : '持有' }}</span>
+      <span v-if="hasLayout" class="lg"><span class="dot replica" />副本</span>
       <span class="lg"><span class="dot none" />不在</span>
     </div>
     <div v-if="indices.length > maxCols" class="truncate-note">
