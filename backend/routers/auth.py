@@ -85,6 +85,43 @@ def login(
     #   私钥**从来没有**以明文进过库，整个系统里只有口令能把它解出来。
     #   于是“能不能解密”绑的是**知道口令**这件事，而不是“手上有张令牌” ——
     #   后者只要偷到令牌就能冒充，前者不行。
+    # ★★ 两条路径的分水岭：**私钥解在哪里**。
+    #
+    #   默认（client）：解在**浏览器**。后端只交出私钥密文，
+    #     自己不掌握任何私钥 —— 这是"服务器不可信"成立的前提。
+    #   显式 server：解在**后端**（旧模型），只用于并排对比。
+    if not body.server_key:
+        try:
+            with collect() as sw:
+                blob = mgr.user_key_blob(user.username)
+        except NotFound as exc:
+            audit(db, user.username, "login", ok=False, detail="没有密钥对")
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"这个账号还没有密钥对（{exc}）—— 请管理员重建，或者跑 seed --reset",
+            ) from exc
+
+        token = create_token(user, settings)
+        audit(db, user.username, "login", ok=True, detail="私钥留在客户端（未解封）")
+        metrics.record("login", sw.total_ms(), sw.rows())
+        return {
+            "token": token,
+            "token_type": "bearer",
+            # ★ ``session_key=False``：**服务端**这次确实解不了密 —— 那是设计。
+            #   界面判"能不能解密"要看浏览器的解锁状态（前端 stores/crypto.js）。
+            "user": user_public(user, session_key=False),
+            "key_model": "client",
+            #: 私钥密文 —— 浏览器用口令解开它。后端不留副本。
+            "key_blob": blob,
+            "key_pbkdf2_iters": blob.get("iters"),
+            "notice": (
+                "私钥密文已交给浏览器，解封在你的机器上用口令完成 —— "
+                "后端不解封、内存里也不留私钥。"
+            ),
+            "timings": sw.payload(),
+        }
+
+    # ---- 旧路径（显式 server_key=true）：后端代管私钥 ----
     try:
         with collect() as sw:
             sk = mgr.unseal_user_key(user.username, body.password)
@@ -116,12 +153,13 @@ def login(
     token = create_token(user, settings)
     mgr.remember_key(token, user.username, sk)
 
-    audit(db, user.username, "login", ok=True)
+    audit(db, user.username, "login", ok=True, detail="服务端代管私钥（对比路径）")
     metrics.record("login", sw.total_ms(), sw.rows())
     return {
         "token": token,
         "token_type": "bearer",
         "user": user_public(user, session_key=True),
+        "key_model": "server",
         # ★ 登录里最贵的一步就是"用口令把私钥解封出来"（20 万次 PBKDF2，
         #   本机约 0.1 秒）。单独报出来，免得被当成"后端登录慢"。
         "timings": sw.payload(),
@@ -143,6 +181,10 @@ def logout(
     """
     if creds is not None and creds.credentials:
         mgr.forget_key(creds.credentials)
+        # ★ 同时把这张令牌**作废**（安全审计 I1）：只丢私钥挡得住“解密”，
+        #   却挡不住**写操作**（上传 / 改块 / 追加 / 截断 / 删除只校验令牌）。
+        #   所以“退出登录”必须让这张令牌真的不能用。
+        mgr.revoke_token(creds.credentials)
     audit(db, user.username, "logout", ok=True)
     # ★ 把“退出到底做了什么”如实告诉前端。
     #   这不是客套话：JWT 收不回来，所以“登出”**不等于令牌失效**。
@@ -150,13 +192,12 @@ def logout(
     #   免得让人以为“我退了，别人拿着我的令牌就用不了了”。
     return {
         "ok": True,
-        "token_still_valid": True,
-        "what_happened": "服务端丢掉了本次会话的私钥",
+        "token_still_valid": False,
+        "what_happened": "服务端丢掉了本次会话的私钥，并把这张令牌加进了撤销表",
         "notice": (
-            "已退出：本机令牌已清除，服务端也丢掉了这次的会话私钥。"
-            "此后同一张令牌调解密会要求重新登录。"
-            "注意 JWT 是无状态的 —— 已签发的令牌在过期前仍然能通过身份校验，"
-            "只是「没有私钥就解不开任何文件」而已。"
+            "已退出：本机令牌已清除，服务端也丢掉了这次的会话私钥，"
+            "并把**这张令牌**作废了 —— 它从现在起通不过任何校验。\n"
+            "注意：如果你在别处还登录着，那些令牌各自独立，不受这张的影响。"
         ),
     }
 
@@ -173,5 +214,13 @@ def me(
       后端重启或本人退出之后，同一张令牌仍然能过（JWT 无状态），
       但私钥已经不在内存里了 —— 界面靠这个字段立刻把锁图标与「解密」
       按钮切过去，而不是让人点了才发现 403。
+
+    ★ 默认模型（私钥在客户端）下 ``session_key`` **恒为 False** ——
+      那不是故障，是设计：服务端手里根本没有私钥。
+      界面判"能不能解密"要看**浏览器**的解锁状态（前端 `stores/crypto.js`），
+      这个字段只如实反映服务端这一侧。
     """
-    return user_public(user, session_key=mgr.session_key_of(token) is not None)
+    return {
+        **user_public(user, session_key=mgr.session_key_of(token) is not None),
+        "key_model": "client" if mgr.session_key_of(token) is None else "server",
+    }

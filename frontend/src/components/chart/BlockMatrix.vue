@@ -13,14 +13,26 @@
  *   —— 只有文件详情页的"详细"模式才会要那份数据）。对着矩阵一块块看时，
  *   "这一格到底是什么" 比 "块号@节点" 有用得多。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { hexFp } from '../../utils/format'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
   layout: { type: Array, default: null },
-  maxCols: { type: Number, default: 30 },
+  /**
+   * 最多先渲染多少行（点“显示全部”可以看到剩下的）。
+   *
+   * ★ 以前默认写死 30、而且**没有**任何“还有多少没显示”的提示 ——
+   *   于是矩阵看起来“就是这样”，实际后面一半块**静默消失**了。
+   *   现在：默认 200（足够看全大多数文件），超出部分显式告知并可展开。
+   *   不直接默认“全部”是因为位置总预算是 8192（`n_max`），
+   *   一次性渲染八千行会把自己卡住。
+   */
+  maxCols: { type: Number, default: 200 },
 })
+
+/** 用户点了“显示全部”没有。 */
+const expanded = ref(false)
 
 const nodeIds = computed(() => props.nodes.map((n) => n.node_id))
 
@@ -72,7 +84,13 @@ const indices = computed(() => {
   return [...set].sort((a, b) => a - b)
 })
 
-const shownIndices = computed(() => indices.value.slice(0, props.maxCols))
+const shownIndices = computed(() => {
+  const limit = props.maxCols > 0 && !expanded.value ? props.maxCols : indices.value.length
+  return indices.value.slice(0, limit)
+})
+
+/** 还有多少个位置没显示 —— 必须显式告诉用户，否则“看不全”这件事看不出来。 */
+const hiddenCount = computed(() => indices.value.length - shownIndices.value.length)
 
 function cellState(gi, nid) {
   const info = cellInfo.value[gi]
@@ -113,20 +131,39 @@ function cellState(gi, nid) {
         </tbody>
       </table>
     </div>
+    <div v-if="hiddenCount > 0" class="more-row">
+      <span>只显示了前 {{ shownIndices.length }} 个位置，还有 <b>{{ hiddenCount }}</b> 个未显示</span>
+      <button class="link-btn" type="button" @click="expanded = true">显示全部</button>
+    </div>
     <div class="legend">
       <span class="lg"><span class="dot primary" />{{ hasLayout ? '主副本' : '持有' }}</span>
       <span v-if="hasLayout" class="lg"><span class="dot replica" />副本</span>
       <span class="lg"><span class="dot none" />不在</span>
     </div>
-    <div v-if="indices.length > maxCols" class="truncate-note">
-      仅显示前 {{ maxCols }} 块（共 {{ indices.length }} 块）
-    </div>
   </div>
 </template>
-
 <style scoped>
 .block-matrix-wrap {
   overflow: hidden;
+}
+/* “还有多少个位置没显示”那一行 —— 以前没有它，矩阵看起来
+   就是“全部内容”，实际后面一半块被静默丢掉。 */
+.more-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .matrix-scroll {
   overflow-x: auto;

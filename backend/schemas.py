@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 __all__ = [
     "LoginIn",
@@ -85,8 +86,20 @@ class PortsIn(BaseModel):
 
 
 class LoginIn(BaseModel):
+    """登录。
+
+    :param server_key: **要不要让后端代管私钥**（默认 ``False``）。
+
+        * ``False``（默认）：登录**不解封私钥** —— 后端只把私钥的**密文**
+          （``users.sk_wrapped``）交给浏览器，解封由浏览器用同一个口令完成。
+          此后后端**不掌握任何私钥**，"服务器不可信"这条前提才成立。
+        * ``True``：旧路径（后端用口令解封并扣在内存里）。
+          留着它只有一个用途：把两种安全模型并排对比。
+    """
+
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+    server_key: bool = False
 
 
 class UserCreateIn(BaseModel):
@@ -103,6 +116,13 @@ class UserPatchIn(BaseModel):
     #: 换口令。**只能改自己的** —— 别人的私钥是用他自己的口令包的，
     #: 管理员改他的口令就把他手里的私钥永久弄丢了（见 ``admin.patch_user``）。
     password: str | None = Field(default=None, max_length=256)
+    #: ★ 浏览器封好的**新私钥密文**（安全审计 I8）。
+    #:
+    #: 默认模型（私钥在客户端）下服务端**不持有私钥**，没法自己重封；
+    #: 所以改口令时由**浏览器**在本地用新口令重封，再把**密文**交上来。
+    #: 服务端只验两件事：解得开、而且里面的私钥**还是原来那把**
+    #: （见 ``StoreManager.rekey_with_blob``）。
+    sk_wrapped: dict | None = None
 
 
 class AuditRemarkIn(BaseModel):
@@ -127,6 +147,32 @@ class AuditRemarkIn(BaseModel):
 #: （它写在 pydantic 里，静态声明、没法从配置读，但改一行就生效。）
 MAX_INDICES = 8192
 
+#: 一个群元素 / 分量写成十进制串时的**最长**字符数。
+#:
+#: ★ 它拦的不是“大整数”本身，而是**把用户输入错报成 500**（安全审计 P6 / I4）：
+#:   Python 3.12 对 >4300 位的十进制串 ``int()`` 会抛 ``ValueError``
+#:   （``sys.set_int_max_str_digits`` 的默认值），而 4300 位远远超过本方案里
+#:   任何合法值：
+#:
+#:   * ``N`` 是 1024 位 ⇒ 十进制最多 **309** 位；
+#:   * ``U`` / ``C`` / ``S_I`` / ``Λ_I`` 都 < N ⇒ 同样 ≤ 309 位；
+#:   * 分量是 SM3 摘要（256 位）⇒ ≤ 78 位。
+#:
+#:   取 512：既不误伤任何合法输入，又让“塞一个 5000 位数字串”在 **pydantic 层**
+#:   变成 422，而不是一路走到 ``int()`` 才炸成 500（那是用户的错，却报成服务端的错）。
+MAX_INT_CHARS = 512
+
+#: ``data_b64``（写块的 base64 内容）的字符数上限。
+#:
+#: ★ 安全审计 I3：这个字段原先**没有上界**，而它的校验器会做 ``b64decode`` ——
+#:   传 1 GB 也会先解码。上限与 ``routers/files.py::MAX_UPLOAD_BYTES``（8 MiB）
+#:   对齐，再留 base64 的 4/3 膨胀余量与 multipart 开销：12 MiB 字符。
+#:   （两处都改时记得一起改。）
+MAX_B64_CHARS = 12 * 1024 * 1024
+
+#: “十进制群元素串”字段的类型 —— 长度至少 1、最多 :data:`MAX_INT_CHARS`。
+DecStr = Annotated[str, StringConstraints(min_length=1, max_length=MAX_INT_CHARS)]
+
 
 class QueryIn(BaseModel):
     """按全局下标查询（**验证不受限**，谁都能查）。"""
@@ -150,16 +196,35 @@ class QueryIn(BaseModel):
 class FileQueryIn(BaseModel):
     """按文件查询：``(owner, file_key)`` 列表 + 可选的块序号。"""
 
-    targets: list[tuple[str, str]] = Field(min_length=1)
-    block_indices: list[int] | None = None
+    #: 一次最多问多少份文件。
+    #: ★ 加它是因为以前**没有上界**（审计 I4）：一份超长的 ``targets`` 会
+    #:   在展开时把 CPU / 内存吃掉。512 份远超过任何真实用法。
+    targets: list[tuple[str, str]] = Field(min_length=1, max_length=512)
+    #: 块序号。**两种形态**（见 :meth:`StoreManager.query_files`）：
+    #:
+    #: * ``[0, 1, 2]`` —— 对**每个** target 都取这几个块号（**共用**；老语义，保留）；
+    #: * ``[[0, 1], [5, 6]]`` —— **与 targets 一一对应**，第 i 组只作用于第 i 个 target。
+    #:
+    #: ★ 为什么必须支持第二种：**聚合**出来的那张卡，每份文件覆盖的块号是
+    #:   **不同**的（例如「50KB 第 0-49 块 + 64KB 第 0-63 块」）。只有“共用块号”的话，
+    #:   这种卡**根本重现不出来** —— 点“取回”只能拿到单份文件的证据，
+    #:   看上去就像是“接口拿错了东西”。
+    #:
+    #: ★ 长度上界在 manager 里查（联合类型套不上 `max_length`）：
+    #:   外层最多 `MAX_TARGETS` 组（与 targets 对齐），内层每组最多 `MAX_INDICES` 个。
+    block_indices: list[int] | list[list[int]] | None = None
 
 
 class ProofIn(BaseModel):
-    r"""一份打开证据 :math:`\pi_I = (S_I, \Lambda_I)`（大整数写成十进制字符串）。"""
+    r"""一份打开证据 :math:`\pi_I = (S_I, \Lambda_I)`（大整数写成十进制字符串）。
 
-    S_I: str = Field(min_length=1)
-    Lambda_I: str = Field(min_length=1)
-    I: list[int] | None = None
+    两个群元素都用 :data:`DecStr`（有长度上限）—— 不限长的话，
+    ``int()`` 会先撞上 Python 的十进制串限制，把“用户传太长”报成 500。
+    """
+
+    S_I: DecStr
+    Lambda_I: DecStr
+    I: list[int] | None = Field(default=None, max_length=MAX_INDICES)
 
 
 class EvidenceCardIn(BaseModel):
@@ -170,7 +235,7 @@ class EvidenceCardIn(BaseModel):
     """
 
     indices: list[int] = Field(min_length=1, max_length=MAX_INDICES)
-    values: list[str] = Field(min_length=1, max_length=MAX_INDICES)
+    values: list[DecStr] = Field(min_length=1, max_length=MAX_INDICES)
     proof: ProofIn
 
 
@@ -196,7 +261,22 @@ class BatchVerifyIn(BaseModel):
 class DecryptIn(BaseModel):
     """解密（**受限**）。``indices`` 为 ``None`` 时取整个文件。"""
 
-    indices: list[int] | None = None
+    indices: list[int] | None = Field(default=None, max_length=MAX_INDICES)
+
+
+class ReplayIn(BaseModel):
+    r"""**回滚演示**的开关（演示“服务器不可信”）。
+
+    :param block_idx: 要对哪一块动手（**这份文件里的第几块**，0 起算）。
+    :param on: ``True`` = 从这一刻起，``/cipher`` 对这块交回**存下来的旧版本**；
+        ``False`` = 恢复正常。
+
+    ★ 演示顺序：**先** ``on=true``（存下当前这版），**再**改块，**然后**解密
+      —— 服务器交回的正好是“改之前那一版”，客户端验证不通过。
+    """
+
+    block_idx: int = Field(ge=0, le=MAX_INDICES)
+    on: bool = True
 
 
 class DisaggIn(BaseModel):
@@ -210,9 +290,9 @@ class DisaggIn(BaseModel):
     """
 
     I: list[int] = Field(min_length=1, max_length=MAX_INDICES)
-    values: list[str] = Field(min_length=1, max_length=MAX_INDICES)
-    S_I: str = Field(min_length=1)
-    Lambda_I: str = Field(min_length=1)
+    values: list[DecStr] = Field(min_length=1, max_length=MAX_INDICES)
+    S_I: DecStr
+    Lambda_I: DecStr
     K: list[int] = Field(min_length=1, max_length=MAX_INDICES)
 
     @field_validator("I", "K")
@@ -285,7 +365,7 @@ class FilePatchIn(BaseModel):
     #:
     #: 用 base64 而不是 utf-8 字符串是必需的：块里完全可能是任意二进制，
     #: 而 JSON 装不下非法 UTF-8 的字节序列。
-    data_b64: str | None = None
+    data_b64: str | None = Field(default=None, max_length=MAX_B64_CHARS)
     #: ``truncate`` 专用：删掉**末尾**几块（从这份文件的最后一块往前数）。
     #:
     #: 上界用 :data:`MAX_INDICES`（= 全局块数上限）——真正的校验在

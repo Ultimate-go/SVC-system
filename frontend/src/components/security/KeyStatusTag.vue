@@ -1,21 +1,30 @@
 <script setup>
 /**
- * 密钥对状态标签 —— has_key 与 session_key 是两件事，必须分开显示。
+ * 密钥对状态标签。
  *
- *  - has_key    库级：库里有没有密钥对（后端重启/退出后仍是 true）
- *  - session_key 会话级：本次会话能不能解密（后端重启/退出后变 false）
+ * ★ 默认模型（私钥在客户端）下它必须分成**三件事**，之前把它们混在
+ *   `session_key` 一个字段上，于是顶栏会显示「需重新登录」——
+ *   而那时候浏览器其实已经解锁了。界面与现实不符是硬伤，所以改这里。
  *
- * 只显示 has_key 的话，页面看着全正常，一点解密才弹「重新登录」。
- * 所以顶栏 / 个人中心用本组件同时挂两枚标签。
+ *  - `has_key`     库级：库里有没有密钥对
+ *  - `session_key` **服务端**能不能解密。
+ *      默认模型下它**恒为 false**（后端根本没有私钥），
+ *      所以它不再等于“能不能解密”，不能再拿它渲染“需重新登录”。
+ *  - `unlocked`    **浏览器**这边有没有私钥（`stores/crypto`，只活在内存里）。
+ *      这才是“我现在能不能解密”的答案。
  */
 import { computed } from 'vue'
+import { useCryptoStore } from '../../stores/crypto'
 
 const props = defineProps({
   user: { type: Object, default: null },
 })
 
+const crypt = useCryptoStore()
+
 const hasKey = computed(() => !!props.user?.has_key)
-const sessionKey = computed(() => props.user?.session_key)
+const unlocked = computed(() => crypt.unlocked)
+const serverHoldsKey = computed(() => props.user?.session_key === true)
 </script>
 
 <template>
@@ -23,10 +32,14 @@ const sessionKey = computed(() => props.user?.session_key)
     <span class="tag" :class="hasKey ? 'ok' : 'danger'">
       {{ hasKey ? '有密钥对' : '无密钥对' }}
     </span>
-    <span class="tag" :class="sessionKey === true ? 'ok' : sessionKey === false ? 'warn' : 'muted'">
-      <template v-if="sessionKey === true">会话私钥在</template>
-      <template v-else-if="sessionKey === false">需重新登录</template>
-      <template v-else>会话未查</template>
+    <span class="tag" :class="unlocked ? 'ok' : 'warn'">
+      {{ unlocked ? '已解锁 · 私钥在本浏览器' : '未解锁 · 重新登录' }}
+    </span>
+    <span v-if="serverHoldsKey" class="tag warn" title="旧模型（登录时传了 server_key=true）：私钥也在服务端内存里">
+      服务端也持有私钥
+    </span>
+    <span v-else class="tag muted" title="默认模型：后端不解封、不保存私钥；解密与验证都在浏览器里">
+      服务端无私钥
     </span>
   </div>
 </template>

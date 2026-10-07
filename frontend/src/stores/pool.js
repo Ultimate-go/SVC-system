@@ -23,16 +23,17 @@ const CACHE_KEY = 'vds_pool'
 function loadCache() {
   try {
     const raw = sessionStorage.getItem(CACHE_KEY)
-    if (!raw) return { cards: [], selectedIds: [], currentN: null, currentFp: null }
+    if (!raw) return { cards: [], selectedIds: [], currentN: null, currentFp: null, fileFps: {} }
     const o = JSON.parse(raw)
     return {
       cards: Array.isArray(o.cards) ? o.cards : [],
       selectedIds: Array.isArray(o.selectedIds) ? o.selectedIds : [],
       currentN: typeof o.currentN === 'number' ? o.currentN : null,
       currentFp: typeof o.currentFp === 'string' ? o.currentFp : null,
+      fileFps: o.fileFps && typeof o.fileFps === 'object' ? o.fileFps : {},
     }
   } catch {
-    return { cards: [], selectedIds: [], currentN: null, currentFp: null }
+    return { cards: [], selectedIds: [], currentN: null, currentFp: null, fileFps: {} }
   }
 }
 
@@ -47,6 +48,14 @@ export const usePoolStore = defineStore('pool', {
     selectedIds: [...cached.selectedIds],
     currentN: cached.currentN,
     currentFp: cached.currentFp,
+    /**
+     * 每份文件**当前**的 δ 指纹：``"owner/file_key" -> fp``（从 ``/api/status`` 的
+     * ``delta.files[]`` 来）。
+     *
+     * ★★ 为什么需要它：δ 现在是**逐文件**的，根本没有“全局指纹”可用。
+     *   而“这张卡还有效吗”只能拿**它覆盖的那份文件**的当前指纹去对。
+     */
+    fileFps: { ...cached.fileFps },
   }),
 
   getters: {
@@ -55,16 +64,37 @@ export const usePoolStore = defineStore('pool', {
     },
 
     /**
-     * ★ 已作废的卡片 id 集合。判据是 δ 指纹，不是 n。
-     * 上传让 n 变、改块改 C 不改 n —— 两者都让旧证据失效，所以按指纹判才自洽。
+     * ★ 已作废的卡片 id 集合。
+     *
+     * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**改块 / 清零 / 追加 / 截断**
+     * 只改 C（在合并向量上）**不改全局位置总数 n** —— 所以只比 n 是抓不住改块的。
+     *
+     * ★★ 而且不能用“一个全局 fp”去比（以前就是这样）：δ 已经是**逐文件**的，
+     *   那个 `currentFp` 实际上被 `addCard` 写成了“**最后加的那张卡的**指纹”，
+     *   拿它去比别的卡只会得出“除了刚取的那张、其余全作废”。
+     *
+     *   正确的判据是：**这张卡覆盖的每一份文件，它当时的指纹与现在的比** ——
+     *   任一份变了就说明这份文件动过了，这张卡上的证据跟着作废。
      */
     staleIds(state) {
       const out = new Set()
       for (const c of state.cards) {
-        if (state.currentFp) {
-          if (c.fp !== state.currentFp) out.add(c.id)
-          continue
+        const files = c.files || c.result?.files || []
+        const cur = state.fileFps || {}
+        let decided = false
+        for (const f of files) {
+          const now = cur[`${f.owner}/${f.file_key}`]
+          if (now && f.delta_fp) {
+            decided = true
+            if (now !== f.delta_fp) {
+              out.add(c.id)
+              break
+            }
+          }
         }
+        if (decided) continue
+        // 兜底：老卡没存 files（或 status 没拉到）时，只能退回长度对比 ——
+        // 它抓不住改块，但总比什么都不判强。
         if (typeof state.currentN === 'number' && typeof c.n === 'number') {
           if (c.n !== state.currentN) out.add(c.id)
         }
@@ -122,8 +152,9 @@ export const usePoolStore = defineStore('pool', {
         if (src) dup.src = src
         dup.n = typeof result?.delta_n === 'number' ? result.delta_n : dup.n
         dup.fp = typeof result?.delta_fp === 'string' ? result.delta_fp : dup.fp
+        dup.files = files
         dup.ts = Date.now()
-        this.syncDelta({ fp: dup.fp, n: dup.n })
+        this.syncDelta({ n: dup.n })
         this._persist()
         return dup
       }
@@ -140,12 +171,14 @@ export const usePoolStore = defineStore('pool', {
         ts: Date.now(),
       }
       this.cards.push(card)
-      this.syncDelta({ fp: card.fp, n: card.n })
+      // ★ 只记 n，**不**写 fp（见 `staleIds` 的注释：拿“刚取的这张的 fp”
+      //   当全局指纹，会把除了它以外的卡全判成作废）。
+      this.syncDelta({ n: card.n })
       this._persist()
       return card
     },
 
-    syncDelta({ fp = null, n = null } = {}) {
+    syncDelta({ fp = null, n = null, fileFps = null } = {}) {
       let dirty = false
       if (typeof fp === 'string' && fp && this.currentFp !== fp) {
         this.currentFp = fp
@@ -153,6 +186,10 @@ export const usePoolStore = defineStore('pool', {
       }
       if (typeof n === 'number' && this.currentN !== n) {
         this.currentN = n
+        dirty = true
+      }
+      if (fileFps && typeof fileFps === 'object' && Object.keys(fileFps).length) {
+        this.fileFps = { ...fileFps }
         dirty = true
       }
       if (dirty) this._persist()
@@ -200,6 +237,9 @@ export const usePoolStore = defineStore('pool', {
             selectedIds: this.selectedIds,
             currentN: this.currentN,
             currentFp: this.currentFp,
+            // ★ 一起存下来：否则刷新页面后判定“卡还有效吗”会先退化成只比 n，
+            //   要等一次 /api/status 回来才恢复（那一瞬旧卡看着是好的）。
+            fileFps: this.fileFps,
           }),
         )
       } catch {
@@ -207,14 +247,31 @@ export const usePoolStore = defineStore('pool', {
       }
     },
 
-    /** 核心动作：把勾选卡片的下标并起来，向协调者要一份覆盖并集的新证据。 */
+    /**
+     * 核心动作：把勾选卡片的下标并起来，向协调者要一份覆盖并集的新证据。
+     *
+     * ★ 两条路的语义**完全不同**，界面必须说清（也决定卡片 `src` 怎么写）：
+     *
+     *   * **同一份文件** → 后端走 `_certs_for` + `AggManyToOne`，即论文 §6.5.2 的
+     *     `VC.Agg`：把各节点的凭证聚合起来。**不需要全量值**，毫秒级。
+     *   * **跨多份文件** → 后端走 `_prove_merged`：先把各文件的承诺抬进一条合并向量
+     *     （`C' = ∏ C_f^{E/E_f}`，一份一次模幂），再用合并集的**全量值**重开一份证据
+     *     （O(Σ|f|) 次大指数模幂，秒级）。
+     *     跨文件为什么不能也走 `Agg`：学位论文 `Def. 29` 的聚合以**同一个承诺 C** 为前提，
+     *     而 `Λ_I` 的支撑集只覆盖本文件的补集，跨文件的交叉项抵消不掉。
+     *
+     * 两条路的**产物一样**：两个群元素（256 字节），之后照样能再聚合、能分解。
+     */
     async aggregateSelected() {
       const indices = this.unionIndices
       if (!indices.length) throw new Error('没有选中任何卡片')
+      const cross = this.unionScope
       const { data } = await api.post('/api/query', { indices })
       return this.addCard({
         label: `聚合：${span(indices)}`,
-        src: `由 ${this.selectedCards.length} 张卡聚合而来`,
+        src: cross.files.size > 1
+          ? `跨 ${cross.files.size} 份文件归约而来（取密文 + 合并位置集重算）`
+          : `由 ${this.selectedCards.length} 张卡聚合而来`,
         result: data,
       })
     },

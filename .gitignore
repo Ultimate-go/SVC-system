@@ -23,6 +23,11 @@ vds.db-shm
 
 nodes/
 
+.primecache/
+
+# 论文/资料抓取（学位论文 PDF 3 MB + 抽取文本 + 抓取脚本）—— 不进仓
+.paper/
+
 logs/
 *.log
 

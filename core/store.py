@@ -1189,6 +1189,21 @@ class VectorStore:
             rec = self.files.pop((owner, file_key))
             rec.owner = new_owner
             self.files[(new_owner, file_key)] = rec
+            # ★★ 摘要在**另一张表**里（``self.deltas`` 的键同样是
+            #   ``(owner, file_key)``）。漏掉它不是一个"少改一行"的小事（审计 S1）：
+            #
+            #   * 运行期：库里已改名、内存没改 ⇒ ``delta_of(墓碑名)`` 直接 KeyError，
+            #     而 ``/api/files`` 是**逐行序列化**的 ⇒ 任一份墓碑文件就能让
+            #     **所有用户**的文件列表 500；
+            #   * 重启后：``_reload`` 从 ``blocks``（墓碑名）与 ``file_deltas``（旧名）
+            #     重建出**两套身份** —— 库自己就不一致，所以**不自愈**。
+            #
+            #   子类（``PlainKeyStore``）的块密钥表由它自己的 ``rename_owner``
+            #   处理（它只 ``super()`` 一次），所以这里改的正是父类该管的那部分。
+            if (owner, file_key) in self.deltas:
+                self.deltas[(new_owner, file_key)] = self.deltas.pop(
+                    (owner, file_key)
+                )
         return len(mine)
 
     def _forget_block_keys(self, owner: str, file_key: str, keep_pos: int) -> None:
@@ -1514,6 +1529,81 @@ class VectorStore:
             idx.extend(got)
         return self.query(sorted(idx), allow_partial=allow_partial)
 
+    def cipher_of(self, owner: str, file_key: str, indices=None) -> dict:
+        """取回**密文**（不解密）—— 供客户端自己解密、自己验证。
+
+        ★ 与 :meth:`read` 的分工是这条路的全部意义：
+
+        * :meth:`read` 在**服务端**把密文解开（``key_of`` 拿钥匙 → SM4），
+          于是"服务器返回给我的东西"本身无法被客户端独立检验；
+        * ``cipher_of`` **一个字节都不解** —— 它只把节点上的密文段、IV、
+          明文长度，以及一份覆盖这些位置的证据取回来。块密钥的解封
+          （SM2 ECDH + KDF）与内容解密（SM4）都留给调用方，
+          服务端**不掌握任何秘密**。
+
+        交付物全部可被客户端独立校验：密文 → 分量（自己 ``SM3``）→
+        承诺（对着**自己保存的** δ 跑 :func:`svc.verify`）。所以这里的
+        返回里刻意只有"材料"，没有"结论"。
+
+        :param indices: **文件内的块序号**（0 基，与前端"第几块"一致）。
+            ``None`` 表示整份文件。
+        :raises KeyError: 文件不存在（上层转 404）。
+        :raises IndexError: 块号越界（上层转 400）。
+        """
+        fid = (owner, file_key)
+        rec = self.files.get(fid)
+        if rec is None:
+            raise KeyError(f"文件 {owner}/{file_key} 不存在")
+        delta = self.delta_of(owner, file_key)
+        pos_all = tuple(self.registry.positions_of(owner, file_key))
+        want_local = (
+            tuple(range(delta.n)) if indices is None else as_index_set(indices)
+        )
+        for i in want_local:
+            if not 0 <= i < delta.n:
+                raise IndexError(
+                    f"块号 {i} 越界：{owner}/{file_key} 只有 {delta.n} 块"
+                )
+        want = tuple(pos_all[i] for i in want_local)  # 对应的全局位置
+
+        groups = self._group_by_file(want)
+        cts, holders, used, _missing = self._fetch(groups)
+        # ★ 分量在这个进程里也是"从密文算"的 —— 与客户端要做的完全一致，
+        #   所以这里的 ``element`` 只是给界面做对照，不是判定依据。
+        valmap = {g: vector_element(ct) for g, ct in cts.items()}
+        report, pi_I = self._prove(groups, want, valmap)
+
+        return {
+            "owner": owner,
+            "file_key": file_key,
+            "offset": int(delta.offset),
+            "n": int(delta.n),
+            "segment_bytes": int(rec.segment_bytes),
+            "blocks": [
+                {
+                    "block_idx": loc,
+                    "global_index": pos_all[loc],
+                    "ciphertext_hex": cts[pos_all[loc]].hex(),
+                    "iv_hex": rec.ivs[loc].hex(),
+                    "plain_len": int(rec.plain_lengths[loc]),
+                    "element": str(valmap[pos_all[loc]]),
+                    "holder": holders.get(pos_all[loc], ""),
+                }
+                for loc in want_local
+            ],
+            "proof": {
+                "S_I": str(pi_I.S_I),
+                "Lambda_I": str(pi_I.Lambda_I),
+                "I": list(pi_I.I),
+            },
+            "verify": {
+                "ok": bool(report.ok),
+                "code": int(report.code),
+                "message": report.message,
+            },
+            "nodes_used": list(used),
+        }
+
     def collect_certificates(self, indices):
         """向服务器收齐覆盖 ``indices`` 的凭证，**不做聚合**。
 
@@ -1648,10 +1738,29 @@ class VectorStore:
     def _prove(self, groups, Q, valmap):
         """生成证据并验证。
 
-        * **同一份文件**：把各节点的凭证聚合起来（节点参与了证明，快）；
-        * **跨多份文件**：在合并位置集上重算一份证据（慢，秒级）——
-          因为不同文件的 E 不同，份额级合并要求 e_I 次根，而隐藏阶群里
-          没有陷门（见 docs/开发与验收记录.md 第四节）。
+        * **同一份文件**：把各节点的凭证聚合起来（走论文 §6.5.2 的 ``VC.Agg``
+          / ``AggManyToOne``）—— 节点参与了证明，快，而且**不需要全量值**；
+        * **跨多份文件**：在合并位置集上重算一份证据（慢，秒级）。
+
+        跨文件为什么不能像单文件那样把现成凭证 **Agg** 起来？不是缺一个算法，
+        而是论文的聚合**以同一个承诺 C 为前提**：
+
+        * 学位论文 ``Def. 29``（Aggregatable Subvector Openings）原文：
+          「any commitment C and triple (I, v_I, π_I) s.t. Ver(pp, C, I, v_I, π_I) = 1 …
+          for any (J, v_J, π_J) such that Ver(pp, **C**, J, v_J, π_J) = 1 …」
+          —— 两份凭证必须验在**同一个 C** 上，而一文件一向量 ⇒ 每份文件各有 ``C_f``
+          与 ``U_f = g^{E_f}``。
+        * 把 ``S`` 抬到共同宇宙是可行的：``(S_I)^{E/E_f} = g^{E/e_I} = U'^{1/e_I}``；
+          但 ``Λ`` 抬不动 —— ``Λ_I`` 的支撑集是**本文件的补集**
+          （``Λ_I = (∏ S_j^{v_j})^{1/e_I}``，连乘只过本文件那些位置），
+          它不含另一份文件的任何块。于是 ``Agg`` 里「用 ∏φ_j^{v_j} 抵消交叉项」
+          那一步**没有东西可抵消**，差额恰是「对方文件那些块的 1/e_j 次方」，
+          隐藏阶群里求不出来（``svc/groups.generate_primes`` 明确丢弃 φ(N)）。
+        * 要补齐那一半，只能**知道合并集里所有块的值**、在合并向量上重开
+          （见 :meth:`_prove_merged`）。因此这条路的代价是
+          O(Σ_f |f|) 次大指数模幂，**与你要验几块无关** —— 只跟涉及文件的总位置数有关。
+
+        实测拆解与曲线见 ``docs/开发与验收记录.md`` 第四节。
         """
         if len(groups) == 1:
             file_id = next(iter(groups))
@@ -1666,24 +1775,61 @@ class VectorStore:
             return rep, pi
         return self._prove_merged(groups, Q, valmap)
 
-    def _prove_merged(self, groups, Q, valmap):
-        """跨文件：在合并位置集上重算一份证据与合并承诺。"""
-        P = sorted({g for f in groups for g in self.registry.positions_of(*f)})
-        E = self.session.e_all_of(P)
+    def universe_for(self, file_ids):
+        r"""把一组文件**归约成一条向量** —— 返回 ``(crs_n, C, P, loc)``。
+
+        * ``P`` = 这些文件全部位置的并集（有序）；
+        * ``E = ∏_{j∈P} e_j``、``U' = g^E``、``C' = ∏_f C_f^{E/E_f}``
+          —— 「把每份文件在 ``E_f`` 世界里的承诺搬进 ``E`` 世界」，一份一次模幂；
+        * ``loc`` = ``全局位置 → 合并向量里的局部下标``（CRS 的指数用它）。
+
+        ★★ **一份文件时它退化为那份文件自己**：``P = pos(f)`` ⇒ ``E = E_f``、
+        ``U' = U_f``、``C' = C_f``，而 ``loc`` 就是文件内局部块号。
+        所以“单文件”与“跨文件”能走**同一段代码** —— 单文件那条走
+        :meth:`core.session.Session.crs_n_for` 的快路（直接用摘要里的 ``U``，不重算）。
+
+        这是论文 ``StrgNode.CreateFrom``（子集 → 新摘要）的跨文件版：
+        换宇宙的那一步只是重算承诺（公开可算，不需要任何块的值）。
+        """
+        fids = sorted({(str(o), str(k)) for o, k in file_ids})
+        if not fids:
+            raise ValueError("universe_for 至少要一份文件")
+        if len(fids) == 1:
+            fd = self.delta_of(*fids[0])
+            P = tuple(self.registry.positions_of(*fids[0]))
+            return self.session.crs_n_for(fd), fd.C, P, {p: i for i, p in enumerate(P)}
+
+        with stage("合并位置集 P"):
+            P = tuple(
+                sorted({p for f in fids for p in self.registry.positions_of(*f)})
+            )
+        with stage(f"合并素数积 E（{len(P)} 个位置）"):
+            E = self.session.e_all_of(P)
         N, g = self.session.crs.N, self.session.crs.g
-        C = 1
-        for f in groups:
-            pos = self.registry.positions_of(*f)
-            E_f = self.session.e_all_of(pos)
-            C = C * pow(self.delta_of(*f).C, E // E_f, N) % N
+        with stage(f"合并承诺 C'（{len(fids)} 份增量乘）"):
+            C = 1
+            for f in fids:
+                pos = self.registry.positions_of(*f)
+                E_f = self.session.e_all_of(pos)
+                C = C * pow(self.delta_of(*f).C, E // E_f, N) % N
         crn = CRSn(
             crs=self.session.view_crs_for(P), U_n=pow(g, E, N), e_all=E, n=len(P)
         )
-        idx = {pos: i for i, pos in enumerate(P)}
-        I = tuple(idx[g] for g in Q)
+        return crn, C, P, {p: i for i, p in enumerate(P)}
+
+    def _prove_merged(self, groups, Q, valmap):
+        """跨文件：造出一条合并向量 ``(U', C')``，再在它上面重开一份证据。
+
+        宇宙的构造全在 :meth:`universe_for`；这里只负责“在它上面开一份证据”。
+
+        **抬得动的是承诺，抬不动的是证据**（理由见 :meth:`_prove`）。
+        所以这里不是把两边的凭证拼起来，而是拿合并集的**全量值**重开一份。
+        """
+        crn, C, P, loc = self.universe_for(groups.keys())
+        I = tuple(loc[g] for g in Q)
         vals = tuple(valmap[g] for g in Q)
         full = [self.values[pos] for pos in P]
-        with stage("重算合并证据"):
+        with stage(f"重算合并证据（Open，|P|={len(P)}）"):
             pi = open_subvector(crn, I, vals, full)
         with stage("承诺验证（合并向量）"):
             rep = verify(crn, C, I, vals, pi)

@@ -86,7 +86,26 @@ onMounted(load)
       </div>
 
       <div class="panel">
-        <h4 class="sec-title">单独 PoR</h4>
+        <h4 class="sec-title">存储证明（PoR）挑战</h4>
+        <!-- ★ 这块以前只有一句标题 + 一个按钮，**没有任何说明** —— 用户不知道
+             “挑战”是什么、看到的结果意味着什么。补上四句：它问什么、怎么算过、
+             数字怎么读、以及它**不能**证明什么。 -->
+        <p class="por-note">
+          PoR（Proof of Retrievability，可检索性证明）验的是
+          <b>这台节点是不是真的还存着它名下的那些块</b> —— 不是听它自己说，
+          而是让它现场回答一份挑战。
+        </p>
+        <p class="por-note">
+          流程：协调者随机抽一批块 → 让节点交出这些块的密文 →
+          协调者<b>自己重算</b>分量（<code class="mono">v = SM3(密文)</code>）
+          并与登记表里的记录对拍。对得上才算“答到”，对不上或连不上就是“没答到”。
+          所以「问到 N / 答到 M」里 <b>M &lt; N</b> 的含义很明确：<b>它答不上来</b>。
+        </p>
+        <p class="por-note">
+          ★ 诚实边界：这只是<b>抽样</b>，不是全量盘点 —— 答到 N 个只说明
+          “抽查到的这些它确实都在”，<b>不能</b>推出“它一块都没丢”。
+          要更强的不在树里的保证，得看上面的块分布矩阵与「全量自检」。
+        </p>
         <el-button type="primary" :loading="porRunning" @click="runPor">
           <Icon name="pulse" :size="14" style="margin-right: 6px" />发起挑战
         </el-button>
@@ -110,6 +129,17 @@ onMounted(load)
   font-size: 14px;
   font-weight: 500;
   margin-bottom: 14px;
+}
+/* PoR 那块的四段说明（安全审计之后补的“这按钮到底在干什么”） */
+.por-note {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+  margin: 0 0 8px;
+  max-width: 76ch;
+}
+.por-note b {
+  color: var(--text-2);
 }
 .kv {
   display: flex;

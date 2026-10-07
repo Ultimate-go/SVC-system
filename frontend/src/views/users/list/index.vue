@@ -201,7 +201,7 @@ onMounted(load)
         :page-size="PAGE_SIZE"
         :total="total"
         layout="prev, pager, next"
-        small
+        size="small"
       />
     </div>
   </div>

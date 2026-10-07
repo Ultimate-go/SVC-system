@@ -34,7 +34,7 @@ export const routes = [
         path: '',
         name: 'dashboard',
         component: () => import('../views/admin/dashboard/index.vue'),
-        meta: { title: '总览' },
+        meta: { adminHome: true, title: '总览' },
       },
       {
         path: 'users',
@@ -118,7 +118,7 @@ export const routes = [
         path: 'perf',
         name: 'perf',
         component: () => import('../views/admin/perf/index.vue'),
-        meta: { title: '性能' },
+        meta: { requiresAdmin: true, title: '性能' },
       },
     ],
   },

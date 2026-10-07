@@ -19,6 +19,7 @@ from ..manager import NotFound, OutOfRange, StoreManager
 from ..models import UserRow
 from ..schemas import BatchVerifyIn, DisaggIn, FileQueryIn, QueryIn
 from core.timing import collect
+from core.transport import TransportError
 
 router = APIRouter(prefix="/api", tags=["verify"])
 
@@ -30,7 +31,7 @@ def query_by_indices(
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
-    """按**全局下标**查询。一次可以横跨多个文件、多个用户 —— 这就是设计 B。
+    """按**全局下标**查询。一次可以横跨多个文件、多个用户。
 
     ``allow_partial=False``（默认）时有块收不齐就 400，并在报错里列清楚缺哪几个
     下标、各台各持有多少块；开了它则只把**拿得到的**算进结论，
@@ -41,6 +42,12 @@ def query_by_indices(
             out = mgr.query(body.indices, allow_partial=body.allow_partial)
     except OutOfRange as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except TransportError as exc:
+        # ★ 节点“声称持有、实际没密文”这类**传输层**故障。写路径早就把它映射成
+        #   503 + 可操作指引了（见 `routers/files.py::_write_failed`），读路径
+        #   以前漏了这一档，同一个故障在这里只剩 500「服务器内部错误」。
+        #   消息里本来就带节点名，原样透出去，让用户知道该去修哪台机器。
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     audit(
         db,
         user.username,
@@ -64,8 +71,9 @@ def query_by_files(
 ):
     """一次查询**若干个文件**（可跨用户）—— 聚合成**一份**证据。
 
-    在"一文件一向量"的设计下这件事做不到：``svc.agg`` 的前提是两份证据
-    属于同一条向量。设计 B 把它们放进同一条，于是天然成立。
+    ``svc.agg`` 的前提是两份证据属于**同一条向量**。本方案里每份文件各占
+    全局素数表里的一段（段永不回收），跳文件时就按“合并位置集”重算一份证据，
+    所以这件事仍然成立 —— 只是靠重算，而不是靠“全系统一条向量”。
     """
     try:
         with collect() as sw:
@@ -182,11 +190,15 @@ def registry_info(
 ):
     """全局下标 → "这是谁的第几块、存在哪台服务器"。
 
-    登记表是设计 B 的基础设施：索引必须全系统唯一，而
+    登记表是这套方案的基础设施：全局位置**必须唯一**，而
     ``(用户, 文件, 块序号)`` 三元组的哈希只能当**查表的键**，
     不能取模当索引（会碰撞，而碰撞会让 ``shamir_trick`` 静默算错）。
     """
     try:
         return mgr.registry_info(global_index)
     except KeyError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        # ★ 用 ``exc.args[0]`` 而不是 ``str(exc)``：``str(KeyError)`` 会把消息
+        #   再包一层引号，界面上就变成 `"'全局位置 99999 不属于任何文件…'"`。
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, exc.args[0] if exc.args else str(exc)
+        ) from exc

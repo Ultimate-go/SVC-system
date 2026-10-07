@@ -18,6 +18,9 @@ import { systemApi } from '../../../api/system'
 import { evidenceApi } from '../../../api/evidence'
 import { useAuthStore } from '../../../stores/auth'
 import { usePoolStore } from '../../../stores/pool'
+import { useCryptoStore } from '../../../stores/crypto'
+import { openBlocks } from '../../../utils/crypto/index'
+import { forgetAnchorsOf, getDeltaAnchorFor } from '../../../utils/anchor'
 import { span, fmtBytes, hexPreview } from '../../../utils/format'
 import { SPLIT_MODES } from '../../../utils/constants'
 import PageHeader from '../../../components/common/PageHeader.vue'
@@ -86,6 +89,19 @@ const effectiveBlocks = computed(() => {
   if (!size) return null
   return Math.ceil(size / effectiveSplit.value.seg)
 })
+
+/**
+ * 取消已选文件（点列表里那个 ×）。
+ *
+ * ★ 必须**连文件标识一起清掉**（用户反馈）：选文件时会自动把文件名填进
+ *   「文件标识」（见 :func:`onFileChange`）。只清文件、不清标识的话，
+ *   框里会留着上一个文件名 —— 看上去像是“还是那份文件”，很容易传错。
+ */
+function onFileRemove() {
+  selectedFile.value = null
+  uploadForm.fileKey = ''
+  planAdvice.value = null
+}
 
 function onFileChange(f) {
   selectedFile.value = f?.raw || null
@@ -175,14 +191,18 @@ function inPool(row) {
  *   而是用刚取到的最新证据**刷新**原来那张（δ 变过时这正好让它重新生效）。
  *   这件事必须明说 —— 不说的话，用户会以为点了两次就是两份，或者以为第二次没生效。
  */
-async function addToPool(row) {
+async function addToPool(row, { silent = false } = {}) {
+  // ★ 返回 boolean：批处理（一键入池）靠它算**真实的**成功数。
+  //   以前这里只是裸 `return`、异常也被吞掉，于是 `poolAll` 里
+  //   `ok += 1` 恒执行 —— 成功计数恒等于总数，用户在二次确认框里点“取消”
+  //   也算成功（审计 F1）。
   const indices = row.indices || []
   if (!indices.length) {
-    ElMessage.warning('这份文件没有块下标')
-    return
+    if (!silent) ElMessage.warning('这份文件没有块下标')
+    return false
   }
   const already = inPool(row)
-  if (already) {
+  if (already && !silent) {
     try {
       await ElMessageBox.confirm(
         `这 ${indices.length} 块已经在池子里了。\n\n` +
@@ -191,7 +211,7 @@ async function addToPool(row) {
         { type: 'warning', confirmButtonText: '刷新那一张', cancelButtonText: '取消' },
       )
     } catch {
-      return
+      return false
     }
   }
   poolBusy.value = true
@@ -210,18 +230,25 @@ async function addToPool(row) {
     //   线性、很快；而一旦把**多份文件**的块放进同一次验证，就要在合并
     //   位置集上重算一份证据（秒级）。第一次入池就把这件事说清楚，
     //   免得用户以为“验证卡住了”。
-    ElMessage.success(
-      already
-        ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}，用时 ${ms} ms）`
-        : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`
-            + `（用时 ${ms} ms）。跨文件验证会在合并位置集上重算证据，`
-            + `通常要 1~3 秒。`,
-    )
+    //
+    //   `silent` 是批处理（一键入池）用的：一份弹一条只会把界面刷满，
+    //   进度与总结由调用方统一说。
+    if (!silent) {
+      ElMessage.success(
+        already
+          ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}，用时 ${ms} ms）`
+          : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`
+              + `（用时 ${ms} ms）。跨文件验证会在合并位置集上重算证据，`
+              + `通常要 1~3 秒。`,
+      )
+    }
   } catch {
     // 403 / 409 的中文理由已由拦截器原样弹出（“只有所有者”那条同样适用）
+    return false
   } finally {
     poolBusy.value = false
   }
+  return true
 }
 
 function buildFormData() {
@@ -289,13 +316,62 @@ function resetUpload() {
 }
 
 async function tryDecrypt(file) {
-  // ★ 不置灰：点下去才看到后端真的拒了你。
+  // ★★ 默认模型下**服务端不持有私钥**（`server_key=false`）——
+  //    `/api/files/{id}/decrypt`（服务端解密）会回
+  //    “服务端这次会话里没有你的私钥”，即**必然失败**。
+  //
+  //    旧注释写的是“不置灰：点下去才看到后端真的拒了你（演示亮点）”，
+  //    那是**旧模型**（后端扣着私钥）的说法 —— 默认模型下它变成了
+  //    “一个永远报错的按钮”，用户只会以为系统坏了。
+  //
+  //    所以这里改走**客户端**那条路：取密文 → 在浏览器里解封块密钥 → SM4 解密
+  //    → 顺手做一次本地验证。这才是“试解密”在这套架构下应有的样子。
+  const crypt = useCryptoStore()
+  if (!crypt.unlocked) {
+    ElMessage.warning('浏览器里还没有私钥 —— 请重新登录一次（登录时用口令在本地解封），再试解密')
+    return
+  }
+  if (!file.can_decrypt) {
+    ElMessage.warning(
+      `这不是你的文件（所有者：${file.owner}）—— 拿不到块密钥，解不开。` +
+        '完整性验证是公开的，点「详情」就能看到验证结果。',
+    )
+    return
+  }
+  const tip = ElMessage({ message: `正在浏览器里试解密 ${file.file_key} …`, duration: 0 })
   try {
-    const { data } = await filesApi.decrypt(file.id, null)
-    const len = data.bytes
-    ElMessage.success(`解密成功：${len} 字节（${file.owner}/${file.file_key}）`)
-  } catch {
-    // 403 的中文理由已由拦截器原样弹出
+    const { data: pack } = await filesApi.cipher(file.id, null)
+    // ★★ 核对锚的**归属**：`file.id` 会被库复用，旧文件的锚会让新文件
+    //    误报“验证不通过”（见 `getDeltaAnchorFor` 的说明）。
+    const opened = openBlocks(pack, crypt.key, {
+      trustedDelta: getDeltaAnchorFor(file.id, file.content_digest),
+    })
+    const len = opened.plain.length
+    const head = new TextDecoder('utf-8', { fatal: false }).decode(opened.plain.slice(0, 48))
+    const verdict =
+      { 'no-anchor': '本地还没钉过（本次用的是服务端给的 δ）', match: '与本地钉住的一致', mismatch: '与本地钉住的不一致（已用本地 δ 定性）' }[
+        opened.deltaVerdict
+      ] ?? opened.deltaVerdict
+    await ElMessageBox.alert(
+      `文件：${file.owner} / ${file.file_key}\n` +
+        `解密：${len} 字节（在你的浏览器里解出来的，服务端没参与）\n` +
+        `本地验证：${opened.verify.ok ? '通过' : `未通过 —— ${opened.verify.message}`}\n` +
+        `δ 钉扎：${verdict}`,
+      '试解密结果（浏览器本地）',
+      { confirmButtonText: '知道了' },
+    )
+    if (head) {
+      // 单独弹一个“看得到内容”的提示：这是“真的解出来了”的最直观证据
+      ElMessage({
+        message: `开头 48 字节：${head.replace(/\s+/g, ' ').trim() || '（不可打印）'}`,
+        duration: 8000,
+        showClose: true,
+      })
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '本地解密失败')
+  } finally {
+    tip.close()
   }
 }
 
@@ -325,30 +401,154 @@ function segText(segments) {
   return out.length ? out.join('、') : '—'
 }
 
-async function removeFile(row) {
+async function removeFile(row, { silent = false } = {}) {
   const parts = [
     `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块）。`,
     '删除不可撤销：这份文件的密文、封装过的块密钥与账目都会从库里、从节点上删掉。',
     '别的文件不受影响 —— 每份文件各占自己的位置段，删它不会动到任何别人。',
   ]
-  try {
-    await ElMessageBox.confirm(parts.join('\n'), '确认删除', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
+  if (!silent) {
+    try {
+      await ElMessageBox.confirm(parts.join('\n'), '确认删除', {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return false
+    }
   }
   try {
     const { data } = await filesApi.remove(row.id)
+    // ★★ 删掉之后**本地锚必须一起清**：锚是按 `fileId` 存的，而库会复用
+    //    id（SQLite 的 `INTEGER PRIMARY KEY` 没有 AUTOINCREMENT）——
+    //    不清的话，下一次上传的文件拿到同一个 id，解密时会**拿这份旧文件的
+    //    基准去验新文件**，报“本地验证未通过”（实测踩过，改名也躲不开）。
+    //
+    //    ⚠️ `data.deleted_files` 可能**多于一份**（删末尾会连带删掉它后面的
+    //    文件），但接口只给名字不给 id，所以这里只能清**当前这一份**的锚。
+    //    被连带删掉的那些，靠锚的 `digest` 归属核对兜住（见 anchor.js）。
+    forgetAnchorsOf(row.id)
     const n = (data.deleted_files || []).length
-    ElMessage.success(
-      `已删除 ${data.dropped_blocks} 块` + (n > 1 ? `（共 ${n} 份文件）` : ''),
-    )
-    await load()
+    if (!silent) {
+      ElMessage.success(
+        `已删除 ${data.dropped_blocks} 块` + (n > 1 ? `（共 ${n} 份文件）` : ''),
+      )
+    }
   } catch {
     // 错误已由拦截器弹出
+    return false
+  }
+  // 单份删除后要刷新列表；批量走 `removeAll`，它在最后统一刷一次
+  // （每份都刷会把列表闪 n 次）。
+  if (!silent) await load()
+  return true
+}
+
+/** 我能解密的那些文件（= 我自己的）——“一键”两个按钮的作用对象。 */
+const mineFiles = computed(() => (files.value || []).filter((r) => r.can_decrypt))
+
+const poolAllBusy = ref(false)
+const removeAllBusy = ref(false)
+
+/**
+ * 「一键入池」：把**自己全部**的文件各取一份证据收进证据池。
+ *
+ * ★ 逐个串行，**不并发**：每次入池都要向“持有那几块的节点”取密文，
+ *   并发打上去只会把节点压住，还可能撞上协调者的写锁。一份一份走，
+ *   进度用一条不自动关的提示显示（第 i / n 份）。
+ *
+ * ★ 单份失败**不打断**整批 —— 最后统一报“成功几份”。否则一份坏文件
+ *   就会把后面全卡住，而且用户不知道卡在哪。
+ */
+async function poolAll() {
+  const list = mineFiles.value
+  if (!list.length) return
+  poolAllBusy.value = true
+  let ok = 0
+  const tip = ElMessage({ message: `正在入池 0 / ${list.length} …`, duration: 0 })
+  try {
+    for (let i = 0; i < list.length; i++) {
+      tip.message = `正在入池 ${i + 1} / ${list.length}：${list[i].file_key} …`
+      try {
+        // ★ 按**返回值**计数，不是“调用过就算成功”（审计 F1）。
+        if (await addToPool(list[i], { silent: true })) ok += 1
+      } catch {
+        /* 单份失败不打断 */
+      }
+    }
+  } finally {
+    tip.close()
+    poolAllBusy.value = false
+  }
+  if (ok === list.length) {
+    ElMessage.success(`一键入池：${ok} / ${list.length} 份已收进证据池`)
+  } else {
+    ElMessage.warning(
+      `一键入池：成功 ${ok} / ${list.length} 份，` +
+        `${list.length - ok} 份没进去（失败原因上面已经逐条说过）`,
+    )
+  }
+}
+
+/**
+ * 「一键删除」：把**自己全部**的文件删掉。
+ *
+ * ★★ 这是本页破坏性最强的按钮，所以两道门：
+ *   ① 先把要删的逐条列出来（名字 + 块数），不是一句“确定吗”；
+ *   ② 必须**手工输入** `DELETE` 才放行 —— 它旁边就是“一键入池”，
+ *      一个误点就没了的东西不能只看一眼回车。
+ */
+async function removeAll() {
+  const list = mineFiles.value
+  if (!list.length) return
+  const lines = list.map((r) => `  · ${r.owner}/${r.file_key}（${r.block_count} 块）`)
+  try {
+    await ElMessageBox.prompt(
+      [
+        `将删除以下 ${list.length} 份文件的全部内容：`,
+        ...lines,
+        '',
+        '删除不可撤销：密文、封装过的块密钥与账目都会从库里、从节点上删掉。',
+        '请输入大写的 DELETE 确认：',
+      ].join('\n'),
+      '确认删除全部',
+      {
+        confirmButtonText: '全部删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        inputPattern: /^DELETE$/,
+        inputErrorMessage: '请输入大写的 DELETE 才能继续',
+      },
+    )
+  } catch {
+    return
+  }
+  removeAllBusy.value = true
+  let ok = 0
+  const tip = ElMessage({ message: `正在删除 0 / ${list.length} …`, duration: 0 })
+  try {
+    for (let i = 0; i < list.length; i++) {
+      tip.message = `正在删除 ${i + 1} / ${list.length}：${list[i].file_key} …`
+      try {
+        // ★ 按**返回值**计数（审计 F1）；用户中途取消不计成功。
+        if (await removeFile(list[i], { silent: true })) ok += 1
+      } catch {
+        /* 单份失败不打断 */
+      }
+    }
+  } finally {
+    tip.close()
+    removeAllBusy.value = false
+  }
+  await load()
+  if (ok === list.length) {
+    ElMessage.success(`一键删除：${ok} / ${list.length} 份已删除`)
+  } else {
+    ElMessage.warning(
+      `一键删除：成功 ${ok} / ${list.length} 份，` +
+        `${list.length - ok} 份没删掉（失败原因上面已经逐条说过）`,
+    )
   }
 }
 
@@ -389,6 +589,7 @@ onMounted(load)
             :show-file-list="true"
             :limit="1"
             :on-change="onFileChange"
+            :on-remove="onFileRemove"
             drag
             class="upload-drag"
           >
@@ -490,7 +691,29 @@ onMounted(load)
       </div>
 
       <div class="panel">
-        <h4 class="sec-title">文件列表</h4>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px">
+            <h4 class="sec-title" style="margin: 0">文件列表</h4>
+            <div style="display: flex; gap: 8px">
+              <el-button
+                size="small"
+                :loading="poolAllBusy"
+                :disabled="!mineFiles.length"
+                @click="poolAll"
+              >
+                一键入池（{{ mineFiles.length }} 份）
+              </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :loading="removeAllBusy"
+                :disabled="!mineFiles.length"
+                @click="removeAll"
+              >
+                一键删除（{{ mineFiles.length }} 份）
+              </el-button>
+            </div>
+          </div>
         <el-table :data="files" v-loading="loading" border>
           <el-table-column prop="owner" label="所有者" width="110">
             <template #default="{ row }"><span class="mono">{{ row.owner }}</span></template>
@@ -563,6 +786,19 @@ onMounted(load)
 </template>
 
 <style scoped>
+/* ★ 上传列表里那个 × 默认只有 14px，很难点中（用户反馈：做大一点）。
+   给它一个 24px 的**可点面积**，而不是只有字形本身。 */
+.upload-drag :deep(.el-upload-list__item .el-icon--close) {
+  font-size: 20px;
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 50%;
+}
+.upload-drag :deep(.el-upload-list__item .el-icon--close:hover) {
+  background: var(--bg-raised, rgba(0, 0, 0, 0.08));
+}
 .sec-title {
   font-size: 14px;
   font-weight: 500;

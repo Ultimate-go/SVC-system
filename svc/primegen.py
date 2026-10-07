@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from functools import reduce
 from operator import mul
 
@@ -89,6 +90,11 @@ class PrimeGen:
     :param max_sz: 最多需要多少个素数（即向量长度 ``n``）
     :param bits: 素数的位长，方案里取 ``l + 1``
     :param start: 起始扫描位置，``None`` 表示 :math:`2^{\\text{bits}-1}`
+    :param seed: 已经算好的**前一段**素数（可选）。传了它就从这段之后接着扫
+        —— 给"把素数表落盘、下次直接读回来"留的口子，序列与现场重算逐位相同。
+        本类只做**便宜的形状检查**（容量 / 区间 / 单调 / 奇数），
+        "到底是不是素数"由调用方担保（它把数据写进去的，就该它验）——
+        本模块是零依赖的算法核，不做 IO，也不替上层担保外部数据。
 
     .. warning::
 
@@ -114,13 +120,14 @@ class PrimeGen:
     要几十秒，而调试阶段往往只需要前几个，惰性求值让调试几乎零成本。
     """
 
-    __slots__ = ("_max_sz", "_bits", "_cache", "_next_candidate")
+    __slots__ = ("_max_sz", "_bits", "_cache", "_next_candidate", "_lo")
 
     def __init__(
         self,
         max_sz: int,
         bits: int,
         start: int | None = None,
+        seed: Sequence[int] | None = None,
     ) -> None:
         if max_sz <= 0:
             raise ValueError("max_sz 必须为正")
@@ -135,7 +142,42 @@ class PrimeGen:
             start = 1 << (bits - 1)  # 最小的 bits 位数
         if start < 2:
             start = 2
+        self._lo = start
         self._next_candidate = start | 1  # 从奇数开始，偶数（除 2）不可能是素数
+
+        if seed:
+            self._adopt(seed)
+
+    # -- 接住现成的前缀 -------------------------------------------------------
+
+    def _adopt(self, seed: Sequence[int]) -> None:
+        """把一段现成的素数前缀接进缓存（供落盘缓存复用）。
+
+        ★ 只查**便宜的形状**：不超容量、落在 :math:`[lo, 2^{bits})`、严格递增、
+        除了 2 以外全是奇数。**不查素性** —— 那是调用方的事（见 ``seed`` 参数）。
+        任何一项不符就直接抛错：宁可回退到现场重算，也不能拿一段形状可疑的
+        前缀继续算下去（取错素数不会报错，只会让所有校验默默变成错的结果）。
+        """
+        limit = 1 << self._bits
+        prev = self._lo - 1
+        out: list[int] = []
+        for raw in seed:
+            p = int(raw)
+            if p != 2 and not (self._lo <= p < limit and p % 2 == 1):
+                raise ValueError(
+                    f"素数前缀里出现 {p}：不在 [{self._lo}, 2^{self._bits}) 内或不是奇数"
+                )
+            if p <= prev:
+                raise ValueError(f"素数前缀必须严格递增，遇到 {p} <= {prev}")
+            prev = p
+            out.append(p)
+        if len(out) > self._max_sz:
+            raise ValueError(
+                f"素数前缀有 {len(out)} 个，超过本次申请容量 {self._max_sz}"
+            )
+        self._cache = out
+        if out:
+            self._next_candidate = out[-1] + 2
 
     # -- 惰性扩展 -----------------------------------------------------------
 
@@ -170,8 +212,13 @@ class PrimeGen:
         if i < 0 or i >= self._max_sz:
             raise IndexError(f"下标 {i} 越界（容量 {self._max_sz}）")
         if i >= len(self._cache):
-            # 每次至少多算一批，避免逐个数地反复触发循环开销
-            self._extend(max(i + 1, min(self._max_sz, len(self._cache) * 2 or 8)))
+            # ★ 精确扩到「刚好够」：以前这里写的是 min(max_sz, len(cache) * 2)
+            #   —— 翻倍预扩。代价是**每跨过一个 2 的幂**就有一次生成高峰
+            #   （实测跨进程上传里 643 ms / 896 ms 两个尖峰，位置正好在
+            #   16 与 32 的边界），而且会生成一批可能永远用不到的素数。
+            #   _extend 是从上次的候选位置接着扫的，所以"精确"不会重复劳动，
+            #   只多几次函数调用。
+            self._extend(i + 1)
         return self._cache[i]
 
     def get_many(self, indices) -> list[int]:
@@ -193,6 +240,11 @@ class PrimeGen:
     @property
     def bits(self) -> int:
         return self._bits
+
+    @property
+    def count(self) -> int:
+        """已经生成出来的素数个数（落盘缓存用它决定要不要写、写多少）。"""
+        return len(self._cache)
 
     @property
     def max_sz(self) -> int:
