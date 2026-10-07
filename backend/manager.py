@@ -23,13 +23,12 @@ import json
 import threading
 import time
 from time import perf_counter
-from pathlib import Path
 from typing import Callable, Sequence
 
 from sqlalchemy import delete, func, select, update
 
 from core import GlobalSession, VectorStore, crs_from_dict, new_session
-from core.crypto import split_segments, vector_element
+from core.crypto import vector_element
 from core.keywrap import (
     KeyWrapError,
     KeyWrapFormatError,
@@ -48,6 +47,7 @@ from core.keywrap import (
 from core.store import proof_bytes
 from core.sm2 import public_key_of
 from core.timing import stage
+from core.faults import MODE_DESTROYED, MODE_DOWN, FaultyTransport
 from core.transport import NodeTransport, TransportError, WriteError
 from svc import Opening, VerifyCode, as_index_set
 from svc import disagg as svc_disagg
@@ -57,7 +57,7 @@ from vds.client_node import ClientNode
 from vds.digest import Digest
 from vds.pos import DEFAULT_LAMBDA_POS
 
-from .config import Settings, read_deploy_node_count
+from .config import Settings, auto_segment_bytes, read_deploy_node_count
 from .security import decode_token, hash_password
 from .db import Database
 from .schemas import MAX_INDICES
@@ -70,6 +70,7 @@ from .models import (
     NodeBlobRow,
     NodeRegistryRow,
     NodeStateRow,
+    PendingWriteRow,
     ReplayRow,
     RevokedTokenRow,
     UserRow,
@@ -200,6 +201,16 @@ class StoreManager:
         #:   “重启就报节点与协调者不同步”。它是一个**闭包**，
         #:   捕获了那次操作的全部参数（策略、块密钥密文、文件标识…）。
         self._finish_cb: Callable[[], object] | None = None
+        #: 落库那一步需要的**纯数据**参数（现在只有上传用得上 ——
+        #: ``key_cts`` 是那次的块密钥密文，重做落库时必需）。
+        #: 没有它就不把现场落盘（见 :meth:`_save_pending_site`）。
+        self._finish_spec: dict | None = None
+        #: 盘上那份现场自救的进展/结论（一条给用户看的话）。
+        self._site_note: str = ""
+        #: 这次启动的现场是**从盘上恢复**的吗。
+        self._restored_site: bool = False
+        #: 守卫看到的"已经跑在前面"的节点（启动时算一次）。
+        self._startup_ahead: list[str] = []
         #: 自动补推的后台线程与它的计数（见 :meth:`_kick_auto_retry`）。
         self._auto_thread: threading.Thread | None = None
         self._auto_attempts: int = 0
@@ -264,9 +275,26 @@ class StoreManager:
                     ) from exc
                 self._reload(store, db)
                 self._joined_now = self._register_nodes(db)
-                self._verify_nodes_at_startup(store, db)
+                # ★★ 盘上还留着「上次写失败时的现场」吗？守卫**必须先知道** ——
+                #    有现场时"节点跑在前面"是**预期**状态（它们在等补推），
+                #    而不是数据出错（旧版本会在这种时候报
+                #    「存储节点与协调者不同步，拒绝启动」把系统锁死）。
+                site = self._load_pending_site()
+                self._verify_nodes_at_startup(store, db, site=site)
+                self._restore_pending_site(store, site)
+
+            # ★ 故障演练：把真传输层包一层（见 :mod:`core.faults`）。
+            #   默认名单是空的 ⇒ 对正常路径**零影响**：每个方法只是多一层
+            #   透传。这样「模拟掉线」不用改任何一条真链路，也不会漏掉
+            #   某条只有跨进程才会走到的路径。
+            self._install_fault_drill(store)
 
             self.session, self.store = sess, store
+            # ★ 现场是**从盘上恢复**的话，启动后自己先试几轮（用户什么都不用干
+            #   更好；不行就按老办法让他点「补推」）。放在这里而不是恢复当场：
+            #   后台线程要用 ``self.store``，而上面那几行之前它还是 ``None``。
+            if self._restored_site:
+                self._kick_auto_retry()
 
     # -------------------------------------------------------------------
     # 用户密钥（取代了原先的“ABE 参数”那一节）
@@ -382,7 +410,7 @@ class StoreManager:
                 sk = unwrap_private_key(new_password, blob)
             except KeyWrapIntegrityError as exc:
                 raise Conflict(
-                    "新私钥密文与**新口令**不匹配（解不开）—— "
+                    "新私钥密文与「新口令」不匹配（解不开）—— "
                     "浏览器那边的重封可能没完成，或者密文在转交中被改过"
                 ) from exc
             except KeyWrapError as exc:
@@ -395,7 +423,7 @@ class StoreManager:
             #   其实只是漏了一个 ``.hex()``。（实测踩到：zhangsan 改口令 400。）
             if public_bytes(public_key_of(sk)).hex() != row.pub_key:
                 raise Conflict(
-                    "新密文里的私钥与这个账号的公钥**对不上** —— 拒绝替换。\n"
+                    "新密文里的私钥与这个账号的公钥「对不上」—— 拒绝替换。\n"
                     "  改口令只应换个‘外壳’，私钥本体必须原样；"
                     "对不上说明交上来的不是你自己的私钥。"
                 )
@@ -630,7 +658,7 @@ class StoreManager:
                 "块密钥用文件所有者的 SM2 公钥封装；用户私钥用他自己的口令"
                 "包一层之后才入库。口令本身不落库、私钥明文从不落盘 ——"
                 "所以“数据库被拿走”拿到的只有解不开的密文。\n"
-                "  ★ 默认登录路径（server_key=false）**服务端不解封私钥**："
+                "  ★ 默认登录路径（server_key=false）「服务端不解封私钥」："
                 "它只把私钥密文交给浏览器，解封在浏览器里用口令完成 ——"
                 "此后服务端手里没有任何能解开文件的东西，"
                 "它就算作恶也只能交出一份过不了浏览器验证的应答。\n"
@@ -638,24 +666,44 @@ class StoreManager:
             ),
         }
 
-    def _check_segment_bytes(self, value: int | None) -> int:
+    def _check_segment_bytes(
+        self, value: int | None, *, total_bytes: int | None = None
+    ) -> int:
         """把"这次上传要切多大一块"定下来，并做范围校验。
 
-        ``None`` = 用部署默认值（``Settings.segment_bytes``）。
+        ``None`` = **自动**：按文件大小走阶梓
+        （:func:`backend.config.auto_segment_bytes`）—— 小文件小块、
+        大文件大块，块数压在 ``segment_target_blocks`` 以内。
+
+        ★ 以前 ``None`` = 一个固定的 ``Settings.segment_bytes``（64 KB），
+          于是一份十几 KB 的文件也会被切成**一整块** —— "改一块"就等于
+          重传整份文件，而分片的意义正是"只动受影响的那一小段"。
 
         为什么要**服务端**校而不是信前端那几个档：这个值决定块数，
-        而块数又决定会不会撞上先定死的位置上限 ``n_max``。
-        选 1 字节一块时，任何文件都会撞上限，而那时的报错看起来像
-        "文件太大"，根本指不到"块选小了" —— 所以要在入口就把范围说清。
+        而块数又决定"传得完吗"。选 1 字节一块时任何文件都会切出几十万块，
+        而那时的报错看起来像"文件太大"，根本指不到"块选小了" ——
+        所以要在入口就把范围说清。
         """
-        seg = self.settings.segment_bytes if value is None else int(value)
+        if value is None:
+            seg = (
+                self.settings.segment_bytes
+                if total_bytes is None
+                else auto_segment_bytes(
+                    total_bytes,
+                    ladder=tuple(self.settings.segment_ladder),
+                    target_blocks=int(self.settings.segment_target_blocks),
+                    lo=int(self.settings.segment_bytes_min),
+                    hi=int(self.settings.segment_bytes_max),
+                )
+            )
+        else:
+            seg = int(value)
         lo = self.settings.segment_bytes_min
         hi = self.settings.segment_bytes_max
         if not (lo <= seg <= hi):
             raise OutOfRange(
                 f"块大小 {seg} 字节超出允许范围 {lo}~{hi}。"
-                f"块越小 → 块数越多（受全局位置上限约束，n_max = "
-                f"{self.settings.n_max}），单块改起来越省；"
+                f"块越小 → 块数越多（上传与验证越慢），但单块改起来越省；"
                 f"块越大 → 块数越少，上传与检索越快。"
             )
         return seg
@@ -700,6 +748,9 @@ class StoreManager:
             token=self.settings.node_token,
             retries=self.settings.node_retries,
             backoff=self.settings.node_retry_backoff,
+            # ★ 必须可配：一次上传要把整批新块一次性推给每一台，
+            #   块多时单次请求可能远超写死的 120 秒（实测 54 ms/块）。
+            timeout=self.settings.node_timeout,
         )
 
     def _register_nodes(self, db) -> list[str]:
@@ -737,7 +788,9 @@ class StoreManager:
         """本次启动才加入的机器（见 :attr:`_joined_now`）。"""
         return list(self._joined_now)
 
-    def _verify_nodes_at_startup(self, store: VectorStore, db) -> None:
+    def _verify_nodes_at_startup(
+        self, store: VectorStore, db, site: dict | None = None
+    ) -> None:
         """启动时确认各节点与协调者停在同一个 ``n`` —— **两种模式都要查**。
 
         两种混用都必须拦住，而且**反方向那种更隐蔽**：
@@ -761,6 +814,7 @@ class StoreManager:
         所以放行不等于放宽：真正"少了数据"的机器仍然过不去。
         """
         if store.n == 0:
+            self._startup_ahead = []
             return
 
         bad: list[str] = []
@@ -775,6 +829,17 @@ class StoreManager:
             int(store.delta_of(*fid).offset): int(store.delta_of(*fid).n)
             for fid in store.files
         }
+        # ★★ 盘上那份「待补推现场」说的正是"哪份文件被推到了第几块"。有它的
+        #    时候"节点跑在前面"是**预期**状态（它们在等补推），不是数据出错
+        #    —— 旧版在这种时候报「存储节点与协调者不同步，拒绝启动」把系统锁死。
+        tolerate: dict[int, int] = {}
+        if site:
+            d = site.get("delta_new") or {}
+            if d.get("offset") is not None and d.get("n") is not None:
+                tolerate[int(d["offset"])] = int(d["n"])
+        #: 协调者**收敛之后**应有的样子（把那次待补推也算进去）。
+        want_after = {**want_n, **tolerate}
+        ahead: list[str] = []
         for row in store.transport.report():
             nid = row["node_id"]
             if row.get("unreachable"):
@@ -785,6 +850,11 @@ class StoreManager:
             got = {int(v["offset"]): int(v["n"]) for v in row.get("vectors", [])}
             if got == want_n:
                 in_sync.append(nid)
+            elif tolerate and got == want_after:
+                # ★ 它**已经收下**了那次“待补推”的更新 —— 这正是现场本身，
+                #   不是错。放行，但要记下来。（补推之后它会回到 want_n。）
+                ahead.append(nid)
+                continue
             elif not got and expect == 0:
                 # 新加入、还没分到任何块 —— 合法。块照样只落在它加入之后写入的那些上。
                 continue
@@ -796,6 +866,10 @@ class StoreManager:
                 continue
             if not row.get("valid", True):
                 bad.append(f"{nid} 声称持有的下标与实际密文对不上")
+
+        # 给 bootstrap 看：哪些节点是"已经在等补推"的（决定盘上那份现场
+        # 还要不要装回内存）。
+        self._startup_ahead = ahead
 
         if not bad and len(down) == len(store.node_ids):
             # 一台都没联系上 ⇒ 根本没东西可查，而且**令牌配错也是这个表现**
@@ -851,6 +925,9 @@ class StoreManager:
                 n=int(r.delta_n),
                 offset=int(r.offset),
                 chunks=chunks,
+                # ★ 坐标必须一起恢复：丢了它这份文件会退回老坐标，
+                #   而它的 U/C 是用身份坐标算的 —— 启动后第一次验证就挂。
+                identity=getattr(r, "identity", "") or "",
             )
 
         # ② 位置段登记表 + 分量 / 主副本 / 副本表。
@@ -902,6 +979,8 @@ class StoreManager:
                     "delta": (r.delta_U, r.delta_C, r.delta_n),
                     # ★ 位置段必须一起恢复（见 ``_persist_nodes``）。
                     "chunks": json.loads(r.delta_chunks or "[]"),
+                    # ★ 身份同理：没有它节点会退回查全局素数表。
+                    "identity": getattr(r, "delta_identity", "") or "",
                     "st": (r.S_I, r.Lambda_I),
                     "I": r.I,
                     "FI": r.FI,
@@ -922,6 +1001,7 @@ class StoreManager:
                 chunks=tuple(
                     (int(a), int(b)) for a, b in json.loads(r.chunks_json or "[]")
                 ),
+                identity=getattr(r, "identity", "") or "",
             )
             for li, g in enumerate(d.positions):
                 pos_to_local[int(g)] = (int(r.offset), li)
@@ -974,6 +1054,7 @@ class StoreManager:
                         delta_C=str(delta.C),
                         delta_n=int(delta.n),
                         chunks_json=chunks,
+                        identity=getattr(delta, "identity", "") or "",
                     )
                 )
             else:
@@ -982,6 +1063,9 @@ class StoreManager:
                 row.delta_C = str(delta.C)
                 row.delta_n = int(delta.n)
                 row.chunks_json = chunks
+                # ★ 已有行也要刷 —— 老文件（identity 为空）第一次被更新后
+                #   仍然是空，但新文件必须把它写进去，否则重启就退回老坐标。
+                row.identity = getattr(delta, "identity", "") or ""
         for row in db.execute(select(FileDeltaRow)).scalars():
             if (row.owner, row.file_key) not in seen:
                 db.delete(row)
@@ -1031,6 +1115,8 @@ class StoreManager:
                         delta_chunks=json.dumps(
                             [[int(a), int(b)] for a, b in v.get("chunks", ())]
                         ),
+                        # ★ 身份更是如此：新方案下 e_i 完全由它决定。
+                        delta_identity=str(v.get("identity", "") or ""),
                         S_I=str(S_I),
                         Lambda_I=str(Lam),
                         I_json=json.dumps(list(v["I"])),
@@ -1305,7 +1391,8 @@ class StoreManager:
                 raise Conflict(f"文件 {owner}/{file_key} 已存在")
 
             # ① 块大小先校：它决定块数，而块数又会决定块序号是否越界。
-            seg_bytes = self._check_segment_bytes(segment_bytes)
+            #    ★ 传 total_bytes：**自动**档要按文件大小走阶梓（小文件小块）。
+            seg_bytes = self._check_segment_bytes(segment_bytes, total_bytes=len(data))
 
             # ② 谁的钥匙：**所有者的公钥**。
             #    这一步就把"谁能解密"定死了 —— 封块密钥用的就是这把公钥，
@@ -1334,49 +1421,7 @@ class StoreManager:
                 ★ 它**只读** ``store`` 的当前状态（不依赖上面那个 ``rec`` 变量）：
                   两条路上拿到的必须是同一份数据，所以统一从 ``store.files`` 取。
                 """
-                done = store.files[(owner, file_key)]
-                holders = {i: store.holder_of(i) for i in done.indices}
-                with self.db.session() as db:
-                    frow = FileRow(
-                        owner=owner,
-                        file_key=file_key,
-                        segment_bytes=done.segment_bytes,
-                        total_bytes=done.total_bytes,
-                        content_digest=done.content_digest,
-                        block_count=done.block_count,
-                    )
-                    db.add(frow)
-                    db.flush()
-                    for pos, gidx in enumerate(done.indices):
-                        db.add(
-                            BlockRow(
-                                global_index=gidx,
-                                file_id=frow.id,
-                                owner=owner,
-                                file_key=file_key,
-                                block_idx=pos,
-                                element=str(store.values[gidx]),
-                                key_ct=json.dumps(key_cts[pos], ensure_ascii=False),
-                                iv=done.ivs[pos],
-                                plain_len=done.plain_lengths[pos],
-                                holder=holders[gidx],
-                                replicas=json.dumps(list(store.replicas_of(gidx))),
-                            )
-                        )
-                    # ★★ 兜底：这个 (owner, file_key) 上的回滚演示记录一律清掉。
-                    #    正常路径上删文件时已经清了；但万一有窗口漏过来
-                    #    （库被手工改过、或旧版本删文件时没清），
-                    #    新上传的这份就会被塞进旧密文 —— 这里是最后一道闸。
-                    db.execute(
-                        delete(ReplayRow).where(
-                            ReplayRow.owner == owner, ReplayRow.file_key == file_key
-                        )
-                    )
-                    self._persist_globals(db)
-                    self._persist_nodes(db, done.indices)
-                    db.commit()
-                    db.refresh(frow)
-                return frow
+                return self._finish_upload(owner, file_key, key_cts)
 
             try:
                 store.upload(
@@ -1392,7 +1437,7 @@ class StoreManager:
                 #   这时候再"补落库"就会造出一个**假的收敛** —— 库里有文件、
                 #   向量里却没有对应分量，下一句 store.check() 就当场抽你。
                 if store.pending_write() is not None:
-                    self._pending_finish = _finish
+                    self._leave_pending(store, _finish, key_cts=key_cts)
                 raise
             except ValueError as exc:
                 msg = str(exc)
@@ -1775,19 +1820,21 @@ class StoreManager:
             return out
 
     def delete_file(self, owner: str, file_key: str) -> dict:
-        r"""删掉一份文件 —— **连同它之后写进向量的块**（只有所有者能做）。
+        r"""删掉**这一份**文件（只有所有者能做）。
 
-        ★ 为什么"连同后面"：``del`` 只支持向量末尾的连续区间（见
-          :meth:`core.store.VectorStore.truncate` 的说明）。而各文件在向量上
-          占的是连续区间、顺序 = 上传顺序，所以"从这份文件的第一块删到向量
-          末尾"恰好是一次合法的 ``del`` —— 代价是**它之后上传的文件也一起没了**。
+        ★★ 它**不动别的文件**（改过的语义，别再按旧直觉读）：新架构里“段永不
+          回收”，每份文件只占自己那一段位置，删一份就是删它自己的全部位置 ——
+          落在向量中间也一样（核心层
+          :meth:`core.store.VectorStore.delete_from` 会在向量里留下空洞）。
 
-        ★ 因此这里有两条硬检查：
+          改造**之前**的语义是“从这份文件的第一块删到向量末尾”（因为底层
+          ``del`` 只能删末尾连续区间），那时**它之后上传的文件也一起没了**，
+          于是旧代码里有一道“连带名单”检查（连带的全得是自己的，否则 409）。
+          现在连带名单**恒等于这一份文件**，那道检查已成死代码 —— 已删掉，
+          不必再去找它（审计 N4）。
 
-        * **授权**：要连带删掉的必须**全是这位所有者自己的**文件。否则就是
-          替别人删数据 —— 返回 409 并说清是哪几份挡着，让所有者自己来删；
-        * **如实交代**：返回值里列出被连带删掉的文件名，界面必须显示出来，
-          不做静默连带。
+        ★ 「如实交代」这条保留：返回值里列出被删掉的文件名（就是这一份），
+          界面必须显示出来，不做静默连带。
 
         :returns: ``{"deleted_files", "dropped_blocks", "dropped_indices",
             "blocks_after"}``
@@ -1809,16 +1856,11 @@ class StoreManager:
             #   新方案下删一份文件就是删**它自己的全部位置**，核心层正是这么算的
             #   （见 core/store.py::delete_from），两边必须用同一个来源。
             K = tuple(rec.indices)
+            # ★ 连带名单**恒等于这一份文件**（理由见函数头）：新方案下删一份文件
+            #   不动别人，所以这里**没有**“别人的文件挡着就 409”那道检查 ——
+            #   它改造后就是死代码（审计 N4：`doomed` 里那一项的所有者恒等于
+            #   `owner`，`foreign` 恒为空）。留着只会让下一个人以为它在拦什么。
             doomed = ((owner, file_key),)
-            foreign = sorted(k for k in doomed if k[0] != owner)
-            if foreign:
-                raise Conflict(
-                    "方案只允许删「向量末尾」的连续区间，而这份文件后面还压着"
-                    f"**别人的** {len(foreign)} 份文件："
-                    + "、".join(f"{o}/{k}" for o, k in foreign[:5])
-                    + "。要删这份文件，得请它们的所有者先删掉"
-                    "（或者整库重置）。"
-                )
 
             def _finish() -> dict:
                 """落库：删块行、删文件行、抹掉单进程模式下的节点密文。"""
@@ -1931,7 +1973,9 @@ class StoreManager:
                 #: 删过文件之后它可能**小于**某些仍然有效的下标（见
                 #: `core/registry.py::total_blocks`：段永不回收、位置允许稀疏）。
                 #: 要判“下标是不是用超了”，看 ``/api/status`` 的
-                #: ``position_budget_used``（= ``registry.next_offset``）。
+                #: ``delta.slots_allocated``（= ``registry.next_offset``）——
+                #: **不是** ``position_budget_used``：那个字段从来不存在，
+                #: 按那个名字去找只会拿错字段（审计 F8 就是这么发生的）。
                 #: 新方案里每份文件自己一条向量，所以这里只是一个总量；
                 #: 每份文件自己的 ``n`` / 指纹在下面的 ``files`` 里。
                 "delta_n": store.n,
@@ -2014,7 +2058,7 @@ class StoreManager:
             if len(groups) != n_targets:
                 raise OutOfRange(
                     f"block_indices 给了 {len(groups)} 组，但要查 {n_targets} 份文件 —— "
-                    "这种写法必须与 targets **一一对应**"
+                    "这种写法必须与 targets 一一对应"
                 )
             for g in groups:
                 if len(g) > MAX_INDICES:
@@ -2172,7 +2216,7 @@ class StoreManager:
                 raise OutOfRange(
                     f"证据里的下标 {stray[:8]} 不属于这份文件 {_fids[0]}："
                     f"它占的位置是 {list(_fd.positions)[:4]}…（共 {len(loc)} 块）。\n"
-                    "  传进来的 I 必须是**全局位置号**（即 /api/query 响应里的 "
+                    "  传进来的 I 必须是「全局位置号」（即 /api/query 响应里的 "
                     "indices），不是文件内局部块号。"
                 )
             I_loc = [loc[g] for g in I]
@@ -2408,6 +2452,10 @@ class StoreManager:
                 #: 向量层已补推、但落库那一步还欠着（正常不会有；
                 #: 它只在“补成功了、写库中途出了意外”时出现）。
                 "persist_pending": self._pending_finish is not None,
+                #: 这次启动有没有从**盘上**恢复上次失败留下的现场。
+                "restored": bool(self._restored_site),
+                #: 现场自救的进展/结论（一句话，直接给用户看）。
+                "site_note": self._site_note,
                 #: 自动补推的现状 —— 界面拿它告诉用户“别慌，还在自己试；
                 #: 试完了还没成，就该你上了”。
                 "auto": self.auto_retry_state(),
@@ -2498,6 +2546,187 @@ class StoreManager:
             if self._auto_attempts >= limit:
                 return
 
+    # -------------------------------------------------------------------
+    # 「待补推现场」的落盘 / 恢复（跨重启）
+    # -------------------------------------------------------------------
+    #
+    # ★★ 为什么要有这一段（用户报的"一次失败 + 重启 = 起不来"就是它）：
+    #
+    #   现场原来只在**内存**里 —— 向量那半在 ``store._pending``，落库那半在
+    #   ``self._finish_cb``。进程一没，现场就**永久丢失**，而节点上已经跟进的
+    #   那几台**不会回退**。于是重启时守卫看到"节点跑在前面"，报一句
+    #   「存储节点与协调者不同步，拒绝启动」就把整个系统锁死，唯一出路是
+    #   人工去每台节点上清那半段（``scripts/_node_forget_stray.py``）。
+    #
+    #   落盘之后重启就能接着办：守卫先知道"跑在前面"是**预期**（它们在等
+    #   补推），现场再被装回内存，「补推」一点就收住。
+
+    def _finish_upload(self, owner: str, file_key: str, key_cts: Mapping) -> FileRow:
+        """把一次上传**落库** —— 正常路径、补推路径、**重启恢复路径**共用这一段。
+
+        ★ 为什么必须抽成方法（原来它是 ``upload`` 里的一个闭包）：闭包
+          **过不了重启** —— ``key_cts`` 只活在 ``upload`` 的栈上。而这一步
+          需要的全部输入只有三样：``store`` 的当前状态、``owner/file_key``、
+          ``key_cts``。所以它可以写成"参数齐全就能再跑一遍"的形式。
+
+        ★ 绝不能另写一份"恢复专用"的落库代码：两份实现会慢慢走偏，而走偏
+          只在**故障恢复**那条路上才看得见（本地全绿也发现不了）。
+        """
+        store = self._require()
+        # JSON 往返之后字典的键会变成字符串 —— 在这里归一，别把这类坑漏下去。
+        key_cts = {int(k): v for k, v in dict(key_cts).items()}
+        done = store.files[(owner, file_key)]
+        holders = {i: store.holder_of(i) for i in done.indices}
+        with self.db.session() as db:
+            frow = FileRow(
+                owner=owner,
+                file_key=file_key,
+                segment_bytes=done.segment_bytes,
+                total_bytes=done.total_bytes,
+                content_digest=done.content_digest,
+                block_count=done.block_count,
+            )
+            db.add(frow)
+            db.flush()
+            for pos, gidx in enumerate(done.indices):
+                db.add(
+                    BlockRow(
+                        global_index=gidx,
+                        file_id=frow.id,
+                        owner=owner,
+                        file_key=file_key,
+                        block_idx=pos,
+                        element=str(store.values[gidx]),
+                        key_ct=json.dumps(key_cts[pos], ensure_ascii=False),
+                        iv=done.ivs[pos],
+                        plain_len=done.plain_lengths[pos],
+                        holder=holders[gidx],
+                        replicas=json.dumps(list(store.replicas_of(gidx))),
+                    )
+                )
+            # ★★ 兜底：这个 (owner, file_key) 上的回滚演示记录一律清掉。
+            #    正常路径上删文件时已经清了；但万一有窗口漏过来
+            #    （库被手工改过、或旧版本删文件时没清），
+            #    新上传的这份就会被塞进旧密文 —— 这里是最后一道闸。
+            db.execute(
+                delete(ReplayRow).where(
+                    ReplayRow.owner == owner, ReplayRow.file_key == file_key
+                )
+            )
+            self._persist_globals(db)
+            self._persist_nodes(db, done.indices)
+            db.commit()
+            db.refresh(frow)
+        return frow
+
+    def _leave_pending(self, store, finish, *, key_cts=None) -> None:
+        """写失败之后**留下现场**：待补推（向量）+ 待补落库（库）+ 落盘。
+
+        ★ 为什么收口成一个方法：留现场这件事原来散在写路径各处，而
+          "落库那一步需要哪些参数"每处都不一样 —— 于是**新增第三件事**
+          （把现场落盘）就很容易漏掉某一处。收口之后只有这里一处定义。
+        """
+        self._finish_spec = {"kind": "upload", "key_cts": dict(key_cts or {})}
+        self._pending_finish = finish          # 属性 setter 会踢一次自动补推
+        self._save_pending_site(store)
+
+    def _save_pending_site(self, store=None) -> bool:
+        """把现场写到盘上（全库一行）。返回是否真的写了。
+
+        ★ 只写**两半都齐**的现场：向量那半（``store.export_pending()``）与
+          落库那半（``self._finish_spec``）。缺了落库那半还硬恢复的话，补推
+          会"向量收敛、库里还空着" —— 那是**假收敛**，比不恢复更坏（重启时
+          照样被守卫拦下，而且再没有补推路径能救）。所以缺一半就什么都不写，
+          按老办法（人工跑维护脚本）处理 —— 如实，不假装存住了。
+        """
+        store = self._require() if store is None else store
+        data = store.export_pending()
+        spec = self._finish_spec
+        if data is None or not spec:
+            return False
+        data["finish"] = {
+            "kind": str(spec.get("kind", "upload")),
+            "key_cts": {str(k): v for k, v in (spec.get("key_cts") or {}).items()},
+        }
+        payload = json.dumps(data, ensure_ascii=False)
+        with self.db.session() as db:
+            row = db.get(PendingWriteRow, 1)
+            if row is None:
+                db.add(PendingWriteRow(id=1, payload=payload))
+            else:
+                row.payload = payload
+            db.commit()
+        return True
+
+    def _load_pending_site(self) -> dict | None:
+        """读盘上的现场（**只读**，不碰 ``store`` —— 守卫要先用它放行）。"""
+        with self.db.session() as db:
+            row = db.get(PendingWriteRow, 1)
+            if row is None:
+                return None
+            try:
+                return json.loads(row.payload)
+            except Exception:  # noqa: BLE001 - 读不出来的现场不能拿去挡启动
+                return None
+
+    def _clear_pending_site(self) -> None:
+        """现场收敛（或判定为陈旧）之后把它从盘上抹掉。
+
+        ★ **不要**在这里清 ``_site_note``：抹盘的几个调用点（判定陈旧、
+          收敛成功）各自都可能刚写过一句话，清掉就等于把提示吞了 ——
+          界面于是显示"什么都没发生"，而实际发生了一次丢弃。
+        """
+        self._finish_spec = None
+        self._restored_site = False
+        try:
+            with self.db.session() as db:
+                db.execute(delete(PendingWriteRow))
+                db.commit()
+        except Exception as exc:  # noqa: BLE001
+            # 抹不掉不影响"这次补推已经成功"，但会让下次启动读到一个**陈旧**
+            # 现场 —— 所以必须留下痕迹（宁可吵不要哑）。
+            self._site_note = f"待补推现场没能从盘上抹掉（{type(exc).__name__}: {exc}）"
+
+    def _restore_pending_site(self, store: VectorStore, site: dict | None) -> None:
+        """把盘上的现场装回内存（向量那半 + 落库那半）。
+
+        ★ 只有在**确实还有节点跑在前面**时才恢复 —— 否则那一行就是陈旧的
+          （上次抹盘失败、或者已经人工收敛过），硬恢复会造出一个没有对应
+          事实的"待补推"，让界面一直报警。
+        """
+        if not site:
+            return
+        if not self._startup_ahead:
+            self._site_note = "盘上留着一份现场，但所有节点都已对齐 —— 判定为陈旧，已丢弃"
+            self._clear_pending_site()
+            return
+        finish = site.get("finish") or None
+        if not finish:
+            self._site_note = (
+                "盘上的现场缺了「落库」那一半，无法安全恢复（补推会造成账只记一半）"
+                " —— 保留在盘上，请人工处理（见 scripts/_node_forget_stray.py）"
+            )
+            return
+        try:
+            store.import_pending(site)
+        except Exception as exc:  # noqa: BLE001 - 恢复不了也要把话说清楚
+            self._site_note = (
+                f"盘上的现场恢复失败（{type(exc).__name__}: {exc}）—— 保留在盘上，请人工处理"
+            )
+            return
+        key_cts = {int(k): v for k, v in (finish.get("key_cts") or {}).items()}
+        owner, file_key = str(site["file_id"][0]), str(site["file_id"][1])
+        self._finish_spec = {"kind": str(finish.get("kind", "upload")), "key_cts": key_cts}
+        # ★ 这里直接写 ``_finish_cb`` 而**不走属性**：属性会踢自动补推，而这个
+        #   时候 ``self.store`` 还没挂上（bootstrap 末尾才挂）。启动末尾那一处
+        #   再补踢一次（它那时才是安全的）。
+        self._finish_cb = lambda: self._finish_upload(owner, file_key, key_cts)
+        self._restored_site = True
+        self._site_note = (
+            f"已恢复上次写失败的现场（{owner}/{file_key}，"
+            f"待补推 {len(site.get('K') or [])} 块）—— 点一次「补推」即可收敛"
+        )
+
     def _finish_or_pending(self, finish):
         """落库；**失败时把这一步挂成“待补落库”**，然后把异常抛出去。
 
@@ -2578,6 +2807,10 @@ class StoreManager:
                         out["persist_pending"] = True
                         return out
                 out["persisted"] = True
+            # ★ 向量与库都收敛了（没有待补推、也没有待补落库）⇒ 盘上那份现场
+            #   已经没用了，**必须抹掉** —— 留着它下次启动会读出一个陈旧现场。
+            if out.get("ok") and store.pending_write() is None and self._pending_finish is None:
+                self._clear_pending_site()
             out["pending"] = store.pending_write()
             out["persist_pending"] = self._pending_finish is not None
             return out
@@ -2820,7 +3053,28 @@ class StoreManager:
             ell = int(sess.l)
             primegen = sess.primegen_for(delta)
             used_positions = [int(i) for i in out["proof"]["I"]]
-
+            # ★★ 这次真正发出去的素数的位长与"有没有顺序" —— 两个坐标系**不一样**，
+            #    而且不区分就会出事（真踩过）：
+            #
+            #    * 老坐标（``identity`` 为空）：素数是**全局素数表**里第
+            #      ``offset+i`` 个，位长 ``l+1``、从 ``2^l`` 起严格递增；
+            #    * 新坐标（``identity`` 非空）：素数按**块身份**哈希派生
+            #      （``svc/primegen_identity.py``，128 位），既不是 ``l+1`` 位，
+            #      **也没有顺序** —— 哈希出来的东西凭什么递增。
+            #
+            #    以前这里把 ``bits``/``start`` 一律按老坐标写死（``ell+1`` /
+            #    ``1 << ell``），于是前端拿着"必须是 257 位、必须从 2^256 起递增"
+            #    去校验 128 位、无序的哈希素数，**每一份新文件都当场被判成
+            #    「素数序列被改过」，解密与验证全废**。而接口测试看不见它 ——
+            #    它只在前端那条校验里炸。
+            #
+            #    ``ordered`` 就是给前端的判据：真 = 老坐标（要查单调），
+            #    假 = 新坐标（改查互异）。
+            ident = str(getattr(delta, "identity", "") or "")
+            prime_bits = int(getattr(primegen, "bits", ell + 1))
+            # 注意：``crs.prime_bits`` **不**跟着变。它描述的是**方案参数**
+            # （论文里素数位长取 ``l+1``），与"这次这一份文件的素数多长"无关；
+            # 两者混用会让「本地群参数锚」把换文件误判成换部署。
             out["crs"] = {
                 "N": str(sess.crs.N),
                 "g": str(sess.crs.g),
@@ -2838,8 +3092,12 @@ class StoreManager:
             # ★ 证据只用到 ``I`` 里那几个下标的素数，先给这几个 ——
             #   客户端必须对它们**做素性检查**（塞合数会静默算错，见 primegen 的警告）。
             out["primes"] = {
-                "bits": ell + 1,
-                "start": str(1 << ell),
+                "bits": prime_bits,
+                #: 素数的**下界**（两种坐标都成立：哈希派生也会强制置最高位）。
+                "start": str(1 << (prime_bits - 1)),
+                #: ``True`` = 全局表的连续片段（单调递增是一条**真实约束**）；
+                #: ``False`` = 按块身份派生（顺序无意义，该查的是**互异**）。
+                "ordered": not ident,
                 "indices": used_positions,
                 "values": [str(primegen.get(i)) for i in used_positions],
             }
@@ -2951,6 +3209,10 @@ class StoreManager:
             "crs": {
                 "N_bits": store.session.crs.N.bit_length(),
                 "l": store.session.l,
+                #: ★ 素数表容量。**它现在只对"老坐标"的文件有意义**
+                #:   （那些文件第 i 块算素数表第 ``offset+i`` 个）。
+                #:   新文件按块身份派生素数，不受它约束 —— 所以它
+                #:   **不再是**「全系统能存多少块」的上限（以前是）。
                 "n_max": store.session.n_max,
                 "prime_bits": store.session.l + 1,
             },
@@ -2966,10 +3228,15 @@ class StoreManager:
                 #: 要按文件看就看 ``files``。
                 "n": store.n,
                 "n_total": store.n,
-                #: ★ “位置预算已用”= ``registry.next_offset``：**单调不减**，
-                #:   把已废弃的空洞也算在内 —— 它才是“分配过的位置总量”。
-                #:   前端判“下标越界 / 是不是排在向量末尾”应当用它，而不是 ``n``。
-                "position_budget_used": int(store.registry.next_offset),
+                #: ★ 已分配过的**存储槽位**总数（= ``registry.next_offset``，
+                #:   单调不减，把已废弃的空洞也算在内）。
+                #:
+                #:   **它不是预算、也不是上限** —— 改造前这里叫
+                #:   ``position_budget_used``，因为那时 ``offset`` 同时是
+                #:   素数表的地址、用满 ``n_max`` 就只能重建 CRS。
+                #:   现在 ``offset`` 只是"密文放哪个槽位"的编号，
+                #:   可以无限增长，所以这个数字只剩诊断价值。
+                "slots_allocated": int(store.registry.next_offset),
                 "files": [
                     {
                         "owner": own,
@@ -2991,6 +3258,11 @@ class StoreManager:
             "segment_bytes": self.settings.segment_bytes,
             "segment_bytes_min": self.settings.segment_bytes_min,
             "segment_bytes_max": self.settings.segment_bytes_max,
+            #: ★ 自动切法的阶梓与目标块数 —— 前端拿它算"本次切法"的**预览**
+            #:   （真正生效的值由服务端算）。
+            #:   后端口径：``backend/config.py::auto_segment_bytes``。
+            "segment_ladder": list(self.settings.segment_ladder),
+            "segment_target_blocks": int(self.settings.segment_target_blocks),
             #: 每块存几份。**副本不占全局位置**，所以它不影响 n / n_max。
             "replica_factor": store.replica_factor,
             #: 副本数不足的块数 —— 通常是“开副本之前传的老数据”。
@@ -3112,6 +3384,147 @@ class StoreManager:
     def check(self) -> list[str]:
         """全面自检。抛出 = 真的不对；返回的 **提示** 不是错误（见 :meth:`_leaving_nodes`）。"""
         return self._require().check(leaving=self._leaving_nodes())
+
+    # -------------------------------------------------------------------
+    # ★ 故障演练（模拟节点掉线 / 永久损毁）
+    # -------------------------------------------------------------------
+
+    def _install_fault_drill(self, store: VectorStore) -> None:
+        """把存储的传输层包成可演练的（见 :mod:`core.faults`）。幂等。"""
+        if isinstance(store.transport, FaultyTransport):
+            return
+        store.transport = FaultyTransport(store.transport)
+
+    def _faults(self) -> FaultyTransport:
+        t = self._require().transport
+        if not isinstance(t, FaultyTransport):
+            raise RuntimeError("故障演练没装上（传输层不是 FaultyTransport）")
+        return t
+
+    def fault_status(self) -> dict:
+        """★ 当前演练状态 **加上影响面** —— 哪些块已经取不到了。"""
+        with self._lock:
+            store = self._require()
+            ft = self._faults()
+            return {**ft.status(), "impact": self._fault_impact(store, ft)}
+
+    def fault_drill(
+        self,
+        action: str,
+        nodes: Sequence[str] | None = None,
+        *,
+        mode: str = MODE_DOWN,
+    ) -> dict:
+        """★ 故障演练：让若干台节点出事 / 回来 / 只看不改。
+
+        :param action: ``knock_out``（节点出事）、``restore``（节点回来）、
+            ``status``（只看不改）。
+        :param nodes: 哪几台。``restore`` 时给 ``None`` = 全部恢复。
+        :param mode: 只在 ``knock_out`` 时有意义。
+
+            * ``down``（**掉线**）—— 机器联系不上。对应"网线拔了 / 进程挂了"。
+            * ``destroyed``（**永久损毁**）—— 机器联系不上，而且**在现实里**
+              它存的数据也没了（地震 / 海啸）。
+              这一档的意义在于`` impact`` 会告诉你"如果这是真的，哪几块就永远
+              回不来了"。
+
+        ★★ **它一个字节都不会删。** 两种模式都只把指定节点**标成不可达**，
+        点「恢复」立刻全部复原。理由很硬：跨进程模式下节点数据**只存在节点
+        自己那份 SQLite 里**，协调者没有副本 —— 真的删了就真的救不回来。
+
+        :returns: 演练状态 + ``impact``（见 :meth:`_fault_impact`）。
+
+        .. important::
+
+           **它不动密码学，也不改分片。** 只是让指定节点不可达（并把广播写
+           里的它们摘掉）。所以接下来看到的失败，是真代码在"节点没了"时的
+           真实行为 —— 这是整个演练的意义所在。
+        """
+        with self._lock:
+            store = self._require()
+            ft = self._faults()
+            if action == "knock_out":
+                if mode not in (MODE_DOWN, MODE_DESTROYED):
+                    raise ValueError(
+                        f"未知模式 {mode!r}（只认 {MODE_DOWN} / {MODE_DESTROYED}）"
+                    )
+                ft.knock_out(nodes or (), destroy=(mode == MODE_DESTROYED))
+            elif action == "restore":
+                ft.restore(nodes)
+            elif action != "status":
+                raise ValueError(
+                    f"未知动作 {action!r}（只认 knock_out / restore / status）"
+                )
+            return {**ft.status(), "impact": self._fault_impact(store, ft)}
+
+    def _fault_impact(self, store: VectorStore, ft: FaultyTransport) -> dict:
+        """★ 把故障名单翻译成**业务后果**：哪些块、哪些文件现在出问题。
+
+        这是整个演练最有价值的一块 —— 光说"n1 掉线了"没有用，要回答的是
+        「**所以我还能不能验证 / 改块 / 聚合**」。
+
+        * ``lost_blocks``：**每一份副本**都在故障名单里的块。多副本也救不回来，
+          那个块再也验不了、解不开（**永久损毁才可能到这里**；掉线的话数据
+          还在，恢复就好）。
+        * ``degraded_blocks``：主副本出事、但副本还在的块。这些**照常可用**，
+          读/验证会自动退到副本 —— 多副本的价值正是在这里看得见。
+        """
+        faulty = ft.faulty()
+        if not faulty:
+            return {
+                "lost_blocks": [],
+                "lost_count": 0,
+                "degraded_blocks": 0,
+                "files_affected": [],
+                "note": "无故障：所有存储节点在线。",
+            }
+        lost: list[dict] = []
+        degraded = 0
+        for owner, file_key in sorted(store.files):
+            for idx, pos in enumerate(store.registry.positions_of(owner, file_key)):
+                reps = tuple(store.replicas_of(pos))
+                if not reps:
+                    continue
+                if all(r in faulty for r in reps):
+                    lost.append(
+                        {"owner": owner, "file_key": file_key, "block_idx": idx}
+                    )
+                elif reps[0] in faulty:
+                    degraded += 1
+        by_file: dict[tuple[str, str], int] = {}
+        for item in lost:
+            key = (item["owner"], item["file_key"])
+            by_file[key] = by_file.get(key, 0) + 1
+        if lost:
+            note = (
+                f"如果这真是地震：{len(lost)} 块会永久丢失 —— 它们的每一份副本"
+                f"都在故障机器上，涉及 {len(by_file)} 份文件。"
+                f"这就是「副本数不够 + 不可逆故障」的后果。"
+                f"（本演练不删数据；点「恢复」立刻全部复原。）"
+            )
+        elif degraded:
+            note = (
+                f"{degraded} 块的主副本出事，但都还有别的副本 —— "
+                f"读与验证会自动退到副本，现在一切照常可用。"
+                f"这正是多副本的意义：坏一台不出事。"
+                f"（本演练不删数据；点「恢复」立刻全部复原。）"
+            )
+        else:
+            note = (
+                "故障机器上没有任何在用的块（可能它本来就没分到块）。"
+                "业务暂无影响。（本演练不删数据；点「恢复」立刻全部复原。）"
+            )
+        return {
+            "lost_blocks": lost,
+            "lost_count": len(lost),
+            "degraded_blocks": degraded,
+            "files_affected": [
+                {"owner": o, "file_key": k, "lost_blocks": c}
+                for (o, k), c in sorted(by_file.items())
+            ],
+            "note": note,
+        }
+
     def _require(self) -> VectorStore:
         if self.store is None:
             raise RuntimeError("StoreManager 还没 bootstrap()")

@@ -318,6 +318,9 @@ function readCrs() {
  *
  * @returns {{N: string, l: number|null, prime_bits: number|null,
  *            prime_start: string|null, source: string, ts: number}|null}
+ *
+ * ★ `prime_start` 只在**老坐标**（有序全局素数表）下非空 ——
+ *   新坐标的素数是按块身份哈希派生的，没有"基线"这回事（见 `crypto/primes.js`）。
  */
 export function getCrsAnchor() {
   return readCrs();

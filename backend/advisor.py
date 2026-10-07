@@ -5,9 +5,12 @@
 它不属于算法层（不参与承诺/验证，改动它不会动摇任何安全性），
 而是**应用层的一个取舍**：
 
-* 块越大 ⇒ 块数越少 ⇒ 每块的固定开销摊得越薄 ⇒ **上传与验证都更快**，
-  而且**占用的全局位置更少**（``n_max`` 是稀缺资源）；
+* 块越大 ⇒ 块数越少 ⇒ 每块的固定开销摊得越薄 ⇒ **上传与验证都更快**；
 * 块越大 ⇒ **改一块**的粒度越粗（改一块会换掉整个块的密文与块密钥）。
+
+★ 改造后「少占位置」**不再是理由**：素数由块身份派生，块数没有上限
+（以前 ``n_max`` 是稀缺资源，所以顾问会把“切太细”的方案标成不可用）。
+现在只剩「**快**」与「**改块粒度细**」这对取舍。
 
 ★ 结论**不是推理出来的，是实测出来的**。下表来自
 ``scripts/bench_blocksize.py``（本机，|N|=512 位、l=256、4 台节点、单进程；
@@ -155,7 +158,20 @@ def recommend_plan(
     rows: list[dict] = []
     for seg in cands:
         blocks = _blocks(size, seg)
-        allowed = blocks <= remaining
+        # ★★ 改造后「位置预算」**不再是约束**。
+        #
+        #    以前 ``offset`` 同时是「素数表里的地址」，而表长 ``n_max`` 在
+        #    Bootstrap 阶段就定死了 —— 于是块数之和一旦超过它就只能重建 CRS，
+        #    所以顾问必须拦下"切得太细"的方案。
+        #
+        #    现在素数由**块身份**派生（``H(身份‖块号)``），``offset`` 只是
+        #    "密文放哪个存储槽位"的编号、可以无限增长 —— 于是**任何块数都装得下**。
+        #    ``allowed`` 因此恒为 True；保留这个字段只是为了不破坏前端契约
+        #    （前端拿它决定"用这一档"按钮灰不灰）。
+        #
+        #    真正该劝的变成了**代价**：块越多 ⇒ 上传/验证越慢（每块固定开销
+        #    摊得越薄）、但"改一块"动的数据越少。这正是下面 why/est 在算的事。
+        allowed = True
         rows.append(
             {
                 "segment_bytes": int(seg),
@@ -164,15 +180,15 @@ def recommend_plan(
                 "est_upload_ms": round(blocks * MEASURED_PER_BLOCK_MS["upload"], 1),
                 "est_verify_ms": round(blocks * MEASURED_PER_BLOCK_MS["verify"], 1),
                 "allowed": bool(allowed),
-                "note": ""
-                if allowed
-                else f"要 {blocks} 块，但只剩 {remaining} 个位置",
+                "note": "",
             }
         )
 
     feasible = [r for r in rows if r["allowed"]]
     base = {
         "size": int(size),
+        #: ★ 这两个数现在只是**诊断信息**（``n_max`` = 素数表容量，
+        #:   ``used`` = 已存块数）。它们**不再是"还能不能传"的门槛**。
         "remaining": remaining,
         "n_max": int(n_max),
         "used": int(used),
@@ -184,20 +200,16 @@ def recommend_plan(
         "measured_source": MEASURED_SOURCE,
         "measured_scope": MEASURED_SCOPE,
     }
+    # ``feasible`` 现在恒等于 ``rows``（allowed 恒真）—— 这个分支留着是因为
+    # 它是"切法一个都不合法"（例如 ``ladder`` 给空、或块大小为 0）时的兜底，
+    # 与位置预算无关。
     if not feasible:
-        biggest = max(cands)
-        need = _blocks(size, biggest)
         return {
             **base,
             "ok": False,
             "segment_bytes": None,
             "blocks": None,
-            "reason": (
-                f"放不下：就算按最大块 {biggest} 字节切，也要 {need} 块，"
-                f"而全局只剩 {remaining} 个位置（n_max = {n_max}，已用 {used}）。"
-                f"办法有三条：删掉一些不再需要的文件腾位置、调大部署的 n_max"
-                f"（那要重新 Bootstrap 公开参数）、或者把块上限调大。"
-            ),
+            "reason": "没有任何可用的切法（块大小候选为空？）—— 检查部署里的块大小范围。",
         }
 
     if prefer == "finer_updates":

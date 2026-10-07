@@ -16,12 +16,22 @@ import { filesApi } from '../../../api/files'
 import { devicesApi } from '../../../api/devices'
 import { useAuthStore } from '../../../stores/auth'
 import { useThemeStore } from '../../../stores/theme'
-import { span, fmtBytes, hexFp, decodeBlockHex, hasBadBytes } from '../../../utils/format'
+import {
+  span,
+  fmtBytes,
+  hexFp,
+  decodeBlockHex,
+  hasBadBytes,
+  estimateCipherPackBytes,
+  CIPHER_PACK_WARN_BYTES,
+} from '../../../utils/format'
+import { BLOCK_PREVIEW_LIMIT } from '../../../utils/constants.js'
 import { useCryptoStore } from '../../../stores/crypto'
 import { openBlocks } from '../../../utils/crypto/index.js'
 import { bytesToHex } from '../../../utils/crypto/bytes.js'
 import { getAnchor, setAnchor, sha256Hex, fmtWhen, getDeltaAnchorFor, setDeltaAnchor, dropDeltaAnchor, getCrsAnchor, setCrsAnchor, crsFingerprint, matchHistory } from '../../../utils/anchor'
 import PageHeader from '../../../components/common/PageHeader.vue'
+import BlockPreviewBar from '../../../components/common/BlockPreviewBar.vue'
 import DetailToggle from '../../../components/common/DetailToggle.vue'
 import HashText from '../../../components/common/HashText.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
@@ -38,6 +48,25 @@ const loading = ref(false)
 const error = ref('')
 const file = ref(null)
 const nodes = ref([])
+
+/**
+ * 块明细表铺不铺开。
+ *
+ * ★ 超过 `BLOCK_PREVIEW_LIMIT` 块时先只列前那么多 —— 一份几百块的文件全铺出来，
+ *   页面会长到没法看（用户反馈）；点「展示详情」再铺开。
+ *   换一份文件就收回：不然“我上次展开过”会跟着走到下一份文件上。
+ */
+const blockPreviewOpen = ref(false)
+watch(id, () => {
+  blockPreviewOpen.value = false
+})
+
+/** 块明细表实际渲染的行（收起来时只给前 `BLOCK_PREVIEW_LIMIT` 块）。 */
+const blockRows = computed(() => {
+  const rows = file.value?.layout || []
+  if (blockPreviewOpen.value || rows.length <= BLOCK_PREVIEW_LIMIT) return rows
+  return rows.slice(0, BLOCK_PREVIEW_LIMIT)
+})
 
 /**
  * 「简略 / 详细」—— 详细模式要多要一份数据：每块的分量（`?elements=1`）。
@@ -359,6 +388,23 @@ async function doDecrypt() {
   // ★ 用到私钥就把**闲置计时**重置一次（安全审计 N3）：连续操作不会被中途
   //   锁掉，而绝对上限（2 小时）不延长。
   crypt.touch()
+  // ★★ 这一步是**整份**取回（`indices = null`）：响应 ≈ 密文 × 2（hex）
+  //    + 每块一份块密钥密文 + 固定项（审计 N3 实测：1 KB 块约 2.7 KB/块）。
+  //    小文件无感；32 MB 的文件会外推到几十 MB，所以按钮上写明体积，
+  //    超过阈值再问一次（用户 2026-10-07 选定：提示 + 二次确认，不改语义）。
+  const estBytes = estimateCipherPackBytes(file.value?.total_bytes, file.value?.layout?.length)
+  if (estBytes > CIPHER_PACK_WARN_BYTES) {
+    try {
+      await ElMessageBox.confirm(
+        `这份文件 ${fmtBytes(file.value?.total_bytes || 0)}，整份取回密文大约 ${fmtBytes(estBytes)}。` +
+          '浏览器还要逐块解封块密钥、SM4 解密并重算分量，可能要等很久。',
+        '整份取回，量不小',
+        { confirmButtonText: '继续取回', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return // 用户点了取消
+    }
+  }
   decrypting.value = true
   decryptResult.value = null
   try {
@@ -382,7 +428,10 @@ async function doDecrypt() {
           N: pack.crs.N,
           l: pack.crs.l ?? null,
           prime_bits: pack.crs.prime_bits ?? null,
-          prime_start: pack.primes?.start ?? null,
+          // ★ 素数起点只在**老坐标**（有序全局表）下才有"基线"含义。
+          //   新坐标是按块身份哈希派生的，它的 start 只是 2^{bits-1} 这个下界 ——
+          //   把它当成整部署共用的基线钉下去，之后遇到老文件就会误报"换了考场"。
+          prime_start: pack.primes?.ordered === false ? null : (pack.primes?.start ?? null),
           source: '浏览器解密（首次见证）',
         })
       }
@@ -522,10 +571,22 @@ onMounted(load)
           所以缺一块、换一块都会在这里露出来。
           鼠标停在任意指纹上会显示<b>完整十六进制</b>。
         </p>
-        <el-table :data="file.layout || []" size="small" border max-height="360">
+        <BlockPreviewBar
+          :total="(file.layout || []).length"
+          :limit="BLOCK_PREVIEW_LIMIT"
+          :expanded="blockPreviewOpen"
+          @toggle="blockPreviewOpen = !blockPreviewOpen"
+        />
+        <el-table :data="blockRows" size="small" border max-height="360">
           <el-table-column prop="block_idx" label="块号" width="70" align="center" />
-          <el-table-column v-if="detailed" label="位置（内部坐标）" width="130" align="center">
-            <template #default="{ row }"><span class="mono">{{ row.global_index }}</span></template>
+          <!-- ★ 这一列是**存储槽位**（密文在节点上放哪），不是密码学坐标：
+               改造后“第 i 块配哪个素数”由**块身份**派生（H(身份‖块号)），
+               与槽位号毫无关系。所以它只在「详细」下露出，当调试信息用，
+               标题里也明说是内部坐标 —— 别让人以为它是“全局下标”。 -->
+          <el-table-column v-if="detailed" label="存储槽位（内部）" width="150" align="center">
+            <template #default="{ row }">
+              <span class="mono" title="密文在存储节点上的槽位编号，与素数无关">{{ row.global_index }}</span>
+            </template>
           </el-table-column>
           <el-table-column v-if="detailed" label="分量指纹（十六进制 · 悬浮看完整）" min-width="240">
             <template #default="{ row }">
@@ -550,7 +611,7 @@ onMounted(load)
           </el-table-column>
         </el-table>
         <p v-if="!detailed" class="note mt-2" style="margin-bottom: 0">
-          现在是最简略态：只列块号、下标、明文长度与所在节点。点右上角「详细」
+            现在是最简略态：只列块号、明文长度与所在节点。点右上角「详细」
           可以看到每块的分量指纹（悬浮看完整十六进制）—— 那一次会多问后端要一份
           分量数据，所以切换时会重新拉一次详情。
         </p>
@@ -744,7 +805,14 @@ onMounted(load)
           <span class="mono">add_back</span> 链算出来的，
           不是后端那句 <span class="mono">ok: true</span>。
         </p>
-        <el-button type="primary" :loading="decrypting" @click="doDecrypt">解密并本地验证</el-button>
+        <el-button
+          type="primary"
+          :loading="decrypting"
+          :title="`会把整份密文取回来（约 ${fmtBytes(
+            estimateCipherPackBytes(file.total_bytes, file.layout?.length),
+          )}）然后在本机逐块解封、解密、验证`"
+          @click="doDecrypt"
+        >解密并本地验证</el-button>
         <el-alert
           v-if="decryptResult"
           :type="decryptResult.verify.ok ? 'success' : 'error'"

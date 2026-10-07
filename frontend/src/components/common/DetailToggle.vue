@@ -17,7 +17,7 @@ const mode = computed(() => theme.detailMode)
 
 <template>
   <div class="detail-toggle">
-    <span class="tip text-3">{{ mode === 'detail' ? '正在显示每块的指纹（悬浮看完整值）' : '已折叠指纹，只显示块号与下标' }}</span>
+    <span class="tip text-3">{{ mode === 'detail' ? '正在显示每块的指纹（悬浮看完整值）' : '已折叠指纹，只显示块号、长度与所在节点' }}</span>
     <el-radio-group :model-value="mode" size="small" @change="(v) => theme.setDetail(v)">
       <el-radio-button value="brief">简略</el-radio-button>
       <el-radio-button value="detail">详细</el-radio-button>

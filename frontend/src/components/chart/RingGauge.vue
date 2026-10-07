@@ -1,6 +1,10 @@
 <script setup>
 /**
- * SVG 环形仪表 —— stroke-dasharray。用于「已用位置 / n_max」。
+ * SVG 环形仪表 —— stroke-dasharray。
+ *
+ * ★ 改造成“块身份派生素数”之后，原先那个「已用位置 / n_max」已经不再成立
+ *   （位置没有上限了）；现在它画的是「副本达标的块数 / 总块数」。
+ *   组件本身与语义无关 —— ``value`` 与 ``max`` 由调用方给。
  */
 import { computed } from 'vue'
 

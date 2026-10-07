@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 块分布矩阵：行 = 全局下标（块），列 = 节点。
+ * 块分布矩阵：行 = 存储槽位（块），列 = 节点。
  * 格子颜色区分「主副本 / 副本 / 不在我这」。
  *
  * 数据源：
@@ -15,20 +15,23 @@
  */
 import { computed, ref } from 'vue'
 import { hexFp } from '../../utils/format'
+import { BLOCK_PREVIEW_LIMIT } from '../../utils/constants.js'
+import BlockPreviewBar from '../common/BlockPreviewBar.vue'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
   layout: { type: Array, default: null },
   /**
-   * 最多先渲染多少行（点“显示全部”可以看到剩下的）。
+   * 先渲染多少块（超过就收起来，点「展示详情」再看剩下的）。
    *
-   * ★ 以前默认写死 30、而且**没有**任何“还有多少没显示”的提示 ——
-   *   于是矩阵看起来“就是这样”，实际后面一半块**静默消失**了。
-   *   现在：默认 200（足够看全大多数文件），超出部分显式告知并可展开。
-   *   不直接默认“全部”是因为位置总预算是 8192（`n_max`），
-   *   一次性渲染八千行会把自己卡住。
+   * ★ 默认 16（`BLOCK_PREVIEW_LIMIT`）：几十上百块一路铺出来会把页面拉得很长，
+   *   而真正想看的“这几块在谁手上”反而被淹掉（用户反馈）。
+   *   ≤ 16 块时不收、也不显示那条横条 —— 小文件不该多一次点击。
+   *
+   * ★ 不默认“全部”还有渲染成本的原因：块数现在没有上限，几千行一次性
+   *   铺出来会卡（与 `n_max` 无关，纯粹是渲染成本）。
    */
-  maxCols: { type: Number, default: 200 },
+  maxBlocks: { type: Number, default: BLOCK_PREVIEW_LIMIT },
 })
 
 /** 用户点了“显示全部”没有。 */
@@ -67,9 +70,10 @@ const cellInfo = computed(() => {
  *   于是「不在我这」的格子也在宣称自己存着这一块 —— 和格子颜色自相矛盾。
  */
 function cellTip(gi, nid) {
+  const label = rowLabel(gi)
   const state = cellState(gi, nid)
-  if (state === 'none') return `块 ${gi} 不在 ${nid}`
-  const head = `块 ${gi} @ ${nid}（${state === 'primary' ? '主副本' : '副本'}）`
+  if (state === 'none') return `${label} 不在 ${nid}`
+  const head = `${label} @ ${nid}（${state === 'primary' ? '主副本' : '副本'}）`
   const el = cellInfo.value[gi]?.element
   return el ? `${head} · 分量指纹 ${hexFp(el, 16)}` : head
 }
@@ -85,12 +89,36 @@ const indices = computed(() => {
 })
 
 const shownIndices = computed(() => {
-  const limit = props.maxCols > 0 && !expanded.value ? props.maxCols : indices.value.length
+  const limit =
+    props.maxBlocks > 0 && !expanded.value ? props.maxBlocks : indices.value.length
   return indices.value.slice(0, limit)
 })
 
-/** 还有多少个位置没显示 —— 必须显式告诉用户，否则“看不全”这件事看不出来。 */
-const hiddenCount = computed(() => indices.value.length - shownIndices.value.length)
+/**
+ * 行头怎么说：**第几块**，而不是把全局下标摆到图上。
+ *
+ * ★★ 全局下标是**内部坐标**（密文在节点上的槽位号，由上传顺序决定），
+ *   它既不是“第几块”（那个由块身份派生）、也不该让人记。
+ *   行头摆它等于把内部坐标摆在图上（用户反馈）。
+ *
+ *   块号来自 ``layout``（文件详情页会给，每行带 ``block_idx``）；
+ *   只有“没传 layout、只有各节点 indices”那种退化用法才算不出块号 ——
+ *   那时如实退回数字，不编一个假的块号。
+ */
+const blockNoOf = computed(() => {
+  const m = new Map()
+  for (const b of props.layout || []) {
+    if (b && b.global_index !== undefined && b.block_idx !== undefined && b.block_idx !== null) {
+      m.set(Number(b.global_index), Number(b.block_idx))
+    }
+  }
+  return m
+})
+
+function rowLabel(gi) {
+  const b = blockNoOf.value.get(Number(gi))
+  return b === undefined ? String(gi) : `第 ${b} 块`
+}
 
 function cellState(gi, nid) {
   const info = cellInfo.value[gi]
@@ -113,6 +141,12 @@ function cellState(gi, nid) {
 
 <template>
   <div class="block-matrix-wrap">
+    <BlockPreviewBar
+      :total="indices.length"
+      :limit="maxBlocks"
+      :expanded="expanded"
+      @toggle="expanded = !expanded"
+    />
     <div class="matrix-scroll">
       <table class="matrix">
         <thead>
@@ -123,17 +157,13 @@ function cellState(gi, nid) {
         </thead>
         <tbody>
           <tr v-for="gi in shownIndices" :key="gi">
-            <td class="row-head mono">{{ gi }}</td>
+            <td class="row-head mono">{{ rowLabel(gi) }}</td>
             <td v-for="nid in nodeIds" :key="nid" class="cell">
               <span class="dot" :class="cellState(gi, nid)" :title="cellTip(gi, nid)" />
             </td>
           </tr>
         </tbody>
       </table>
-    </div>
-    <div v-if="hiddenCount > 0" class="more-row">
-      <span>只显示了前 {{ shownIndices.length }} 个位置，还有 <b>{{ hiddenCount }}</b> 个未显示</span>
-      <button class="link-btn" type="button" @click="expanded = true">显示全部</button>
     </div>
     <div class="legend">
       <span class="lg"><span class="dot primary" />{{ hasLayout ? '主副本' : '持有' }}</span>
@@ -146,27 +176,19 @@ function cellState(gi, nid) {
 .block-matrix-wrap {
   overflow: hidden;
 }
-/* “还有多少个位置没显示”那一行 —— 以前没有它，矩阵看起来
-   就是“全部内容”，实际后面一半块被静默丢掉。 */
-.more-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-.link-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  font-size: 12px;
-  color: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-}
+/* “还有多少块收起来了”那条横条在 `common/BlockPreviewBar.vue` 里（两处共用）。 */
 .matrix-scroll {
-  overflow-x: auto;
+  /* ★ 展开后最高这么高，超出**在矩阵内部滚** —— 否则一份上千块的文件
+     点一下「展示详情」就把整个页面拉成几千行（那等于把页面毁了）。
+     ≤16 块时这段高度永远用不到，小文件跟以前一模一样。 */
+  max-height: 460px;
+  overflow: auto;
+}
+/* 行多、内部滚动时表头跟着走 —— 滚到第 200 行还知道自己在看哪一列。 */
+.matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 .matrix {
   border-collapse: collapse;

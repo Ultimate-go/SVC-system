@@ -268,3 +268,24 @@ export function nodeSelfCheck(row) {
   if (row.proved === false) return { ok: false, label: '视图不合法', tone: 'danger' }
   return { ok: false, label: '未验证', tone: 'warn' }
 }
+
+/**
+ * 估一下一次「整份取密文」（`/api/files/{id}/cipher`、`indices = null`）有多大。
+ *
+ * ★★ 为什么要有它：「试解密」「解密整份」都是**整份**取，而响应 ≈
+ *   密文（hex，× 2）+ 每块一份块密钥密文 + 固定项。审计 N3 实测：
+ *   64 块 × 1 KB → 174 KB；按上传上限 32 MB（自动档 128 块 × 256 KB）外推
+ *   ≈ 65 MB —— 那种体积浏览器要憋很久，所以界面得**事先说出来**。
+ *
+ * 口径取那三组实测的上界（字节/块 2723 / 1682 / 1162 ⇒ 这里按每块 1 KB 算）：
+ *   ``≈ 文件字节 × 2 + 块数 × 1 KB + 8 KB``
+ * 这是**估算**，不承诺精确 —— 它只用来在按钮上写个量级、并在过大时拦一下。
+ */
+export function estimateCipherPackBytes(totalBytes, blockCount) {
+  const n = Math.max(0, Number(totalBytes) || 0)
+  const b = Math.max(0, Number(blockCount) || 0)
+  return Math.round(n * 2 + b * 1024 + 8 * 1024)
+}
+
+/** 整份取密文时「该先问一句」的阈值（16 MB）。 */
+export const CIPHER_PACK_WARN_BYTES = 16 * 1024 * 1024

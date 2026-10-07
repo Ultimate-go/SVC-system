@@ -4,7 +4,7 @@
  *
  * - 上传卡：选文件 + file_key + 切法三档（自动/按块大小/按块数）+ 存到哪几台。
  * - 上传前先问 /api/plan（两档口径一起问），把候选切法摆成一张表；ok:false 显著提示。
- * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 全局下标(span) / 两把锁；
+ * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 两把锁；
  *   行级操作直接摆在「操作」列：**详情 / 入池（已在池子里就是刷新）/ 试解密**。
  *   —— 「详情」「入池」不信**点文件标识**去猜（太隐蔽）。
  * - 「试解密」不置灰：点下去才看到后端真的拒了你（演示亮点）。
@@ -22,7 +22,12 @@ import { useCryptoStore } from '../../../stores/crypto'
 import { openBlocks } from '../../../utils/crypto/index'
 import { forgetAnchorsOf, getDeltaAnchorFor } from '../../../utils/anchor'
 import { span, fmtBytes, hexPreview } from '../../../utils/format'
-import { SPLIT_MODES } from '../../../utils/constants'
+import {
+  estimateCipherPackBytes,
+  CIPHER_PACK_WARN_BYTES,
+} from '../../../utils/format'
+import { MAX_QUERY_INDICES, SPLIT_MODES } from '../../../utils/constants'
+import { autoSegmentBytes, ladderOptsFrom } from '../../../utils/split'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import LockTag from '../../../components/security/LockTag.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
@@ -79,7 +84,7 @@ const effectiveSplit = computed(() => {
       ? uploadForm.segmentBytes
       : uploadForm.splitMode === 'by_count'
         ? Math.max(1, Math.ceil(size / Math.max(1, uploadForm.blockCount)))
-        : defaultBytes.value
+        : autoSegmentBytes(size, ladderOptsFrom(status.value))
   return { seg: Math.max(1, Math.round(seg || 0)) }
 })
 
@@ -88,6 +93,24 @@ const effectiveBlocks = computed(() => {
   const size = selectedFile.value?.size || 0
   if (!size) return null
   return Math.ceil(size / effectiveSplit.value.seg)
+})
+
+/**
+ * 「切成几块」那个输入框的上限 —— 由**真实约束**推出来，而不是写死一个数。
+ *
+ * ★ 以前这里写死 8192。那个数是**位置预算 `n_max`** 的值，而改造后位置
+ *   没有预算了（素数按块身份派生），于是它成了一条说不清的暗规则：
+ *   用户想切 2 万块会被**静默拦住**，而系统其实完全支持。
+ *
+ * 现在按「这份文件最多能切多少块」算：文件字节数 ÷ 块大小的下界。
+ * 没选文件时给一个宽松兜底；真的越界时后端还会用
+ * 「块大小 X 字节超出允许范围 64~1048576」明确报错 —— 不是无声拒绝。
+ */
+const maxBlockCount = computed(() => {
+  const size = Number(selectedFile.value?.size || 0)
+  const segMin = Number(status.value?.segment_bytes_min || 64)
+  if (size > 0 && segMin > 0) return Math.max(1, Math.floor(size / segMin))
+  return 65536
 })
 
 /**
@@ -138,30 +161,54 @@ async function askPlan() {
 }
 
 /**
- * 候选表：顾问给的 15 档金字塔 + 「部署默认」那一行（若不在金字塔里），
- * 并标出哪几行是「最快 / 最细 / 默认」三个常用口径。
+ * 候选表：顾问给的 15 档金字塔 + 「自动档 / 部署基准」那两行（若不在金字塔里），
+ * 并标出哪几行是「最快 / 最细 / 自动档」三个常用口径。
+ *
+ * ★★ 为什么要加「自动档」那一行（审计 N1）：候选表原来把 `status.segment_bytes`
+ *   （部署里那个 65536）标成「默认」，而「自动」**实际是按文件大小走阶梯**
+ *   —— 12 KB 的文件是 1024 字节/块。于是同一屏上「本次切法」（对）与候选表
+ *   那个「默认」（过期）会给出两个不同的“默认”，用户没法判断不点会怎样。
  */
+
+/**
+ * 这份文件走「自动」档时真正的块大小 —— 与 `effectiveSplit` 用**同一个函数**
+ * 算（口径只有一处，见 utils/split.js）。
+ */
+const autoBytesForPlan = computed(() => {
+  const size = planAdvice.value?.size || 0
+  if (!size) return null
+  return autoSegmentBytes(size, ladderOptsFrom(status.value))
+})
 const planRows = computed(() => {
   const a = planAdvice.value
   if (!a) return []
   const rows = (a.fewest?.alternatives || []).map((r) => ({ ...r, tags: [] }))
+  const auto = autoBytesForPlan.value
   const d = a.defaultBytes
-  if (d && !rows.some((r) => r.segment_bytes === d)) {
-    rows.push({
-      segment_bytes: d,
-      blocks: Math.ceil(a.size / d),
-      est_upload_ms: null,
-      est_verify_ms: null,
-      allowed: null,
-      note: '',
-      tags: [],
-    })
+  const add = (seg) => {
+    if (seg && !rows.some((r) => r.segment_bytes === seg)) {
+      rows.push({
+        segment_bytes: seg,
+        blocks: Math.ceil(a.size / seg),
+        est_upload_ms: null,
+        est_verify_ms: null,
+        allowed: null,
+        note: '',
+        tags: [],
+      })
+    }
   }
+  // ★ 「自动档」那一行必须在表里：它就是“什么都不点会发生什么”的答案。
+  add(auto)
+  add(d)
   rows.sort((x, y) => x.segment_bytes - y.segment_bytes)
   for (const r of rows) {
     if (r.segment_bytes === a.fewest?.segment_bytes) r.tags.push('最快')
     if (r.segment_bytes === a.finer?.segment_bytes) r.tags.push('最细')
-    if (r.segment_bytes === d) r.tags.push('默认')
+    if (r.segment_bytes === auto) r.tags.push('自动档')
+    // ★ 不再叫「默认」（审计 N1）：65536 只是**部署基准** —— 自动档算不出值时
+    //   拿它兜底。叫「默认」会让人以为不点建议就切这个，而实际是按文件大小走阶梯。
+    if (r.segment_bytes === d && d !== auto) r.tags.push('部署基准')
   }
   return rows
 })
@@ -179,9 +226,44 @@ function applyPlan(seg) {
   ElMessage.success(`已按这一档切：每块 ${uploadForm.segmentBytes} 字节`)
 }
 
-/** 这份文件是不是已经在池子里了（判据与 pool.addCard 的去重完全一致）。 */
+/**
+ * 把一份文件的下标切成**能一次发出去**的几片。
+ *
+ * ★★ 为什么必须切：块数**没有上限**（位置预算取消之后），而一次
+ *   `POST /api/query` 最多带 ``MAX_QUERY_INDICES`` 个下标。不切的话，
+ *   稍大的文件（> 8192 块）必然 422 —— 而那正是审计 F1：
+ *   “入池”是同一批接口里**唯一**没做保护的一条路。
+ */
+function splitQueryParts(indices) {
+  const out = []
+  for (let i = 0; i < indices.length; i += MAX_QUERY_INDICES) {
+    out.push(indices.slice(i, i + MAX_QUERY_INDICES))
+  }
+  return out
+}
+
+/**
+ * 每行只算一次切片与去重键。
+ *
+ * ★ 行对象每次拉列表都会新建，所以 WeakMap 不会持有旧数据；
+ *   而在**同一次渲染**里它把 `indices.join(',')` 从“每列一次”降到“每行一次”
+ *   （审计 F6：块数放开之后，这层开销是第一个会被感觉到的）。
+ */
+const rowPartsCache = new WeakMap()
+function rowParts(row) {
+  let v = rowPartsCache.get(row)
+  if (v === undefined) {
+    const parts = splitQueryParts(row.indices || [])
+    v = { parts, keys: parts.map((p) => p.join(',')) }
+    rowPartsCache.set(row, v)
+  }
+  return v
+}
+
+/** 这份文件的块是不是**全部**都在池子里了（判据与 pool.addCard 的去重完全一致）。 */
 function inPool(row) {
-  return pool.indexKeys.has((row.indices || []).join(','))
+  const { keys } = rowParts(row)
+  return keys.length > 0 && keys.every((k) => pool.indexKeys.has(k))
 }
 
 /**
@@ -201,6 +283,7 @@ async function addToPool(row, { silent = false } = {}) {
     if (!silent) ElMessage.warning('这份文件没有块下标')
     return false
   }
+  const { parts } = rowParts(row)
   const already = inPool(row)
   if (already && !silent) {
     try {
@@ -218,14 +301,21 @@ async function addToPool(row, { silent = false } = {}) {
   poolTimings.value = null
   try {
     const t0 = performance.now()
-    const { data } = await evidenceApi.query(indices, false)
+    let covered = 0
+    for (let i = 0; i < parts.length; i += 1) {
+      const { data } = await evidenceApi.query(parts[i], false)
+      covered += (data.indices || parts[i]).length
+      if (i === parts.length - 1) poolTimings.value = data.timings || null
+      pool.addCard({
+        // ★ 一片一张卡：超过单次上限的文件会被切成几片，标题里如实写清。
+        label: parts.length > 1
+          ? `${row.owner}/${row.file_key}（第 ${i + 1}/${parts.length} 片）`
+          : `${row.owner}/${row.file_key}`,
+        src: `来自文件列表 · ${row.block_count} 块`,
+        result: data,
+      })
+    }
     const ms = Math.round(performance.now() - t0)
-    pool.addCard({
-      label: `${row.owner}/${row.file_key}`,
-      src: `来自文件列表 · ${row.block_count} 块`,
-      result: data,
-    })
-    poolTimings.value = data.timings || null
     // ★ 耗时提示：**单文件**的取证是“把各节点的凭证聚合起来”，与块数近乎
     //   线性、很快；而一旦把**多份文件**的块放进同一次验证，就要在合并
     //   位置集上重算一份证据（秒级）。第一次入池就把这件事说清楚，
@@ -236,14 +326,17 @@ async function addToPool(row, { silent = false } = {}) {
     if (!silent) {
       ElMessage.success(
         already
-          ? `已刷新池子里那张卡（δ 指纹 ${data.delta_fp}，用时 ${ms} ms）`
-          : `已加入证据池：${(data.indices || indices).length} 块合成一份证据`
-              + `（用时 ${ms} ms）。跨文件验证会在合并位置集上重算证据，`
-              + `通常要 1~3 秒。`,
+          ? `已刷新池子里那张卡（用时 ${ms} ms）`
+          : parts.length > 1
+            ? `已加入证据池：${row.block_count} 块分成 ${parts.length} 片，`
+                + `每片各一份证据（用时 ${ms} ms）。单次取证上限 ${MAX_QUERY_INDICES} 块，`
+                + `与“文件能存多少块”无关。`
+            : `已加入证据池：${covered} 块合成一份证据（用时 ${ms} ms）。`
+                + `跨文件验证会在合并位置集上重算证据，通常要 1~3 秒。`,
       )
     }
   } catch {
-    // 403 / 409 的中文理由已由拦截器原样弹出（“只有所有者”那条同样适用）
+    // 403 / 409 / 422 的中文理由已由拦截器原样弹出（“只有所有者”那条同样适用）
     return false
   } finally {
     poolBusy.value = false
@@ -258,8 +351,9 @@ function buildFormData() {
   // 切法 → segment_bytes
   let seg = null
   if (uploadForm.splitMode === 'auto') {
-    // ★★ 「自动」= **后端部署默认切法**：不传 segment_bytes，由后端用
-    //   Settings.segment_bytes（1024 字节/块）。
+    // ★★ 「自动」= **不传 `segment_bytes`，由后端按文件大小走自动阶梯**
+    //   （`backend/config.py::auto_segment_bytes`：小文件 1 KB/块，大的逐档升，
+    //   块数压在 128 以内）。前端那份镜像在 `utils/split.js`，只用来算预览。
     //
     //   这里曾经写的是 ``seg = plan.value?.ok ? plan.value.segment_bytes : null``
     //   —— 那正是「点过一次问顾问之后，无论怎么传都只切一块」的根源：
@@ -338,6 +432,22 @@ async function tryDecrypt(file) {
     )
     return
   }
+  // ★★ 这一步是**整份**取回（`indices = null`）：响应 ≈ 密文 × 2（hex）
+  //    + 每块一份块密钥密文 + 约 8 KB 固定项（审计 N3 实测）。小文件无感，
+  //    大文件会外推到几十 MB —— 所以按钮上写明体积，超过阈值再问一次。
+  const estBytes = estimateCipherPackBytes(file.total_bytes, file.block_count)
+  if (estBytes > CIPHER_PACK_WARN_BYTES) {
+    try {
+      await ElMessageBox.confirm(
+        `这份文件 ${fmtBytes(file.total_bytes)}，整份取回密文大约 ${fmtBytes(estBytes)}。` +
+          '浏览器还要逐块解封块密钥、SM4 解密并重算分量，可能要等很久。',
+        '整份取回，量不小',
+        { confirmButtonText: '继续取回', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return // 用户点了取消
+    }
+  }
   const tip = ElMessage({ message: `正在浏览器里试解密 ${file.file_key} …`, duration: 0 })
   try {
     const { data: pack } = await filesApi.cipher(file.id, null)
@@ -389,18 +499,6 @@ async function tryDecrypt(file) {
  * ★ 确认框仍然必须有：删除不可撤销，密文与封装过的块密钥都会真的没了。
  *   这是**真的丢数据**，不能静默。
  */
-/**
- * 位置段 → 可读区间：``[[0, 20], [48, 2]]`` → ``0-19、48-49``。
- *
- * ★ 为什么不写 ``0+20``：那是“偏移 + 块数”的记账写法，和尾部再拼一个
- *   “20 块”放一起会变成 ``0+2020 块``，谁也读不出来。区间写法一眼能看懂，
- *   而“共几块”已经有独立的「块数」列，不必在这里重复。
- */
-function segText(segments) {
-  const out = (segments || []).map(([o, c]) => (c <= 1 ? `${o}` : `${o}-${o + c - 1}`))
-  return out.length ? out.join('、') : '—'
-}
-
 async function removeFile(row, { silent = false } = {}) {
   const parts = [
     `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块）。`,
@@ -466,27 +564,34 @@ async function poolAll() {
   if (!list.length) return
   poolAllBusy.value = true
   let ok = 0
+  //: 这一批往池子里**真的加了几张卡**。
+  //: ★ 与“几份”不是一回事：块数超过单次上限的文件会被切成几片，
+  //:   一篇一份证件、一片一张卡 —— 不说清的话，用户会以为“怎么多了这么多张”。
+  let cards = 0
   const tip = ElMessage({ message: `正在入池 0 / ${list.length} …`, duration: 0 })
   try {
     for (let i = 0; i < list.length; i++) {
       tip.message = `正在入池 ${i + 1} / ${list.length}：${list[i].file_key} …`
+      const before = pool.cards.length
       try {
         // ★ 按**返回值**计数，不是“调用过就算成功”（审计 F1）。
         if (await addToPool(list[i], { silent: true })) ok += 1
       } catch {
         /* 单份失败不打断 */
       }
+      cards += Math.max(0, pool.cards.length - before)
     }
   } finally {
     tip.close()
     poolAllBusy.value = false
   }
+  const split = cards > ok ? `（大文件按单次上限切成了几片，池子里共 ${cards} 张卡）` : ''
   if (ok === list.length) {
-    ElMessage.success(`一键入池：${ok} / ${list.length} 份已收进证据池`)
+    ElMessage.success(`一键入池：${ok} / ${list.length} 份已收进证据池${split}`)
   } else {
     ElMessage.warning(
       `一键入池：成功 ${ok} / ${list.length} 份，` +
-        `${list.length - ok} 份没进去（失败原因上面已经逐条说过）`,
+        `${list.length - ok} 份没进去（每份的失败原因上面都弹过）${split}`,
     )
   }
 }
@@ -608,12 +713,12 @@ onMounted(load)
             </div>
             <div v-else-if="uploadForm.splitMode === 'by_count'" class="mono">
               <span class="text-2">切成几块：</span>
-              <el-input-number v-model="uploadForm.blockCount" :min="1" :max="8192" />
+              <el-input-number v-model="uploadForm.blockCount" :min="1" :max="maxBlockCount" />
             </div>
 
             <div v-if="selectedFile" class="effective mono">
               本次切法：每块 {{ effectiveSplit.seg }} 字节<template v-if="effectiveBlocks"> · 约 {{ effectiveBlocks }} 块</template>
-              <span v-if="uploadForm.splitMode === 'auto'" class="text-3">（部署默认）</span>
+              <span v-if="uploadForm.splitMode === 'auto'" class="text-3">（按文件大小自动）</span>
             </div>
 
             <div class="nodes-pick">
@@ -644,7 +749,8 @@ onMounted(load)
           />
           <div class="plan-head">
             顾问给了 {{ planRows.length }} 种切法。<b>点某一行的「用这一档」才会采用</b>，
-            不点就按上面的「本次切法」走。带「最快 / 最细 / 默认」标签的是三种常见选择。
+            不点就按上面的「本次切法」走。带「最快 / 最细 / 自动档」标签的是三种常见选择；
+            「部署基准」是后端配置里那个基准块大小（自动档算不出值时才兜底用它）。
           </div>
           <div class="plan-table">
             <div class="pt-row pt-head mono">
@@ -737,19 +843,6 @@ onMounted(load)
           <el-table-column label="版本" width="70" align="center">
             <template #default="{ row }"><span class="mono">{{ row.version }}</span></template>
           </el-table-column>
-          <el-table-column label="位置段" min-width="150">
-            <template #default="{ row }">
-              <!-- ★ 新方案（一文件一向量）：界面按「文件 / 第几块」说话，
-                   这里给的是**内部坐标**（这份文件在全局素数表里占的段）。
-                   段可能有好几截 —— 追加时原段末尾被后来的文件占住了，
-                   就只能另起一段，所以“块号”与“位置号”本来就不该画等号。
-                   ★ 渲染成**区间**（0-19）而不是 `偏移+块数`：后者写作 `0+20`，
-                   再拼上尾部那个“20 块”就变成 `0+2020 块` —— 读不出来。 -->
-              <span class="mono" :title="`内部坐标：${row.segments?.length || 0} 段`">
-                {{ segText(row.segments) }}
-              </span>
-            </template>
-          </el-table-column>
           <el-table-column label="验证" width="80" align="center">
             <template #default>
               <span class="text-accent" title="谁都能验证">可验证</span>
@@ -766,7 +859,14 @@ onMounted(load)
               <el-button link type="primary" :loading="poolBusy" @click="addToPool(row)">
                 {{ inPool(row) ? '刷新' : '入池' }}
               </el-button>
-              <el-button link type="primary" @click="tryDecrypt(row)">试解密</el-button>
+              <el-button
+                link
+                type="primary"
+                :title="`会把整份密文取回来（约 ${fmtBytes(
+                  estimateCipherPackBytes(row.total_bytes, row.block_count),
+                )}）再在浏览器里解 —— 与「详情」页那条路一样`"
+                @click="tryDecrypt(row)"
+              >试解密</el-button>
               <el-button
                 v-if="row.is_mine"
                 link

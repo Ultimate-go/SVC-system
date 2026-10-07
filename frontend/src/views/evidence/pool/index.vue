@@ -7,7 +7,6 @@
  * - 按 delta_fp 判断作废（不是 n）。
  * - 「一次验这 N 份」→ verify-batch，两个耗时都显示，agree 不一致报警。
  * - 分解再聚合 4 步演示。
- * - 故障演练：勾选卡片后，把要发出去的那一份副本改坏一个值再验。
  * - **逐块指纹**：每张卡片可以展开看"这份证据覆盖的每个下标，它的分量指纹是多少"
  *   —— 跟着全局的「简略/详细」开关，也能在单张卡片上自己开合。
  */
@@ -19,6 +18,7 @@ import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
 import { systemApi } from '../../../api/system'
 import { span, fmtAgo } from '../../../utils/format'
+import { MAX_QUERY_INDICES } from '../../../utils/constants.js'
 // ★ 界面上要的是"第几块"（parseBlockRange），不是内部坐标（parseIndexRange）
 import { parseBlockRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
@@ -52,9 +52,6 @@ function toggleCard(card) {
 
 const batchRunning = ref(false)
 const batchResult = ref(null)
-
-const corruptResult = ref(null)
-const corruptRunning = ref(false)
 
 /* ---- 取回：**选文件 + 第几块**（主交互）----
  *
@@ -92,6 +89,13 @@ const disaggCard = computed(
 const disaggIndices = computed(() =>
   [...(disaggCard.value?.indices || [])].sort((a, b) => a - b),
 )
+
+/** 分解弹框里每一项的**显示文字**（**值仍然是全局下标** —— 那是发给后端的）。 */
+const disaggIdxMap = computed(() => indexToBlockMap(disaggCard.value))
+function idxLabel(i) {
+  const b = disaggIdxMap.value.get(Number(i))
+  return b === undefined ? String(i) : `第 ${b} 块`
+}
 const fromPos = computed(() => disaggIndices.value.indexOf(disaggFrom.value))
 const toPos = computed(() => {
   const n = disaggIndices.value.length
@@ -154,6 +158,115 @@ function cardScope(card) {
       .join('；')
   }
   return span(card.indices)
+}
+
+/**
+ * 这张卡上「全局下标 → 归属」的换算表：**哪份文件的第几块**（+ 所有者）。
+ *
+ * ★★ 为什么需要它：`/evidence/disagg` 的输入 K **必须**是全局下标
+ *   （它是在一条向量上做代数）。但全局下标是**内部坐标** —— 它由上传顺序
+ *   决定，既不该让人记、也不该出现在界面上（见本文件开头那段）。
+ *   所以规矩是：**内部的数留在内部，显示那一层一律换回“哪份文件的第几块”**。
+ *   （用户反馈：分解弹框里还在印 3159、3160 这种数。）
+ *
+ * 三种来源，按可靠度排：
+ *
+ * ① `result.refs` —— 后端逐下标给的归属，最权威（`/api/query` 会给）；
+ * ② `files[].block_indices` 与 `files[].indices`（`/api/query/files` 会给，两者同序）；
+ * ③ 本文件的位置区间是 `[offset, offset+n)`，块号 = 全局位置 − offset。
+ *
+ * 三样都没有（很旧的卡）⇒ 空表，显示层如实退回数字，**不猜**。
+ *
+ * ★ 为什么带上 `owner` / `file_key`：跨文件的卡（合并向量）上，两段都从
+ *   「第 0 块」数起 —— 不写清是哪份文件，一屏就是一行行重复的「第 0 块」
+ *   （实测撞到过）。所以换算表连归属一起给，显示层才有得区分。
+ */
+function indexToRefMap(card) {
+  const map = new Map()
+  if (!card) return map
+  for (const r of card.result?.refs || []) {
+    const b = Number(r.block_idx)
+    if (!Number.isFinite(b)) continue // 归属给了但块号缺：宁可不填，也别塞个 NaN
+    map.set(Number(r.global_index), {
+      block_idx: b,
+      owner: r.owner || '',
+      file_key: r.file_key || '',
+    })
+  }
+  if (map.size) return map
+  for (const f of card.files || card.result?.files || []) {
+    const who = { owner: f.owner || '', file_key: f.file_key || '' }
+    const bs = f.block_indices
+    const gs = f.indices
+    if (Array.isArray(bs) && Array.isArray(gs) && bs.length && bs.length === gs.length) {
+      gs.forEach((g, k) => map.set(Number(g), { block_idx: Number(bs[k]), ...who }))
+      continue
+    }
+    const off = Number(f.offset)
+    const nf = Number(f.n)
+    if (Number.isFinite(off) && Number.isFinite(nf)) {
+      for (const g of card.indices || []) {
+        if (g >= off && g < off + nf) map.set(Number(g), { block_idx: g - off, ...who })
+      }
+    }
+  }
+  return map
+}
+
+/** 只要块号的那份投影（分解弹框、卡片标题用）。 */
+function indexToBlockMap(card) {
+  const map = new Map()
+  for (const [g, r] of indexToRefMap(card)) map.set(g, r.block_idx)
+  return map
+}
+
+/**
+ * 给 `<BlockFingerprints>` 用的 `refs`（下标 → 块号 + 归属）。
+ *
+ * ★ 为什么要补：组件靠 `refs` 才能把行头写成「第几块」。池子这边原来**没传**，
+ *   于是它退回了数字 —— 一屏的全局下标（用户反馈看到的正是这个：盘古石那份
+ *   77 块，行头却是 12…88）。验证页两处都传了，这里漏了。
+ *
+ * 没有归属信息（很旧的卡）就传空数组：组件那边会如期退回数字，不编块号。
+ */
+function fpRefs(card) {
+  const m = indexToRefMap(card)
+  if (!m.size) return []
+  return (card.indices || []).map((i) => {
+    const r = m.get(Number(i))
+    return r
+      ? { global_index: i, block_idx: r.block_idx, owner: r.owner, file_key: r.file_key }
+      : { global_index: i, block_idx: null }
+  })
+}
+
+/** 一组全局下标 → 它们对应的**块号**（有一个算不出来就返回 null）。 */
+function blocksOf(card, list) {
+  const gs = Array.isArray(list) ? list : []
+  if (!gs.length) return null
+  const map = indexToBlockMap(card)
+  if (!map.size) return null
+  const out = []
+  for (const g of gs) {
+    const b = map.get(Number(g))
+    if (b === undefined) return null // 有一个算不出来就整组退回数字，不混着说
+    out.push(b)
+  }
+  return out
+}
+
+/**
+ * 把一组全局下标用**界面坐标**说出来。
+ *
+ * :param expand: ``true`` = 逐个列出块号；``false`` = 压成区间（「第 0-3 块」）。
+ * :returns: 换算不了时如实退回数字（不假装它是个块号）。
+ */
+function blockText(card, list, expand = false) {
+  const gs = Array.isArray(list) ? list : []
+  if (!gs.length) return '（空）'
+  const bs = blocksOf(card, gs)
+  if (!bs) return expand ? gs.join(', ') : span(gs)
+  return `第 ${expand ? bs.join(', ') : span(bs)} 块`
 }
 
 function cardTitle(card) {
@@ -272,38 +385,6 @@ async function batchVerify() {
     batchResult.value = { ok: false, message: detail, needsMerge }
   } finally {
     batchRunning.value = false
-  }
-}
-
-async function corruptVerify() {
-  const cards = pool.selectedCards
-  if (!cards.length) {
-    ElMessage.warning('先勾选一张卡片')
-    return
-  }
-  const c = cards[0]
-  const vals = c.result?.values
-  if (!vals || !vals.length) {
-    ElMessage.warning('这张卡没有可改坏的值')
-    return
-  }
-  corruptRunning.value = true
-  corruptResult.value = null
-  try {
-    // ★ 只改「要发出去的那一份副本」，不动池子、更不动服务器数据。
-    const items = [
-      {
-        indices: c.indices,
-        values: vals.map((v, i) => (i === 0 ? (BigInt(v) + 1n).toString() : v)),
-        proof: c.result.proof,
-      },
-    ]
-    const { data } = await evidenceApi.verifyBatch(items, true, false)
-    corruptResult.value = data
-  } catch (e) {
-    corruptResult.value = { ok: false, message: e?.response?.data?.detail || '演练失败' }
-  } finally {
-    corruptRunning.value = false
   }
 }
 
@@ -429,6 +510,15 @@ async function confirmCrossDisagg() {
     ElMessage.warning('这份文件在这张卡里没有块 —— 换一份试试')
     return
   }
+  // ★ 与「入池」同口径的闸门（审计 N6）：`blocks` 是这张卡在该文件区间内的
+  //   下标，正常构造下它是卡指数的子集、撞不上；但卡的来源一旦变多就会先炸。
+  if (blocks.length > MAX_QUERY_INDICES) {
+    ElMessage.warning(
+      `这份文件在这张卡里有 ${blocks.length} 块，超过一次能查的 ${MAX_QUERY_INDICES} 块 —— ` +
+        '先把它拆成几张小卡，再逐张拆。',
+    )
+    return
+  }
   crossRunning.value = true
   try {
     // ★★ 走**取回**那条路（`/api/query/files`），不是纯代数拆：
@@ -504,8 +594,8 @@ function groupHeadAt(i) {
       ? {
           title: '跨文件证据（合并向量）',
           note:
-            '由多份文件的承诺抬进一条合并向量后开的证据。它的下标属于那条合并向量，' +
-            '不是任何单份文件的下标 —— 分解时也不能按单文件块号去切。',
+            '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
+            '不按单份文件编号 —— 分解时也不能按单文件块号去切。',
         }
       : {
           title: '单文件证据',
@@ -516,8 +606,8 @@ function groupHeadAt(i) {
     return {
       title: '跨文件证据（合并向量）',
       note:
-        '由多份文件的承诺抬进一条合并向量后开的证据。它的下标属于那条合并向量，' +
-        '不是任何单份文件的下标 —— 分解时也不能按单文件块号去切。',
+        '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
+        '不按单份文件编号 —— 分解时也不能按单文件块号去切。',
     }
   }
   return null
@@ -547,6 +637,16 @@ const disaggCardFresh = computed(
 const refetching = ref(false)
 async function refetchCard(c) {
   if (!c) return
+  // ★★ 与「入池」「集合验证」同口径的闸门（审计 N6）：卡的指数虽然受上游约束
+  //   （入池已分片、集合验证有闸门），但这里是**最后一次**发给 /api/query 的
+  //   地方 —— 超了后端只会回一句 422。提前拦住，并说清怎么办。
+  if ((c.indices?.length || 0) > MAX_QUERY_INDICES) {
+    ElMessage.warning(
+      `这张卡覆盖 ${c.indices.length} 块，超过一次能查的 ${MAX_QUERY_INDICES} 块 —— ` +
+        '请回「文件与块」重新入池（那边会按上限自动切成几张卡）。',
+    )
+    return
+  }
   refetching.value = true
   try {
     const { data } = await evidenceApi.query(c.indices)
@@ -571,12 +671,12 @@ async function refetchCard(c) {
 function openDisagg() {
   const cards = pool.selectedCards
   if (!cards.length) {
-    ElMessage.warning('先勾选一张卡片（覆盖至少 2 个下标）')
+    ElMessage.warning('先勾选一张卡片（覆盖至少 2 块）')
     return
   }
   const many = cards.filter((x) => (x.indices?.length || 0) >= 2)
   if (!many.length) {
-    ElMessage.warning('勾中的卡片都只覆盖 1 个下标，拆不出真子集')
+    ElMessage.warning('勾中的卡片都只覆盖 1 块，拆不出真子集')
     return
   }
   const single = many.find((x) => cardFiles(x).length <= 1)
@@ -624,7 +724,7 @@ async function confirmDisagg() {
     disaggResult.value = data
     pool.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
     disaggOpen.value = false
-    ElMessage.success(`已拆出覆盖 ${K.length} 个下标的证据`)
+    ElMessage.success(`已拆出覆盖 ${K.length} 块的证据`)
   } catch (e) {
     disaggResult.value = { ok: false, message: e?.response?.data?.detail || '分解失败' }
   } finally {
@@ -714,6 +814,7 @@ onMounted(() => {
             v-if="isOpen(card)"
             :indices="card.indices"
             :values="card.result?.values || []"
+            :refs="fpRefs(card)"
             :len="24"
           />
         </div>
@@ -730,7 +831,7 @@ onMounted(() => {
          弹框挂在 body 上，所以放在模板哪个位置都不影响渲染。 -->
     <el-dialog v-model="crossOpen" title="分解（跨文件）—— 选一份文件" width="600px">
       <p class="note">
-        从这张跨文件的卡里，把**某一份文件**的那一部分**单独取回来**，
+        从这张跨文件的卡里，把「某一份文件」的那一部分「单独取回来」，
         得到一份属于它自己的、可以独立验证的证据。
         （跨文件的卡本身是在一条**合并向量**上开的，所以不能直接按单文件块号去拆；
         这里是按你选的那一份重新向节点取一次。）
@@ -801,24 +902,14 @@ onMounted(() => {
       <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" class="mt-2" />
     </div>
 
-    <div class="panel mt-3">
-      <h4 class="sec-title">故障演练</h4>
-      <div class="flex items-center gap-3">
-        <span class="text-2">把要发出去的那一份副本改坏一个值再验（不动池子，也不动服务器数据）</span>
-        <el-button :disabled="!pool.selectedCards.length" :loading="corruptRunning" @click="corruptVerify">演练</el-button>
-      </div>
-      <div v-if="corruptResult" class="mt-2">
-        <el-alert :type="corruptResult.ok ? 'error' : 'error'" :closable="false" :title="corruptResult.ok ? '异常：改坏了却仍然通过' : `被抓住：${corruptResult.code_name || corruptResult.message}`" />
-      </div>
-    </div>
-
     <div v-if="disaggResult" class="panel mt-3">
       <h4 class="sec-title">分解结果</h4>
       <div class="text-2" style="font-size: 13px">
-        从 {{ span(disaggResult.source_indices || []) }} 拆出 {{ span(disaggResult.indices || []) }}，
-        丢弃 {{ span(disaggResult.dropped || []) }}
+        从 {{ blockText(disaggCard, disaggResult.source_indices || []) }}
+        拆出 {{ blockText(disaggCard, disaggResult.indices || []) }}，
+        丢弃 {{ blockText(disaggCard, disaggResult.dropped || []) }}
       </div>
-      <p class="note">第 3 步不能省：要拆出新下标，得先把它取回来。</p>
+      <p class="note">第 3 步不能省：要拆出新块，得先把它取回来。</p>
     </div>
 
     <!--
@@ -847,9 +938,9 @@ onMounted(() => {
 
         <div class="dg-row">
           <span class="dg-lbl">这张卡覆盖</span>
-          <span class="mono">{{ disaggIndices.length }} 个下标</span>
+          <span class="mono">{{ disaggIndices.length }} 块</span>
           <el-button link type="primary" size="small" @click="showAllIndices = !showAllIndices">
-            {{ showAllIndices ? '收起完整下标' : '展开完整下标' }}
+            {{ showAllIndices ? '收起完整块号' : '展开完整块号' }}
           </el-button>
         </div>
         <!-- ★ 说清"这是哪份文件的证据"：分解的硬约束就是它必须只有一份文件。 -->
@@ -885,27 +976,30 @@ onMounted(() => {
           </el-button>
         </div>
         <div class="dg-idx" :class="{ open: showAllIndices }">
-          <span class="mono">{{ showAllIndices ? disaggIndices.join(', ') : span(disaggIndices) }}</span>
+          <span class="mono">{{ blockText(disaggCard, disaggIndices, showAllIndices) }}</span>
         </div>
+        <p class="note">
+          界面上只说「哪份文件的第几块」—— 全局下标是内部坐标，不摆出来。
+        </p>
 
         <div class="dg-row mt-2">
           <span class="dg-lbl">从哪分到哪</span>
           <el-select v-model="disaggFrom" style="width: 130px" filterable>
-            <el-option v-for="i in disaggIndices" :key="i" :value="i" :label="String(i)" />
+            <el-option v-for="i in disaggIndices" :key="i" :value="i" :label="idxLabel(i)" />
           </el-select>
           <span class="text-3">→</span>
           <el-select v-model="disaggTo" style="width: 130px" filterable>
-            <el-option v-for="i in disaggIndices" :key="i" :value="i" :label="String(i)" />
+            <el-option v-for="i in disaggIndices" :key="i" :value="i" :label="idxLabel(i)" />
           </el-select>
         </div>
 
         <div class="dg-preview">
-          <div>拆出 π_K：<span class="mono">{{ span(disaggK) }}</span>（{{ disaggK.length }} 块）</div>
-          <div>丢弃：<span class="mono">{{ span(disaggDropped) }}</span>（{{ disaggDropped.length }} 块）</div>
+          <div>拆出 π_K：<span class="mono">{{ blockText(disaggCard, disaggK) }}</span>（{{ disaggK.length }} 块）</div>
+          <div>丢弃：<span class="mono">{{ blockText(disaggCard, disaggDropped) }}</span>（{{ disaggDropped.length }} 块）</div>
           <p v-if="!disaggDropped.length" class="dg-warn">
             丢弃为空 —— 这样等于原样复制一份，分解的意义在于「只留一部分」。把范围缩小一点。
           </p>
-          <p v-else class="note">分解不发任何网络请求；含「新」下标的证据得另外去取（第 3 步不能省）。</p>
+          <p v-else class="note">分解不发任何网络请求；含「新」块的证据得另外去取（第 3 步不能省）。</p>
         </div>
       </template>
       <template #footer>

@@ -109,9 +109,24 @@ class NodeRuntime:
                 continue
             S_I, Lam = saved["st"]
             I = tuple(saved["I"])
+            # ★★ 重建 δ 时**必须**把 identity 与 chunks 一并带上 ——
+            #    它们决定「第 i 块配哪个素数」（见 ``node_service/persist.py``
+            #    的 :meth:`_migrate` 与 ``client._delta_dict``）。
+            #    漏掉 identity 的后果不是启动就报错，而是**重启后一切看着
+            #    正常、下一次更新才以「S_I 校验失败」炸掉** —— 那时协调者、
+            #    库、网络全是好的，排查方向会被完全带偏。
             self.state.restore(
                 off,
-                Digest(U=int(U), C=int(C), n=int(n), offset=int(off)),
+                Digest(
+                    U=int(U),
+                    C=int(C),
+                    n=int(n),
+                    offset=int(off),
+                    chunks=tuple(
+                        (int(a), int(b)) for a, b in saved.get("chunks", ()) or ()
+                    ),
+                    identity=str(saved.get("identity", "") or ""),
+                ),
                 Opening(int(S_I), int(Lam), I),
                 I,
                 tuple(saved["FI"]),
@@ -654,16 +669,35 @@ class NodeRuntime:
 # ---------------------------------------------------------------------------
 
 def _delta_in(o: dict) -> Digest:
-    # ★ offset 必带：它是“哪一份向量”的标识（节点按它存视图）。
-    #   缺了它，新文件会退回第 0 段，把老文件那份视图覆盖掉。
+    r"""线格式 → :class:`~vds.digest.Digest`（与 ``client._delta_dict`` 一一对应）。
+
+    ★ 三个字段都是**前提**，少一个都会以极难归因的方式炸掉：
+
+    * ``offset`` 是“哪一份向量”的标识（节点按它存视图）。缺了它，
+      新文件会退回第 0 段，把老文件那份视图覆盖掉。
+    * ``chunks`` 让节点能建出“局部块号 → 素数”的视图（老路径）。
+    * ``identity`` 决定「第 ``i`` 块配哪个素数」（新路径）。**缺了它，
+      节点会静默退回旧路径查全局素数表** —— 于是 :math:`e_i` 全错，
+      节点侧 :meth:`~core.node_state.NodeState.absorb` 报
+
+          S_I 校验失败：S_I^{e_I} ≠ U_n，S_I 被伪造或下标集合不对
+
+      而协调者只看到“有 N 台节点没跟上”。**这个坑真踩过**：
+      身份素数改造完成后本地 221 条断言全绿（走 LocalTransport），
+      跨进程每一次上传都 503。所以这一行不是可有可无的兼容代码。
+
+    ★ 缺字段时**退化成老路径**（``identity=""``）而不是报错 —— 这是有意的：
+    老协调者（改造前）发的请求体里本来就没有这个字段，而那时所有文件
+    都是老坐标，退化成老路径恰好是对的。
+    """
     raw = o.get("chunks") or []
     return Digest(
         U=int(o["U"]),
         C=int(o["C"]),
         n=int(o["n"]),
         offset=int(o.get("offset", 0)),
-        # ★ 位置段必须一起解 —— 节点靠它建“局部块号 → 素数”的视图。
         chunks=tuple((int(a), int(b)) for a, b in raw),
+        identity=str(o.get("identity", "") or ""),
     )
 
 
@@ -828,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--token",
         default=os.environ.get("VDS_NODE_TOKEN", ""),
-        help="节点令牌，默认取环境变量 VDS_NODE_TOKEN。**不能为空**（节点不鉴权就不许跑）",
+        help="节点令牌，默认取环境变量 VDS_NODE_TOKEN。「不能为空」（节点不鉴权就不许跑）",
     )
     args = ap.parse_args(argv)
 

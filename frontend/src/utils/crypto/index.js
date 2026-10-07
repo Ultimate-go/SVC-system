@@ -150,13 +150,26 @@ export function openBlocks(pack, sk, opts = {}) {
   }
 
   // ---- ① 素数：当成不可信输入 ----
+  //
+  // ★ 位长要用 `primes.bits`（**这次这些素数**的位长），而不是 `crs.prime_bits`
+  //   （那是方案参数 `l+1`）。老坐标下两者都是 257；新坐标（按块身份派生）
+  //   下前者是 128 —— 混用会把每一份新文件都当成"不在 [2^256, 2^257) 内"。
+  // ★ `ordered` 决定要不要查单调：老坐标（全局表）要，新坐标（哈希派生）不要。
+  const ordered = pack.primes.ordered !== false
+  const primesBits = pack.primes.bits ?? primeBits
   const primeCheck = checkPrimes({
-    bits: primeBits,
+    bits: primesBits,
     start: BigInt(pack.primes.start),
     indices: pack.primes.indices,
     values: pack.primes.values.map((v) => BigInt(v)),
+    // ★ 起点锚只在**老坐标**下比对：新坐标的 `start` 只是 `2^{bits-1}` 这个
+    //   下界，与旧部署（或另一份老文件）记下的 `2^256` 不是一回事 ——
+    //   硬比会把第一次遇到新文件当成"换了考场"，直接把人锁在门外。
     expectStart:
-      crsAnchor && crsAnchor.prime_start != null ? BigInt(crsAnchor.prime_start) : null,
+      ordered && crsAnchor && crsAnchor.prime_start != null
+        ? BigInt(crsAnchor.prime_start)
+        : null,
+    ordered,
   })
   if (!primeCheck.ok) {
     throw new Error(`素数检查未通过，拒绝继续：${primeCheck.message}`)
@@ -292,6 +305,8 @@ export function openBlocks(pack, sk, opts = {}) {
     crsVerdict,
     /** 本次**实际生效**的群参数（本地锚优先）。 */
     crs: { N: String(N), prime_bits: primeBits, remote_fp: crsFingerprint(remoteN) },
+    /** 本次交付的素数有多长、有没有顺序（新老坐标不同，界面要如实显示）。 */
+    primesInfo: { bits: primesBits, ordered },
     delta: remote,
     /** 本地钉住的那一份 δ（没钉过就是 null）。 */
     localDelta: local,

@@ -27,6 +27,7 @@ import { usePoolStore } from '../../../stores/pool'
 import { useThemeStore } from '../../../stores/theme'
 import { systemApi } from '../../../api/system'
 import { fmtBytes, span } from '../../../utils/format'
+import { MAX_QUERY_INDICES } from '../../../utils/constants'
 // ★ 界面上要的是"第几块"（parseBlockRange）；全局下标只是**高级**里的逃生口
 import { parseBlockRange, parseIndexRange } from '../../../utils/validate'
 import PageHeader from '../../../components/common/PageHeader.vue'
@@ -96,8 +97,10 @@ const allFiles = ref([])
 const loadError = ref('')
 //: 用户勾了哪几个（存文件 id）
 const pickedIds = ref([])
-//: 最近一次看到的全局块数 —— 用来判"这块还在不在"
-const currentN = ref(null)
+// ★ 以前这里存的是 /api/status 的 ``blocks``，再用 `i >= n` 判“这块还在不在”。
+//   删过**中间**那份文件之后会留下空洞（位置段永不回收），而被删掉的
+//   往往**不是**下标最大的那批 —— 那个判据两头都错（审计 F3）。
+//   现在改用「存活下标集合」（见 loadFiles 里的 basket.syncLive）。
 
 const owners = computed(() => [...new Set(allFiles.value.map((f) => f.owner))].sort())
 
@@ -106,6 +109,21 @@ const owners = computed(() => [...new Set(allFiles.value.map((f) => f.owner))].s
  *  ⚠️ 以前这里写的是 `f.n` —— 而 `/api/files` **不返回 `n`**，
  *  于是 `s + undefined` 让整句变成“共 NaN 块”。改与列表页同一口径：`block_count`。 */
 const totalBlocks = computed(() => allFiles.value.reduce((s, f) => s + (f.block_count || 0), 0))
+
+/**
+ * 当前**存活下标的最大值**（所有文件 ``last_index`` 里最大的那个）。
+ *
+ * ★★ 判“这份文件能不能**整份删掉**”要看它，**不能**用 `blocks - 1`：
+ *   删过中间那份文件之后会留下空洞（段永不回收），于是 `blocks` 会
+ *   **小于**某个仍然有效的 `last_index` —— 结果唯一那份删得动的文件反而
+ *   被标成“不可删”，“只看末尾可删”这个筛选恒为空（审计 F4，实测复现）。
+ *
+ *   ``slots_allocated``（= `registry.next_offset`）也不能当它用：
+ *   那是“下一个待分配的槽位”，比存活最大值还大。
+ */
+const maxLiveIndex = computed(() =>
+  allFiles.value.reduce((m, f) => Math.max(m, Number(f.last_index ?? -1)), -1),
+)
 
 //: 拉取框里最多铺多少个文件芯片，剩下的折成一句「还有 N 份…」。
 const PULL_CHIP_MAX = 24
@@ -116,9 +134,10 @@ const pullRest = computed(() => Math.max(0, allFiles.value.length - PULL_CHIP_MA
  * 给每个文件补两个**派生字段**（后端不提供，前端算）：
  *
  * * ``inBasket`` —— 这份文件已经有多少块在集合里；
- * * ``tailDeletable`` —— 它能不能**整份删掉**（最后一块正好在向量末尾）。
- *   判据是 ``last_index === n-1``：方案只允许从向量末尾往前删，
- *   所以只有排在最后的文件删得动（见后端 files.py 的删除说明）。
+ * * ``tailDeletable`` —— 它能不能**整份删掉**（该文件拥有当前**存活**下标的最大值）。
+ *   方案只允许从向量末尾往前删，所以只有“排在最后”的那份文件删得动
+ *   （见后端 files.py 的删除说明）。判据必须是 ``maxLiveIndex``，
+ *   不是 `blocks - 1` —— 理由见上面那段。
  */
 const rows = computed(() =>
   allFiles.value.map((f) => {
@@ -126,7 +145,7 @@ const rows = computed(() =>
     return {
       ...f,
       inBasket: basket.countOf(indices),
-      tailDeletable: indices.length > 0 && f.last_index === (currentN.value ?? -1),
+      tailDeletable: indices.length > 0 && Number(f.last_index) === maxLiveIndex.value,
     }
   }),
 )
@@ -195,10 +214,15 @@ async function loadFiles() {
 
     const n = typeof st?.data?.blocks === 'number' ? st.data.blocks : null
     if (typeof n === 'number') {
-      currentN.value = n
-      // 让集合知道"现在一共多少块" —— 它要据此标出已经被删掉的下标
+      // 旧判据的傅底（拿不到 /api/files 时用）
       basket.syncN(n)
     }
+    // ★ 更准的那一份：**当前还活着哪些下标**（各文件 ``indices`` 的并集）。
+    //   集合据此标出“这几块已经被删了” —— 只看总数会被“删中间留下的空洞”
+    //   骗到：活着的块被标红、真删的反而标不出来（审计 F3）。
+    const live = new Set()
+    for (const f of list) for (const i of f.indices || []) live.add(i)
+    basket.syncLive([...live])
     if (list.length && list[0].delta_fp) pool.syncDelta({ fp: list[0].delta_fp, n })
 
     // 刷新后可能少了几份文件：把已经不在的人从勾选里摘掉
@@ -315,8 +339,10 @@ async function verifyBasket() {
     ElMessage.warning('集合是空的 —— 先在上面筛一遍，把要验的文件收进集合')
     return
   }
-  if (basket.size > 8192) {
-    ElMessage.warning(`集合里有 ${basket.size} 块，超过单次上限 8192 —— 请分批验`)
+  if (basket.size > MAX_QUERY_INDICES) {
+    ElMessage.warning(
+      `集合里有 ${basket.size} 块，超过单次上限 ${MAX_QUERY_INDICES} —— 请分批验`,
+    )
     return
   }
   // ★ 集合**可以跨文件**：``POST /api/query`` 接的就是全库下标，遇到多份文件时
@@ -455,7 +481,7 @@ async function addBlocksPrompt(f) {
 const basketFiles = computed(() =>
   (basketResult.value?.files || []).map((f) => ({
     name: `${f.owner} / ${f.file_key}`,
-    scope: `${f.n} 块 · 位置段从 ${f.offset} 起`,
+    scope: `${f.n} 块`,
   })),
 )
 
@@ -473,7 +499,47 @@ function clearBasket() {
   basketError.value = ''
 }
 
-/** 报告里"集合中没被这次结论覆盖"的下标（响应缺的 + 已经被删掉的）。 */
+/**
+ * 集合里的全局下标 → 「哪份文件的第几块」。
+ *
+ * ★★ 为什么需要它：全局下标是**内部坐标**（上传顺序的副产物），界面上只说
+ *   “哪份文件的第几块”（用户反馈：分解/集合这些地方还在印 3159、3160 这种数）。
+ *   好在集合项自己就带归属（`addFile` / `addResult` 收进来时记下的
+ *   `owner / file_key / block_idx`），所以这里是现成的，不用额外请求。
+ *
+ * 做一次 Map 是因为 :func:`basketText` 要按几十上百个下标查它（别 O(n²)）。
+ */
+const basketItemMap = computed(() => {
+  const m = new Map()
+  for (const it of basket.items) m.set(it.i, it)
+  return m
+})
+
+/** 一组全局下标 → 界面坐标（按文件归并，如「病历A 第 0-3 块（4 块）」）。 */
+function basketText(list) {
+  const gs = Array.isArray(list) ? list : []
+  if (!gs.length) return '（空）'
+  const byFile = new Map()
+  let unknown = 0
+  for (const i of gs) {
+    const it = basketItemMap.value.get(Number(i))
+    if (!it || it.block_idx === null || it.block_idx === undefined) {
+      unknown += 1
+      continue
+    }
+    const name = it.file_key || '?'
+    if (!byFile.has(name)) byFile.set(name, [])
+    byFile.get(name).push(it.block_idx)
+  }
+  const parts = [...byFile.entries()].map(
+    ([name, bs]) => `${name} 第 ${span(bs)} 块（${bs.length} 块）`,
+  )
+  // ★ 老项（从“按全局下标”那条路收进来时才可能没有归属）如实说，不编块号。
+  if (unknown) parts.push(`${unknown} 块没有归属信息`)
+  return parts.join('；')
+}
+
+/** 报 告里"集合中没被这次结论覆盖"的下标（响应缺的 + 已经被删掉的）。 */
 const basketMissed = computed(() => {
   const got = new Set(basketResult.value?.indices || [])
   return basket.indices.filter((i) => !got.has(i))
@@ -573,28 +639,45 @@ async function runQuery() {
  *   （每个全局下标 → 哪个文件的第几块），拿不到归属时如实说“没有归属信息”。
  */
 const resultFiles = computed(() => {
-  // ★ 优先用响应里的 files：它直接说"哪份文件的第几块"（block_indices），
-  //   而这正是界面该说的话。退回 refs 只是为了兼容旧的响应形状。
-  const out = []
-  for (const f of result.value?.files || []) {
-    const blocks = f.block_indices || f.indices || []
-    out.push({
+  // ★★ 数据源是响应里的 **refs**（每个全局下标 → 哪个文件的第几块）——
+  //   它是**齐全**的。
+  //
+  //   以前这里优先读 ``files[].block_indices``，而 ``/api/query`` 的 ``files[]``
+  //   **根本没有**这个字段（只有 ``offset / n / delta_fp`` 那份账目摘要 ——
+  //   带 ``block_indices`` 的是 ``/api/query/files``）。于是每一份都显示
+  //   “本次覆盖 0 块”；又因为“每份文件都 push 了一行”，下面那段本来正确的
+  //   ``refs`` 回退分支**永远跑不到**（审计 F2，实测复现）。
+  const refs = result.value?.refs || []
+  if (refs.length) {
+    const byFile = new Map()
+    for (const r of refs) {
+      const name = `${r.owner} / ${r.file_key}`
+      const e = byFile.get(name) || { name, blocks: [] }
+      e.blocks.push(Number(r.block_idx))
+      byFile.set(name, e)
+    }
+    return [...byFile.values()].map((e) => ({
+      name: e.name,
+      blocks: e.blocks.length,
+      scope: `本次覆盖第 ${span(e.blocks)} 块`,
+    }))
+  }
+  // 没有 refs（比如空结果）时退回响应里的账目摘要：用**实际问到的下标**
+  // 与本文件的区间 ``[offset, offset+n)`` 求交 —— 宁可算出 0，也不能
+  // 因为“字段不存在”就把每一份都写成 0。
+  // ★★ 求交之后再减去 `offset`（审计 N7）：截出来的是**全局下标**，
+  //   而上面 refs 分支用的是 `block_idx`（文件内块号）。两套坐标混在同一处，
+  //   一旦 refs 变成空的就会打出一串“第 3159 块”。
+  const asked = result.value?.indices || []
+  return (result.value?.files || []).map((f) => {
+    const off = Number(f.offset) || 0
+    const hit = asked.filter((i) => i >= off && i < off + Number(f.n)).map((i) => i - off)
+    return {
       name: `${f.owner} / ${f.file_key}`,
-      blocks: blocks.length,
-      scope: blocks.length ? `本次覆盖第 ${span(blocks)} 块` : '本次覆盖 0 块',
-    })
-  }
-  if (out.length) return out
-  const map = new Map()
-  for (const r of result.value?.refs || []) {
-    const name = `${r.owner} / ${r.file_key}`
-    map.set(name, (map.get(name) || 0) + 1)
-  }
-  return [...map.entries()].map(([name, blocks]) => ({
-    name,
-    blocks,
-    scope: `本次覆盖 ${blocks} 块`,
-  }))
+      blocks: hit.length,
+      scope: hit.length ? `本次覆盖第 ${span(hit)} 块` : '本次覆盖 0 块',
+    }
+  })
 })
 
 
@@ -660,22 +743,24 @@ async function runRegistry() {
     </div>
 
     <!-- ============================================================= -->
-    <!-- ⓪′ 查登记表（内部坐标工具）                                      -->
+    <!-- ⓪′ 查存储槽位（内部坐标工具）                                    -->
     <!-- ============================================================= -->
     <div class="panel mb-3">
-      <h4 class="sec-title">查登记表（全局下标 → 谁的第几块、存在哪台）</h4>
+      <h4 class="sec-title">查存储槽位（槽位号 → 谁的第几块、存在哪台）</h4>
       <p class="text-3" style="font-size: 12px; line-height: 1.7; margin: 0 0 10px; max-width: 76ch">
-        登记表是内部坐标：全局下标把所有文件的位置段串成一条向量。
-        平时不用看它 —— 排查“日志里那个下标到底是谁的块”时用它。
+        <b>这不是密码学坐标</b>：改造后「第 i 块配哪个素数」由<b>块身份</b>派生
+        （<span class="mono">H(身份‖块号)</span>），与槽位号毫无关系 ——
+        槽位只表示“密文放在存储节点的哪个位置”。
+        平时不用看它，排查“日志里那个编号到底是谁的块”时用它。
       </p>
       <div class="query-form">
-        <el-input v-model="regIndex" placeholder="全局下标，如 3" style="width: 160px" />
+        <el-input v-model="regIndex" placeholder="槽位号，如 3" style="width: 160px" />
         <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
       </div>
       <div v-if="regResult" class="mt-3">
         <template v-if="!regResult.error">
           <div class="mono text-1" style="font-size: 13px">
-            下标 {{ regResult.global_index }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ regResult.block_idx }} 块
+            槽位 {{ regResult.global_index }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ regResult.block_idx }} 块
           </div>
           <div class="text-2 mono" style="font-size: 12px">
             holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
@@ -754,7 +839,7 @@ async function runRegistry() {
         <div v-if="result.values?.length" class="fp-block">
           <div class="fp-head">
             <span class="text-2" style="font-size: 12px">
-              这一份覆盖 {{ result.indices?.length || 0 }} 个下标
+              这一份覆盖 {{ result.indices?.length || 0 }} 块
             </span>
             <DetailToggle />
           </div>
@@ -768,8 +853,8 @@ async function runRegistry() {
         </div>
         <div v-if="result.refs?.length" class="refs mt-2">
           <div v-for="r in result.refs" :key="r.global_index" class="ref-row">
-            <span class="mono">{{ r.global_index }}</span>
-            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }} 的第 {{ r.block_idx }} 块</span>
+            <span class="mono">第 {{ r.block_idx }} 块</span>
+            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
             <span class="mono text-3">holder: {{ result.holders?.[r.global_index] }}</span>
           </div>
         </div>
@@ -889,7 +974,6 @@ async function runRegistry() {
             <span class="mono text-2">{{ f.block_count }} 块</span>
             <span class="mono text-2">{{ fmtBytes(f.total_bytes) }}</span>
             <span class="mono text-3">v{{ f.version }}</span>
-            <span class="mono text-3">{{ span(f.indices) }}</span>
             <span v-if="f.can_decrypt" class="tag-ok">可解密</span>
             <span v-if="f.inBasket" class="tag-ok mono">已入集合 {{ f.inBasket }}/{{ f.block_count }}</span>
             <el-button link type="primary" size="small" @click="basket.addFile(f)">收整份</el-button>
@@ -938,7 +1022,7 @@ async function runRegistry() {
         class="mt-2"
         type="warning"
         :closable="false"
-        :title="`集合里有 ${basket.goneIndices.length} 块已经不在向量里了（现在只有 ${basket.n} 块）：${span(basket.goneIndices)}`"
+        :title="`集合里有 ${basket.goneIndices.length} 块已经不在库里了 —— ${basketText(basket.goneIndices)}`"
       />
 
       <!-- 详情：每个下标是谁的第几块（主界面极简，这里才铺出来） -->
@@ -946,13 +1030,12 @@ async function runRegistry() {
         <div v-for="g in basketGroups" :key="g.name" class="grp">
           <div class="grp-head">
             <span class="mono">{{ g.name }}</span>
-            <span class="mono text-3">{{ g.blocks }} 块 · {{ span(g.indices) }}</span>
+            <span class="mono text-3">{{ g.blocks }} 块 · {{ basketText(g.indices) }}</span>
             <el-button link type="danger" size="small" @click="removeGroupFromBasket(g.name)">移除这组</el-button>
           </div>
           <div class="grp-list">
             <span v-for="it in g.items" :key="it.i" class="item">
-              <span class="mono">{{ it.i }}</span>
-              <span class="mono text-3">{{ it.block_idx === null ? '第 ? 块' : `第 ${it.block_idx} 块` }}</span>
+              <span class="mono">{{ it.block_idx === null || it.block_idx === undefined ? '第 ? 块' : `第 ${it.block_idx} 块` }}</span>
               <el-button link type="danger" size="small" @click="removeFromBasket(it.i)">×</el-button>
             </span>
           </div>
@@ -970,7 +1053,7 @@ async function runRegistry() {
       </div>
       <p class="note">
         一次请求把整个集合验完，<strong>跨文件也行</strong>：
-        同一份文件内的下标子集直接聚合（快），跨多份文件时后端在「合并位置集」上
+        同一份文件内的块直接聚合（快），跨多份文件时后端在「合并位置集」上
         重算一份证据（秒级）—— 两种都只出<strong>一份</strong>证据、一次验证。
         验证完的报告在下面，也会自动进证据池。
       </p>
@@ -996,13 +1079,13 @@ async function runRegistry() {
           <el-alert
             type="warning"
             :closable="false"
-            :title="`这次的结论没覆盖集合里的 ${basketMissed.length} 块：${span(basketMissed)}`"
+            :title="`这次的结论没覆盖集合里的 ${basketMissed.length} 块：${basketText(basketMissed)}`"
           />
         </div>
         <div v-if="detailed || basketDetailed" class="refs mt-2">
           <div v-for="r in basketRefs" :key="r.global_index" class="ref-row">
-            <span class="mono">{{ r.global_index }}</span>
-            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }} 的第 {{ r.block_idx }} 块</span>
+            <span class="mono">第 {{ r.block_idx }} 块</span>
+            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
             <span class="mono text-3">holder: {{ r.holder }}</span>
           </div>
         </div>

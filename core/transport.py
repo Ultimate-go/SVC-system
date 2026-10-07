@@ -550,6 +550,11 @@ class LocalTransport:
                         #   丢了的话重启后节点会以为自己的位置是“从 offset 起
                         #   连续 n 个”，后续每一次更新都会因 e_i 取错而失败。
                         "chunks": tuple(state.delta_of(off).chunks),
+                        # ★ 身份同理，而且**更要紧**：新方案下 e_i 完全由它决定。
+                        #   漏了它，节点会退回“查全局素数表”那条老坐标，
+                        #   而协调者用的是身份坐标 —— 两边素数不同，
+                        #   下一次更新会以「ShamirTrick 同源自检失败」收场。
+                        "identity": getattr(state.delta_of(off), "identity", "") or "",
                         "st": (
                             state.st_of(off).S_I,
                             state.st_of(off).Lambda_I,
@@ -583,6 +588,8 @@ class LocalTransport:
                         chunks=tuple(
                             (int(a), int(b)) for a, b in row.get("chunks", ())
                         ),  # type: ignore[union-attr]
+                        # 新方案：坐标由身份决定，重启后必须原样恢复
+                        identity=str(row.get("identity", "") or ""),
                     ),
                     Opening(int(S_I), int(Lambda_I), tuple(row["I"])),  # type: ignore[arg-type]
                     tuple(row["I"]),  # type: ignore[arg-type]

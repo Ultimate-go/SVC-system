@@ -44,6 +44,7 @@ __all__ = [
     "AuditRow",
     "RevokedTokenRow",
     "ReplayRow",
+    "PendingWriteRow",
     "utcnow",
 ]
 
@@ -90,6 +91,32 @@ class MetaRow(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class PendingWriteRow(Base):
+    """**待补推现场**——写失败之后留在盘上的那一份（全库只有一行，``id=1``）。
+
+    为什么要有它（实测踩过）：现场原来只在**内存**里（
+    :attr:`core.store.VectorStore._pending` 与 ``manager._finish_cb``）。
+    一旦进程没了，现场就永久丢失 —— 而**节点上已经跟进的那几台不会回退**。
+    于是重启时启动守卫看到"节点跑在前面"，报一句
+    「存储节点与协调者不同步，拒绝启动」就把整个系统**锁死**，
+    而唯一出路是人工去每台节点上清那半段。
+
+    落库之后重启就能接着办：先恢复现场（守卫也知道"跑在前面"是预期的），
+    再把那次更新补推给没跟上的几台。
+
+    ★ 里面确实包含**密文**（``payloads`` 就是没送出去的那几份请求体）。
+    这不是多出来的暴露面：同一份密文在存储节点上本来就有，而且
+    它没送出去时这是**唯一**的一份 —— 不存下来，那次写就只能丢。
+    块密钥依旧是密文（``blocks.key_ct`` 那条性质不变）。
+    """
+
+    __tablename__ = "pending_write"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # 恒为 1
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class FileDeltaRow(Base):
     """**一份文件一条**向量摘要 :math:`\\delta = ((U, C), n)`。
 
@@ -119,6 +146,12 @@ class FileDeltaRow(Base):
     delta_C: Mapped[str] = mapped_column(Text, nullable=False)
     delta_n: Mapped[int] = mapped_column(Integer, nullable=False)
     chunks_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    #: ★ 本文件的**身份** ``"<owner>\x1f<file_key>"`` —— 新方案里
+    #: 「第 ``i`` 块配哪个素数」完全由它决定（``H(owner‖file_key‖i)``）。
+    #: 空串 = **老坐标**（查全局素数表第 ``offset+i`` 个）。
+    #: 落库时必须存 —— 丢了它，重启后这份文件会退回老坐标，
+    #: 而它已经用身份坐标算过 ``U/C``，验证必然失败。
+    identity: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +312,10 @@ class NodeStateRow(Base):
     delta_n: Mapped[int] = mapped_column(Integer, nullable=False)
     #: 位置段 ``[[起点, 长度], ...]``（JSON）。空 = 单段。
     delta_chunks: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    #: ★ 同上：节点侧也必须知道这份文件是哪个坐标，否则它算出的
+    #: ``e_i`` 与协调者不同，下一次更新的 Υ∆ 校验会失败
+    #: （报错长成「ShamirTrick 同源自检失败」，指不出真正原因）。
+    delta_identity: Mapped[str] = mapped_column(Text, nullable=False, default="")
     S_I: Mapped[str] = mapped_column(Text, nullable=False)
     Lambda_I: Mapped[str] = mapped_column(Text, nullable=False)
     #: 下标集合与对应的值，JSON 数组

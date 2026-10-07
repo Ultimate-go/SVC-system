@@ -8,6 +8,9 @@
 ------
 * ``meta``  —— 公开参数 ``(N, g, l, n_max)`` 与自己的 ``node_id``
 * ``state`` —— **每份参与的文件一行**：``(offset, δ, st, I, F_I)``
+  —— 其中 δ 除 ``(U, C, n)`` 外**还存** ``identity`` 与 ``chunks``
+  （见 :meth:`NodeDB._migrate`，那是“第 i 块配哪个素数”的前提，
+  不存就会变成“重启后下一次更新才炸”）
 * ``blobs`` —— 自己那几段密文，键是 ``(offset, 局部块号)``
 
 ★ 为什么是“每份文件一行”：新方案里**每份文件是一条独立向量**，一台节点
@@ -35,14 +38,16 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS state (
-    offset    INTEGER PRIMARY KEY,
-    delta_U   TEXT NOT NULL,
-    delta_C   TEXT NOT NULL,
-    delta_n   INTEGER NOT NULL,
-    S_I       TEXT NOT NULL,
-    Lambda_I  TEXT NOT NULL,
-    I_json    TEXT NOT NULL,
-    FI_json   TEXT NOT NULL
+    offset      INTEGER PRIMARY KEY,
+    delta_U     TEXT NOT NULL,
+    delta_C     TEXT NOT NULL,
+    delta_n     INTEGER NOT NULL,
+    S_I         TEXT NOT NULL,
+    Lambda_I    TEXT NOT NULL,
+    I_json      TEXT NOT NULL,
+    FI_json     TEXT NOT NULL,
+    identity    TEXT NOT NULL DEFAULT '',
+    chunks_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS blobs (
     offset      INTEGER NOT NULL,
@@ -67,6 +72,33 @@ class NodeDB:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """把老库补上后加的列 —— ``CREATE TABLE IF NOT EXISTS`` **不会**改已有表。
+
+        ★ 为什么要这两列（而不是让 :meth:`NodeRuntime._reload` 自己凑）：
+        ``identity`` 决定「第 ``i`` 块配哪个素数」，``chunks`` 决定
+        「第 ``i`` 块是哪一段的哪一块」。两者都不在 ``(U, C, n)`` 里，
+        于是从库里重建 δ 时**必须**有它们；否则节点重启一次就退回旧路径，
+        之后每一次更新都会抬着旧素数算，以「S_I 校验失败」或
+        「算出的摘要与协调者不一致」收场 —— 而那时协调者与库都是好的，
+        排查方向会被完全带偏。
+
+        默认值写成“老坐标”（``''`` / ``[]``）而不是硬报错：老库里的文件
+        本来都是老坐标，补上空值恰好是对的。
+        """
+        have = {
+            str(r[1]) for r in self._conn.execute("PRAGMA table_info(state)")
+        }
+        if "identity" not in have:
+            self._conn.execute(
+                "ALTER TABLE state ADD COLUMN identity TEXT NOT NULL DEFAULT ''"
+            )
+        if "chunks_json" not in have:
+            self._conn.execute(
+                "ALTER TABLE state ADD COLUMN chunks_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
     # -- meta ---------------------------------------------------------------
 
@@ -101,19 +133,28 @@ class NodeDB:
     # -- 状态 ---------------------------------------------------------------
 
     def load_states(self) -> dict[int, dict]:
-        """读回**每份文件**的 ``(δ, st, I, F_I)``，按 ``offset`` 索引。"""
+        """读回**每份文件**的 ``(δ, st, I, F_I)``，按 ``offset`` 索引。
+
+        ★ δ 重建需要**四个**字段加上「配哪个素数」的两个前提
+        （``identity`` / ``chunks``，见 :meth:`_migrate`）—— 一声不响地
+        少读一个，症状是「重启后一切正常，直到下一次更新才炸」。
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
-                "       I_json, FI_json FROM state"
+                "       I_json, FI_json, identity, chunks_json FROM state"
             ).fetchall()
         out: dict[int, dict] = {}
-        for off, U, C, n, S_I, Lam, I_json, FI_json in rows:
+        for off, U, C, n, S_I, Lam, I_json, FI_json, ident, chunks_json in rows:
             out[int(off)] = {
                 "delta": (U, C, int(n)),
                 "st": (S_I, Lam),
                 "I": json.loads(I_json),
                 "FI": json.loads(FI_json),
+                "identity": ident or "",
+                "chunks": [
+                    (int(a), int(b)) for a, b in (json.loads(chunks_json or "[]"))
+                ],
             }
         return out
 
@@ -129,17 +170,22 @@ class NodeDB:
         return out
 
     def save_state(self, offset: int, *, delta, st, I, FI) -> None:
-        """整行覆写 —— 每份文件一行，一次更新只写一份。"""
+        """整行覆写 —— 每份文件一行，一次更新只写一份。
+
+        ★ ``identity`` / ``chunks`` 一并写：它们是 δ 的“配哪个素数”那一半，
+        与 ``(U, C, n)`` 同等重要（理由见 :meth:`_migrate`）。
+        """
         with self._lock:
             self._conn.execute(
                 "INSERT INTO state(offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
-                "                  I_json, FI_json) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "                  I_json, FI_json, identity, chunks_json) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(offset) DO UPDATE SET "
                 "  delta_U = excluded.delta_U, delta_C = excluded.delta_C, "
                 "  delta_n = excluded.delta_n, S_I = excluded.S_I, "
                 "  Lambda_I = excluded.Lambda_I, I_json = excluded.I_json, "
-                "  FI_json = excluded.FI_json",
+                "  FI_json = excluded.FI_json, identity = excluded.identity, "
+                "  chunks_json = excluded.chunks_json",
                 (
                     int(offset),
                     str(delta.U),
@@ -149,6 +195,10 @@ class NodeDB:
                     str(st.Lambda_I),
                     json.dumps(list(I)),
                     json.dumps(list(FI)),
+                    str(getattr(delta, "identity", "") or ""),
+                    json.dumps([
+                        [int(a), int(b)] for a, b in getattr(delta, "chunks", ()) or ()
+                    ]),
                 ),
             )
 

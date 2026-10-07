@@ -20,7 +20,39 @@ from dataclasses import dataclass
 
 from svc.types import Opening, fingerprint
 
-__all__ = ["Digest", "LocalView"]
+__all__ = ["Digest", "LocalView", "make_identity", "split_identity", "IDENTITY_SEP"]
+
+
+#: 身份串的字段分隔符 —— 与 :data:`svc.primegen_identity._SEP` 同一个字符。
+#: 用 ASCII Unit Separator 而不是 ``"-"`` 之类，是为了让 ``("a", "b-c")``
+#: 与 ``("a-b", "c")`` 拼出**不同**的串（否则两份不同文件会共用素数）。
+IDENTITY_SEP = "\x1f"
+
+
+def make_identity(owner: str, file_key: str) -> str:
+    """把 ``(owner, file_key)`` 打成一个身份串 —— :attr:`Digest.identity` 的格式。
+
+    ★ 全系统**只有这一处**定义这个格式。别在别处手写
+      ``f"{owner}\x1f{file_key}"`` —— 一旦分裂成两种写法，
+      「同一个块算出两个素数」这种错会极难定位。
+    """
+    owner, file_key = str(owner), str(file_key)
+    if not owner or not file_key:
+        raise ValueError("owner / file_key 都不能为空")
+    if IDENTITY_SEP in owner or IDENTITY_SEP in file_key:
+        raise ValueError(f"owner / file_key 不能含分隔符 {IDENTITY_SEP!r}")
+    return owner + IDENTITY_SEP + file_key
+
+
+def split_identity(identity: str) -> tuple[str, str]:
+    """:func:`make_identity` 的逆运算。格式不对时抛 :class:`ValueError`。"""
+    got = str(identity)
+    parts = got.split(IDENTITY_SEP)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"身份串格式不对（应为 'owner{IDENTITY_SEP}file_key'）：{got!r}"
+        )
+    return parts[0], parts[1]
 
 
 @dataclass(frozen=True, eq=False)
@@ -80,6 +112,29 @@ class Digest:
     #: ``()`` 表示「单段」，等价于 ``((offset, n),)`` —— 于是旧数据（以及
     #: 绝大多数只上传过一次的文件）不必额外记录任何东西。
     chunks: tuple[tuple[int, int], ...] = ()
+
+    #: ★★ 本文件的**身份** —— 新方案里决定「第 ``i`` 块配哪个素数」的东西。
+    #:
+    #: 格式：``"<owner>\x1f<file_key>"``（见 :mod:`svc.primegen_identity`）。
+    #: 空串 ``""`` 表示**老路径**：素数仍按全局位置 ``offset + i`` 取
+    #: （见 :class:`~core.session.ShiftedPrimeGen`），于是所有旧库、
+    #: 旧测试、旧序列化数据都能原样继续工作。
+    #:
+    #: 为什么放在这里：``offset`` 决定了「密文在节点上放哪个槽位」，
+    #: 而 ``identity`` 决定「密码学上配哪个素数」——**这两件事以前由同一个
+    #: 数兼任**。拆开之后传输层、节点服务、磁盘格式全都不用动，
+    #: 而密码学上的「全局下标」被彻底去掉：素数不再来自一张有容量上限的
+    #: 全局素数表，而是由块的身份直接派生（同样的块无论何时再次上传，
+    #: 拿到的都是同一个素数；也没有 8192 这种每文件块数上限）。
+    #:
+    #: .. important:::
+    #:
+    #:    **不参与相等性**（:meth:`_key` 里没有它）。理由与 ``chunks`` 相同：
+    #:    存储节点手里的 δ 可能是从公开参数 + 自己那份状态重建的，
+    #:    重建物未必带 identity，而"两个 ``(U, C, n, offset)`` 相同的 δ
+    #:    就是同一个摘要"这条判据必须保持成立，否则节点侧明明算对了
+    #:    却会被当成"没跟上"。
+    identity: str = ""
 
     @property
     def segments(self) -> tuple[tuple[int, int], ...]:

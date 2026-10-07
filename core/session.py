@@ -67,13 +67,16 @@ from svc import (
     is_probable_prime_screened,
     product_tree,
 )
+from svc.primegen_identity import IdentityPrimeGen
 
-from vds.digest import Digest
+from vds.digest import Digest, split_identity
 
 __all__ = [
     "GlobalSession",
     "ShiftedPrimeGen",
     "MappingPrimeGen",
+    "ExplicitPrimeGen",
+    "IdentityPrimeView",
     "make_crs",
     "get_primegen",
     "prime_cache_path",
@@ -504,6 +507,121 @@ class MappingPrimeGen:
                 f"前几个={list(self._pos[:4])})")
 
 
+class ExplicitPrimeGen:
+    """按**显式给定的素数表**取值 —— 跨文件合并时的素数视图。
+
+    :class:`ShiftedPrimeGen` 与 :class:`MappingPrimeGen` 都建立在「有一张全局
+    素数表」这个前提上（前者加个偏移，后者查一张下标对照表）。新方案里素数由
+    块身份派生，合并宇宙时手上只有「各文件的素数串接起来」这一串数 ——
+    没有表可查，于是用它直接承接。
+
+    接口与 :class:`~svc.primegen.PrimeGen` 同口径，
+    :func:`~svc.scheme.specialize` 认它。
+    """
+
+    __slots__ = ("_primes", "_bits")
+
+    def __init__(self, primes, *, bits: int | None = None) -> None:
+        self._primes = tuple(int(p) for p in primes)
+        if len(set(self._primes)) != len(self._primes):
+            raise ValueError(
+                "显式素数表里有重复项 —— 那会让两个下标配到同一个素数，"
+                "而 shamir_trick 在 gcd ≠ 1 时会「静默」算错"
+            )
+        self._bits = int(bits) if bits is not None else max(
+            (p.bit_length() for p in self._primes), default=0
+        )
+
+    @property
+    def max_sz(self) -> int:
+        return len(self._primes)
+
+    @property
+    def bits(self) -> int:
+        return self._bits
+
+    @property
+    def positions(self) -> tuple[int, ...]:
+        """新方案下「位置」就是素数本身。"""
+        return self._primes
+
+    def get(self, i: int) -> int:
+        return self._primes[int(i)]
+
+    def first(self, count: int) -> list[int]:
+        c = int(count)
+        if c < 0 or c > len(self._primes):
+            raise IndexError(f"要 {c} 个素数，但表里只有 {len(self._primes)} 个")
+        return list(self._primes[:c])
+
+    def get_many(self, indices) -> list[int]:
+        return [self.get(i) for i in indices]
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        return f"ExplicitPrimeGen({len(self._primes)} 个素数)"
+
+
+class IdentityPrimeView:
+    """按**块身份**取素数的视图 —— 惰性，不预先派生整份文件。
+
+    与 :class:`~svc.primegen_identity.IdentityPrimeGen` 的分工：
+
+    * 那个**预派生**：构造时就把 ``0..n-1`` 的素数全算完，``get(i)`` 是纯列表
+      下标 —— 适合 ``svc`` 层「遍历整份文件」的算法；
+    * 这个**惰性**：只算被问到的那一块 —— 适合「手上只有 ``delta``，
+      或者只知道要取哪几个块号」的路径（``primegen_for`` / ``e_of`` /
+      更新证明），构造时 ``n`` 甚至可以是 0。
+
+    两者共用 :class:`~svc.primegen_identity.IdentityPrimeGen` 的**类级缓存**，
+    所以同一块在两条路径上只会被真正派生一次（首次约 5.4ms，之后是字典查询）。
+
+    :param max_sz: 对外报告的容量。它**只用于让 ``svc`` 层做越界自检**
+        （:func:`~svc.scheme.specialize` 会拿 ``n`` 跟它比），**不代表真有上限**
+        —— 任何块号的素数都算得出来，这正是新方案优于
+        :class:`~svc.primegen.PrimeGen` 的地方。
+    """
+
+    __slots__ = ("_owner", "_file_key", "_max_sz", "_prime_bytes")
+
+    def __init__(
+        self, owner: str, file_key: str, *, max_sz: int, prime_bytes: int = 16
+    ) -> None:
+        if not owner or not file_key:
+            raise ValueError("身份素数视图必须同时有 owner 与 file_key")
+        self._owner = str(owner)
+        self._file_key = str(file_key)
+        self._max_sz = int(max_sz)
+        self._prime_bytes = int(prime_bytes)
+
+    @property
+    def max_sz(self) -> int:
+        return self._max_sz
+
+    @property
+    def bits(self) -> int:
+        return self._prime_bytes * 8
+
+    def get(self, i: int) -> int:
+        i = int(i)
+        if i < 0:
+            raise IndexError(f"块号不能为负：{i}")
+        return IdentityPrimeGen.prime_for(
+            self._owner, self._file_key, i, prime_bytes=self._prime_bytes
+        )
+
+    def get_many(self, indices) -> list[int]:
+        return [self.get(i) for i in indices]
+
+    def first(self, count: int) -> list[int]:
+        return [self.get(i) for i in range(int(count))]
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        return (
+            f"IdentityPrimeView({self._owner}/{self._file_key}, "
+            f"max_sz={self._max_sz})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 会话
 # ---------------------------------------------------------------------------
@@ -549,6 +667,59 @@ class GlobalSession:
 
     # -- 视图与缓存 ---------------------------------------------------------
 
+    def _with_primegen(self, pg) -> CRS:
+        """把 ``crs`` 换上另一个素数映射。
+
+        :class:`~svc.CRS` 是 frozen dataclass，所以这里是「造一个新的」而不是
+        「改一个」。原来的写法在三个地方各抄了一遍 ``try/except``，收口到这里。
+        """
+        try:
+            return dataclasses.replace(self.crs, primegen=pg)
+        except TypeError:  # CRS 不是 dataclass 时的退路
+            got = copy.copy(self.crs)
+            object.__setattr__(got, "primegen", pg)
+            return got
+
+    def _identity_max_sz(self, n: int) -> int:
+        """身份视图对外报告的容量。
+
+        取 ``max(n, n_max)`` 而不是 ``n``，是因为 :meth:`primegen_for` 在
+        「新文件第一次上传」（``n = 0``）时也要能用 —— 那时的块号是
+        ``0, 1, 2, …``，容量报 0 会让 ``svc`` 层直接判越界。
+        报 ``n_max`` 与**旧路径**的口径一致（旧路径那时返回的也是
+        ``crs.primegen.max_sz`` 即 ``n_max``）。
+        """
+        return max(int(n), self.n_max, 1)
+
+    def view_crs_identity(self, owner: str, file_key: str, n: int) -> CRS:
+        """★ 新方案：该文件的素数视图（**按块身份派生**）。
+
+        与 :meth:`view_crs` 的区别只在于「第 ``i`` 块的素数从哪来」：
+        那边是查全局素数表的第 ``offset + i`` 个，这边是按块身份现算
+        （``H(owner‖file_key‖i)``）。``svc`` 层看到的仍是
+        「局部下标 ``0..n-1``」，所以**密码学内核一行都不用改**。
+        """
+        return self._with_primegen(
+            IdentityPrimeView(owner, file_key, max_sz=self._identity_max_sz(n))
+        )
+
+    def view_crs_primes(self, primes) -> CRS:
+        """按**显式素数表**取视图 —— 跨文件合并（合并宇宙）走这条。
+
+        合并时手上没有「全局表 + 偏移」可用（素数是从各文件按身份派生的），
+        只有串接起来的那一串素数，所以直接用 :class:`ExplicitPrimeGen` 承接。
+        """
+        return self._with_primegen(ExplicitPrimeGen(primes))
+
+    def primes_of(self, owner: str, file_key: str, n: int) -> tuple[int, ...]:
+        """★ 新方案：该文件 ``n`` 块的素数，按块号顺序。
+
+        等价于旧的 ``(全局素数表第 offset+i 个)`` 那条路径，
+        但结果由块身份决定 —— 同一块无论何时再次上传都拿到同一个素数。
+        """
+        view = IdentityPrimeView(owner, file_key, max_sz=self._identity_max_sz(n))
+        return tuple(view.first(int(n)))
+
     def view_crs(self, offset: int) -> CRS:
         """该文件段的素数视图：``primegen.get(i)`` 给出素数表第 ``offset+i`` 个。
 
@@ -562,12 +733,7 @@ class GlobalSession:
             return self.crs
         got = self._view_cache.get(offset)
         if got is None:
-            pg = ShiftedPrimeGen(self.crs.primegen, offset)
-            try:
-                got = dataclasses.replace(self.crs, primegen=pg)
-            except TypeError:  # CRS 不是 dataclass 时的退路
-                got = copy.copy(self.crs)
-                object.__setattr__(got, "primegen", pg)
+            got = self._with_primegen(ShiftedPrimeGen(self.crs.primegen, offset))
             self._view_cache[offset] = got
         return got
 
@@ -584,12 +750,7 @@ class GlobalSession:
             return self.view_crs(pos[0])
         got = self._map_view_cache.get(pos)
         if got is None:
-            pg = MappingPrimeGen(self.crs.primegen, pos)
-            try:
-                got = dataclasses.replace(self.crs, primegen=pg)
-            except TypeError:  # CRS 不是 dataclass 时的退路
-                got = copy.copy(self.crs)
-                object.__setattr__(got, "primegen", pg)
+            got = self._with_primegen(MappingPrimeGen(self.crs.primegen, pos))
             self._map_view_cache[pos] = got
         return got
 
@@ -653,6 +814,15 @@ class GlobalSession:
         与 :meth:`crs_n_for` 的区别：这里**不要求** ``n > 0``，
         于是"新文件第一次上传"（``n = 0``）也能取到正确的表。
         """
+        ident = getattr(delta, "identity", "") or ""
+        if ident:
+            # ★ 新方案：素数按块身份派生，不再查全局表。
+            # 惰性视图在这里是必需的 —— ``n`` 可能是 0（新文件首传），
+            # 而调用方要取的块号可能是 0..k-1，预派生根本不知道该派生几个。
+            owner, file_key = split_identity(ident)
+            return IdentityPrimeView(
+                owner, file_key, max_sz=self._identity_max_sz(int(delta.n))
+            )
         pos = tuple(int(p) for p in delta.positions)
         if not pos:
             # ★ 空向量（新文件第一次追加）：``positions`` 是空的，但视图仍必须由
@@ -677,6 +847,25 @@ class GlobalSession:
         n = int(delta.n)
         if n <= 0:
             raise ValueError("空向量（n=0）没有 crs_n")
+        ident = getattr(delta, "identity", "") or ""
+        if ident:
+            # ★ 新方案：素数按块身份派生。与旧路径的差别只在缓存键与 ``e_all``
+            #   —— 旧的是「全局表第 offset+i 个」，新的是「H(owner‖key‖i)」。
+            key = ("identity", ident, n)
+            cached = self._crsn_cache.get(key)
+            if cached is None or cached.U_n != delta.U:
+                owner, file_key = split_identity(ident)
+                view = IdentityPrimeView(
+                    owner, file_key, max_sz=self._identity_max_sz(n)
+                )
+                cached = CRSn(
+                    crs=self._with_primegen(view),
+                    U_n=delta.U,
+                    e_all=product_tree(view.first(n)),
+                    n=n,
+                )
+                self._crsn_cache[key] = cached
+            return cached
         positions = tuple(int(p) for p in delta.positions)
         key = (positions, n)
         cached = self._crsn_cache.get(key)

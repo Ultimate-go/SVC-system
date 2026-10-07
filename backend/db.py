@@ -86,6 +86,14 @@ class Database:
             "remark_by": "VARCHAR(64) NOT NULL DEFAULT ''",
             "remark_at": "DATETIME",
         },
+        # ★ 新方案："第 i 块配哪个素数"由**块身份**决定（``H(owner‖key‖i)``），
+        #   不再查全局素数表。老库里的行默认 ``''`` = **老坐标**，
+        #   而老坐标依然能跑 —— 所以旧库**不必清空**：老文件用老坐标、
+        #   新文件用新坐标，两种坐标在同一份库里共存（合并时按各文件自己的
+        #   素数收集）。这一列一旦丢了，重启后新文件会退回老坐标，
+        #   而它的 ``U/C`` 是身份坐标算出来的 —— 验证必然不过。
+        "file_deltas": {"identity": "TEXT NOT NULL DEFAULT ''"},
+        "node_state": {"delta_identity": "TEXT NOT NULL DEFAULT ''"},
     }
 
     def _add_missing_columns(self) -> None:

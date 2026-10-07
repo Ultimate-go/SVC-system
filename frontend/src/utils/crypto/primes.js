@@ -132,15 +132,31 @@ export function isProbablePrime(n) {
 /**
  * 校验一段"服务端给的"素数表。
  *
+ * ★★ 两套坐标系的**正确性约束不一样**，必须分开查（不分就会误杀）：
+ *
+ * * `ordered = true`（老坐标）：素数是**全局素数表**里从 `2^{bits-1}` 起
+ *   连续扫出来的那一段，所以"严格递增"是一条**真实约束** ——
+ *   它能抓出"服务端把表拼过"。
+ * * `ordered = false`（新坐标）：素数按**块身份**哈希派生
+ *   （`H(owner‖file_key‖i)`，见 `svc/primegen_identity.py`），
+ *   位长与顺序都不再是 `l+1` / 递增；此时该查的是**互异**
+ *   （论文只要求 `e_i` 两两不同；碰撞会让 `shamir_trick` 静默算错）。
+ *
+ * 为什么不能把"不递增"当致命错：真踩过 —— 后端按老口径把 128 位、无序的
+ * 哈希素数标成"257 位、从 2^256 起递增"，前端于是把**每一份新文件**都
+ * 判成"素数序列被改过"，解密与验证全废。
+ *
  * @param {object} p
- * @param {number} p.bits 素数位长（本方案 = `l + 1` = 257）
+ * @param {number} p.bits 本次这些素数的位长
  * @param {bigint} p.start 序列起点（本该恒为 `2^{bits-1}`）
  * @param {number[]} p.indices 这些素数各自的下标
  * @param {bigint[]} p.values 素数本身，与 `indices` 一一对应
+ * @param {boolean} [p.ordered] 是否**有序**（老坐标）。默认 `true`，
+ *   于是老服务端不传这个字段时行为逐位不变。
  * @param {bigint} [p.expectStart] 本地锚里记着的起点 —— 给了就要求完全一致
  * @returns {{ok: boolean, checked: number, ms: number, message: string}}
  */
-export function checkPrimes({ bits, start, indices, values, expectStart = null }) {
+export function checkPrimes({ bits, start, indices, values, expectStart = null, ordered = true }) {
   const t0 = Date.now()
   if (indices.length !== values.length) {
     return { ok: false, checked: 0, ms: 0, message: '下标与素数的个数不一致' }
@@ -153,6 +169,10 @@ export function checkPrimes({ bits, start, indices, values, expectStart = null }
   //    以前 `start` 只是“拿来当下界用”、从不核对 —— 于是服务端可以把下界
   //    抬到任意值，摆上一批**真素数**（素性对、递增对、位长对），
   //    客户端全过，但那张表已经不是这份文件该有的表了。
+  //
+  //    ★ 新坐标（`ordered = false`）下 start 仍是 `2^{bits-1}`：
+  //      hash_prime 会**强制置最高位**（见 `svc/mathbase.hash_prime`），
+  //      所以“不小于 2^{bits-1}”这条在两种坐标下都成立 —— 基线校验留着。
   const base = 1n << BigInt(bits - 1)
   if (start !== undefined && start !== null && start !== base) {
     return {
@@ -176,13 +196,27 @@ export function checkPrimes({ bits, start, indices, values, expectStart = null }
 
   let prevIdx = -1
   let prevVal = lo - 1n
+  // 互异检查（新坐标的**主要**职责）：论文只要求这些素数两两不同。
+  const seenVals = new Set()
+  const seenIdxs = new Set()
   for (let k = 0; k < values.length; k++) {
     const e = values[k]
-    if (indices[k] <= prevIdx) {
+    if (seenIdxs.has(indices[k])) {
+      return {
+        ok: false,
+        checked: k,
+        ms: Date.now() - t0,
+        message: `下标 ${indices[k]} 出现了两次 —— 应答被拼过`,
+      }
+    }
+    seenIdxs.add(indices[k])
+    if (ordered && indices[k] <= prevIdx) {
       // 序列是按下标升序给的；不升序说明被拼过
+      // （★ 只在老坐标下这样要求：新坐标的素数本身无序，
+      //   而"起点"这条约束已经由上面的基线校验管了。）
       return { ok: false, checked: k, ms: Date.now() - t0, message: '下标不是严格递增' }
     }
-    if (e <= prevVal) {
+    if (ordered && e <= prevVal) {
       return {
         ok: false,
         checked: k,
@@ -190,6 +224,16 @@ export function checkPrimes({ bits, start, indices, values, expectStart = null }
         message: `第 ${indices[k]} 个素数 ${e} 不比前一个小 —— 序列被改过`,
       }
     }
+    if (seenVals.has(e.toString())) {
+      // ★ 碰撞会让 shamir_trick 在 gcd ≠ 1 时**静默**给出错误结果，所以直接拒。
+      return {
+        ok: false,
+        checked: k,
+        ms: Date.now() - t0,
+        message: `第 ${indices[k]} 个素数 ${e} 与前面某个重复 —— 撞了素数，拒绝继续`,
+      }
+    }
+    seenVals.add(e.toString())
     if (e < lo || e >= limit) {
       return {
         ok: false,
@@ -221,7 +265,7 @@ export function checkPrimes({ bits, start, indices, values, expectStart = null }
     ok: true,
     checked: values.length,
     ms: Date.now() - t0,
-    message: `${values.length} 个素数全部通过素性检查（${Date.now() - t0} ms）`,
+    message: `${values.length} 个素数全部通过素性检查（${ordered ? '有序表' : '身份派生'}，${Date.now() - t0} ms）`,
   }
 }
 

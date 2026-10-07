@@ -46,6 +46,8 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
+import dataclasses
+
 from svc import disagg
 from svc.types import Opening, as_index_set
 
@@ -467,12 +469,12 @@ class NodeState:
         #   注意 U/C/n 仍然是**旧**值：add 的公式要用 :math:`U_{old}`。
         push_delta = view.delta
         if op_delta.op == "add" and delta_new is not None:
-            push_delta = Digest(
-                U=view.delta.U,
-                C=view.delta.C,
-                n=view.delta.n,
-                offset=view.delta.offset,
-                chunks=tuple(delta_new.segments),
+            # ★ 用 ``replace`` 而不是重新构造：``offset`` 与 ``identity``
+            #   都是「第 i 块配哪个素数」的前提，漏掉任何一个都会让
+            #   ΥΔ 校验以「ShamirTrick 同源自检失败」收场 —— 那个报错
+            #   完全指不出真正的原因，所以这里宁可少写几个字也不能漏字段。
+            push_delta = dataclasses.replace(
+                view.delta, chunks=tuple(delta_new.segments)
             )
         out = apply_update(
             self.session, push_delta, self.node(offset), op_delta, witness

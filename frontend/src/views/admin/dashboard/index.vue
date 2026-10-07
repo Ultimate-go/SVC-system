@@ -30,10 +30,19 @@ const delta = computed(() => status.value?.delta || {})
 const crs = computed(() => status.value?.crs || {})
 const keywrap = computed(() => status.value?.keywrap || {})
 const clusterHealthy = computed(() => !status.value?.nodes_down?.length && !status.value?.under_replicated)
-const usageRatio = computed(() => {
-  const max = Number(crs.value.n_max || 0)
-  return max > 0 ? Math.round((Number(delta.value.n || 0) / max) * 100) : 0
-})
+
+/**
+ * 副本达标的块数 —— 给那个环形仪表用。
+ *
+ * ★ 以前这个仪表画的是「已用位置 / n_max」。改造后**位置上限不存在了**
+ *   （素数按块身份派生、槽位可以无限增长），"用了百分之多少"这个数
+ *   失去了意义 —— 分母是一个与业务无关的常数。
+ *   换成「多少块副本是齐的」：同样的位置、同样一眼看得懂，
+ *   而且它**真的**在描述集群健康度（核副本不再是装饰）。
+ */
+const replicaOk = computed(() =>
+  Math.max(0, Number(status.value?.blocks || 0) - Number(status.value?.under_replicated || 0)),
+)
 
 const hasPending = computed(() => {
   const p = pending.value
@@ -92,10 +101,14 @@ onMounted(() => {
       type="warning"
       :closable="false"
       class="mb-3"
-      title="有写推没完成，摘要暂不一致"
-      description="别重新上传（那批下标已经分配过了）。到「设备」页点「补推」即可。"
+      :title="pending?.restored ? '上次写失败的现场已经跨重启保住了' : '有写推没完成，摘要暂不一致'"
     >
       <template #default>
+        <p class="mb-2">
+          别重新上传（那批下标已经分配过了）。到「设备」页点「补推」即可
+          —— 也可以不动手：后台会自己试几轮。
+        </p>
+        <p v-if="pending?.site_note" class="mb-2">{{ pending.site_note }}</p>
         <el-button size="small" @click="router.push('/devices')">去补推</el-button>
       </template>
     </el-alert>
@@ -124,7 +137,10 @@ onMounted(() => {
       <StatCard label="公开参数" :value="crs.N_bits" unit="位" hint="隐藏阶群的模数位长" />
         <StatCard label="分量位长" :value="crs.l" unit="位" hint="一个分量的比特数" />
         <StatCard label="素数位长" :value="crs.prime_bits" unit="位" hint="l + 1" />
-      <StatCard label="位置上限" :value="crs.n_max" hint="不可更改" />
+      <!-- ★ 以前这里是「位置上限 = n_max，不可更改」。改造后 n_max 不再是上限：
+           素数按块身份派生，块数没有任何天花板。于是改成一个**真的**在涨的数：
+           已分配过的存储槽位（含删除留下的空洞，所以它 ≥ 块数）。 -->
+      <StatCard label="存储槽位（已分配）" :value="delta.slots_allocated" hint="含删除留下的空洞" />
     </div>
 
     <div class="section-heading section-heading-spaced">
@@ -133,7 +149,7 @@ onMounted(() => {
     </div>
     <div class="grid">
       <StatCard label="文件数" :value="status.files" hint="全系统所有文件" />
-      <StatCard label="块数" :value="status.blocks" hint="全局向量已用位置" />
+      <StatCard label="块数" :value="status.blocks" hint="各文件块数之和" />
       <StatCard label="副本数" :value="status.replica_factor" hint="每块默认存几份" />
       <StatCard
         label="副本不足"
@@ -146,14 +162,14 @@ onMounted(() => {
       <section class="compact-section">
         <div class="section-heading">
           <div><span class="section-kicker mono">COMMITMENTS</span><h2>逐文件摘要 <span class="mono">每份文件一条向量</span></h2></div>
-          <span class="section-note mono">{{ usageRatio }}% USED</span>
+          <span class="section-note mono">{{ status.replica_factor || 1 }}× REPLICA</span>
         </div>
         <div class="panel commitment-panel">
           <div class="panel-title-row"><span class="panel-subtitle">每份文件各自的公开指纹与已用位置</span><span class="live-mark"><i />SYNCED</span></div>
           <div class="delta-row">
-            <RingGauge :value="delta.n" :max="crs.n_max" label="已用位置" />
+            <RingGauge :value="replicaOk" :max="status.blocks || 1" label="副本达标" />
             <div class="delta-detail">
-              <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">全局位置总数</span></div>
+              <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">在用块数（各文件之和）</span></div>
               <!-- ★ 架构变了：摘要是**逐文件**的，没有单一的全局 U / C。
                    以前这里显示 delta.U / delta.C —— 那两个字段在新架构里
                    根本不存在，于是永远显示 "—"。现在如实给条数 + 逐条列表。 -->

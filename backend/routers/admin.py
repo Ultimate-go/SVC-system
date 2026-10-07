@@ -42,10 +42,11 @@ from ..config import (
 )
 from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
 from ..manager import Conflict, NotFound, StoreManager
-from ..models import AuditRow, BlockRow, FileRow, UserRow, utcnow
+from ..models import AuditRow, FileRow, UserRow, utcnow
 from ..schemas import (
     AuditRemarkIn,
     DeployIn,
+    FaultDrillIn,
     PortsIn,
     RestartIn,
     UserCreateIn,
@@ -618,6 +619,63 @@ def run_check(
         "notes": notes,
         "timings": sw.payload(),
     }
+
+
+# ---------------------------------------------------------------------------
+# ★ 故障演练（模拟存储节点突然下线 / 永久损毁）
+#
+# ★★ 这里返回的文案会**原样**显示在界面上（``ElMessage`` / ``el-alert``
+#    收的是纯文本，不是 Markdown）—— 所以一个 ``**`` 都不能写。
+# ---------------------------------------------------------------------------
+
+
+@router.get("/fault-drill")
+def fault_drill_status(
+    _: UserRow = Depends(require_admin),
+    mgr: StoreManager = Depends(get_manager),
+):
+    """★ 当前演练状态 **加上影响面** —— 哪些块已经取不到了。
+
+    名单默认是空的，空名单时这一层对正常路径**零影响**（只是透传）。
+    """
+    return mgr.fault_status()
+
+
+@router.post("/fault-drill")
+def fault_drill(
+    body: FaultDrillIn,
+    admin: UserRow = Depends(require_admin),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    """★ 让若干台存储节点「出事」，看各功能会怎么反应。
+
+    这是**破坏性**操作（会主动制造全网不一致），所以只对管理员开放，
+    而且每一次都记审计。
+
+    * ``down``（掉线）—— 机器联系不上、磁盘好端端的。恢复即可用。
+    * ``destroyed``（永久损毁）—— 磁盘也没了。★ 不可逆：恢复时它回来是空的。
+
+    只做两件事：让指定节点的读抛错、把它们排除出广播写。
+    **密码学与分片一个字都不改** —— 所以接下来看到的失败，
+    是真代码在「节点没了」时的真实行为。
+    """
+    try:
+        out = mgr.fault_drill(body.action, body.nodes, mode=body.mode)
+    except ValueError as exc:
+        # 参数错就是错（不认识的节点名 / 没给节点 / 未知动作）—— 400 说清，不凑合
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    if body.action != "status":
+        what = "；".join(
+            [
+                f"{body.action}(mode={body.mode})",
+                f"节点={','.join(body.nodes or []) or '全部'}",
+                f"faulty={','.join(out.get('faulty', [])) or '无'}",
+                f"丢失={out.get('impact', {}).get('lost_count', 0)} 块",
+            ]
+        )
+        audit(db, admin.username, "fault_drill", target=body.action, ok=True, detail=what)
+    return out
 
 
 # ---------------------------------------------------------------------------

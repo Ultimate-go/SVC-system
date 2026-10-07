@@ -48,7 +48,13 @@ from core.transport import TransportError, WriteError
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+#: 单次上传的**文件大小**上限。
+#:
+#: ★ 它和"块数"是两件事，别混：块数**没有**上限（那是位置上标取消后的效果），
+#:   而这里是"一次 multipart 请求最多收多少字节"的防滥用阈值。
+#:   以前是 8 MiB，容易被当成"系统总量上限 8 MB"（实测就这么被误解过），
+#:   而默认块大小调成 64 KB 之后 32 MiB 只要 512 块（约 28 秒），完全跑得动。
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 #: 应用层快速拒绝的话术。
 #: 它与密码学那句（见 :func:`decrypt`）**意思相同但措辞不同**：
@@ -600,9 +606,8 @@ def delete_file(
     if row.owner != user.username:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "只有所有者能删这份文件 —— 它会把这份文件的块（连同之后上传的块）"
-            "从全网真的删掉。\n"
-            "  注意：这不影响验证 —— 别的文件你照样能验。",
+            "只有所有者能删这份文件 —— 它会把这份文件的块从全网真的删掉。\n"
+            "  注意：别的文件不受影响；验证也不受影响 —— 别的文件你照样能验。",
         )
     _reject_if_pending(mgr)
     owner, file_key = row.owner, row.file_key
@@ -612,8 +617,11 @@ def delete_file(
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except Conflict as exc:
-        # 「后面还压着别人的文件」走这条：409 而不是 400 —— 那不是参数写错，
-        # 而是"当前状态不允许"（换个顺序就能做）。
+        # 409 而不是 400：那不是参数写错，而是"当前状态不允许"（换个时机就能做）——
+        # 比如还有写推未完成、补推还没收敛。
+        # ★ 改造后 `delete_file` 自己**不再**抛"后面压着别人的文件"那种 Conflict
+        #   （连带删除已经不存在了，审计 N4），但这条兜底留着：
+        #   走到这里的可能是别的状态冲突。
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except OutOfRange as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
@@ -880,7 +888,7 @@ def decrypt(
         )
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "服务端这次会话里没有你的私钥 —— 这是**默认模型**：\n"
+            "服务端这次会话里没有你的私钥 —— 这是「默认模型」：\n"
             "  私钥在浏览器里用口令解封（登录响应里的 key_blob），"
             "后端不解封、也不保存。\n"
             "  要解密请走客户端路径：POST /api/files/{id}/cipher 取密文，"

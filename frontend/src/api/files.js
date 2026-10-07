@@ -32,14 +32,16 @@ export const filesApi = {
    *   正常情况下就只有它一个。
    */
   remove: (id) => api.delete(`/api/files/${id}`),
-  decrypt: (id, indices) => api.post(`/api/files/${id}/decrypt`, { indices }),
   /**
    * 取**密文**（不解密）—— 浏览器自解密 + 自验证那条路的入口。
    *
-   * ★ 与 ``decrypt`` 的分工就是"服务器可不可信"这条分界线：
-   *   ``decrypt`` 让**服务端**把内容解开（后端要拿私钥），
-   *   ``cipher`` 只把**材料**交出来（密文段 / IV / 块密钥密文 / 证据 / 公开参数），
-   *   解封与解密都在浏览器里做（见 ``utils/crypto/index.js::openBlocks``）。
+   * ★ 界面上**只有这条路**：解封与解密都在浏览器里做
+   *   （见 ``utils/crypto/index.js::openBlocks``）。
+   *
+   *   后端那条 ``POST /api/files/{id}/decrypt``（服务端代理解密）**保留**，
+   *   但它是"服务器可不可信"的**对照物** —— 只给接口测试与讲稿用。
+   *   前端曾经导出过一个 ``decrypt()`` 包着它，而全前端零调用（审计 F7）：
+   *   已删除，免得下一个人以为界面上有"服务端解密"这个功能。
    *
    * :param withPrimes: 是否让后端把整段素数表一并带上（供浏览器自算 U_n）。
    */

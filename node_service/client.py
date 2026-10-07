@@ -540,6 +540,40 @@ class HttpTransport:
 # 序列化 —— 与 node_service.server 的解析端一一对应
 # ---------------------------------------------------------------------------
 
+def _delta_dict(delta) -> dict:
+    r"""δ 的**线格式** —— 全系统只有这一处。
+
+    ★ 为什么收成一个函数：δ 上每多一个字段（``chunks``、``identity``…），
+    ``append`` / ``update`` / ``delete`` 三个 payload 就都要跟着改，而
+    **漏掉的那一处不会在本地模式下暴露** —— :class:`~core.transport.LocalTransport`
+    递过去的是 δ 对象本身，字段一个不少；只有跨进程（HTTP）才会丢。
+    于是症状永远是「本地怎么测都全绿，一上真机就炸」，而且炸得很偏。
+    收口之后，「漏字段」在代码上就不再可能（见 ``verify_node_wire.py``）。
+
+    ★★ ``identity`` 是**必须**过线的：它决定「第 ``i`` 块配哪个素数」。
+    丢了它，节点会退回旧路径去查全局素数表，于是 :math:`e_i` 全对不上，
+    表现为节点侧 :meth:`~core.node_state.NodeState.absorb` 报
+
+        S_I 校验失败：S_I^{e_I} ≠ U_n，S_I 被伪造或下标集合不对
+
+    而协调者只看到「有 4 台存储节点没跟上这次更新」。
+    这个坑真踩过：身份素数改造做完后 221 条断言全过（它们都走
+    ``LocalTransport``），跨进程**每一次上传都失败**。
+
+    ★ ``chunks`` 也必须过线（老路径要靠它建「局部块号 → 素数」视图，
+    见 :func:`_append_payload` 原来的注释）。新路径下素数由 ``identity``
+    决定，但两者都留着，两条路径才共用同一份线格式。
+    """
+    return {
+        "U": str(delta.U),
+        "C": str(delta.C),
+        "n": int(delta.n),
+        "offset": int(delta.offset),
+        "chunks": [[int(a), int(b)] for a, b in delta.chunks],
+        "identity": str(getattr(delta, "identity", "") or ""),
+    }
+
+
 def _update_payload(
     *,
     delta_new,
@@ -554,13 +588,7 @@ def _update_payload(
     """
     return {
         "offset": int(delta_new.offset),
-        "delta_new": {
-            "U": str(delta_new.U),
-            "C": str(delta_new.C),
-            "n": int(delta_new.n),
-            "offset": int(delta_new.offset),
-            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
-        },
+        "delta_new": _delta_dict(delta_new),
         "op_delta": {
             "op": op_delta.op,
             "K": [int(x) for x in op_delta.K],
@@ -591,13 +619,7 @@ def _delete_payload(
     """
     return {
         "offset": int(delta_new.offset),
-        "delta_new": {
-            "U": str(delta_new.U),
-            "C": str(delta_new.C),
-            "n": int(delta_new.n),
-            "offset": int(delta_new.offset),
-            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
-        },
+        "delta_new": _delta_dict(delta_new),
         "op_delta": {
             "op": op_delta.op,
             "K": [int(x) for x in op_delta.K],
@@ -630,24 +652,11 @@ def _append_payload(
 ) -> dict:
     return {
         "offset": int(delta_new.offset),
-        "delta_old": {
-            "U": str(delta_old.U),
-            "C": str(delta_old.C),
-            "n": int(delta_old.n),
-            "offset": int(delta_old.offset),
-            "chunks": [[int(a), int(b)] for a, b in delta_old.chunks],
-        },
-        "delta_new": {
-            "U": str(delta_new.U),
-            "C": str(delta_new.C),
-            "n": int(delta_new.n),
-            "offset": int(delta_new.offset),
-            # ★ 位置段**必须**过线：节点侧要用它建“局部块号 → 素数”那张
-            #   视图（新块的局部号在旧 δ 里根本不存在）。丢了它就退化成
-            #   “从 offset 起连续 n 个”，跨进程时每一步更新都会以
-            #   “算出的摘要与协调者不一致”收场。
-            "chunks": [[int(a), int(b)] for a, b in delta_new.chunks],
-        },
+        # ★ delta_old / delta_new 都走 _delta_dict：位置段与身份都要过线
+        #   （丢了 chunks 退化成“从 offset 起连续 n 个”；丢了 identity
+        #    素数直接配错 —— 两种都在跨进程才暴露）。
+        "delta_old": _delta_dict(delta_old),
+        "delta_new": _delta_dict(delta_new),
         "op_delta": {
             "op": op_delta.op,
             "K": [int(x) for x in op_delta.K],

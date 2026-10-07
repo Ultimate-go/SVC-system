@@ -60,7 +60,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Sequence
 
 from svc import (
@@ -161,11 +161,11 @@ def _digest_mod(delta: Digest, K, deltas, S_i, N: int) -> Digest:
         d = deltas[i]
         if d:
             C2 = C2 * pow(S_i[i], d, N) % N
-    # ★ offset 必须一路带下去：丢了它就等于把文件挪回第 0 段，
-    # 之后所有验证都会失败（而且失败得很难归因）。
-    return Digest(
-        U=delta.U, C=C2, n=delta.n, offset=delta.offset, chunks=delta.chunks
-    )
+    # ★ 用 ``_dc_replace`` 而不是重新构造 ``Digest(...)``：``offset``、
+    #   ``chunks``、``identity`` 三个字段一律原样带下去。
+    #   漏掉 ``offset`` = 把文件挪回第 0 段；漏掉 ``identity`` = 退回
+    #   查全局素数表的老坐标 —— 两者都会让后续验证失败，而且失败得很难归因。
+    return _dc_replace(delta, C=C2)
 
 
 def _digest_add(delta: Digest, K, F_new, primegen, N: int) -> Digest:
@@ -173,27 +173,21 @@ def _digest_add(delta: Digest, K, F_new, primegen, N: int) -> Digest:
     S_cur, Lam_cur = delta.U, delta.C
     for j, v in zip(K, F_new):
         S_cur, Lam_cur = add_back(S_cur, Lam_cur, primegen.get(j), v, N)
-    # ★ K 里是**全局位置号**，所以 primegen 直接用全局的那张表；
-    # offset 原样带下去（追加不改变本文件的段起点）。
-    return Digest(
-        U=S_cur,
-        C=Lam_cur,
-        n=delta.n + len(K),
-        offset=delta.offset,
-        chunks=delta.chunks,
-    )
+    # ★ ``K`` 是**文件内局部块号**，``primegen`` 已经是该文件的素数视图
+    #   （老坐标是「全局表加偏移」，新坐标是「按块身份派生」）；
+    #   ``_dc_replace`` 把 offset / chunks / identity 一并带下去。
+    return _dc_replace(delta, U=S_cur, C=Lam_cur, n=delta.n + len(K))
 
 
 def _digest_del(delta: Digest, witness: UpdateWitness, K) -> Digest:
     r"""``del`` 之后的新摘要就是 :math:`\Upsilon_\Delta` 里那份 :math:`\pi_K`。"""
     if witness.pi_K is None:
         raise ValueError("del 的 Υ∆ 里必须带 π_K（它就是新摘要）")
-    return Digest(
+    return _dc_replace(
+        delta,
         U=witness.pi_K.S_I,
         C=witness.pi_K.Lambda_I,
         n=delta.n - len(K),
-        offset=delta.offset,
-        chunks=delta.chunks,
     )
 
 
@@ -374,9 +368,7 @@ def _push_mod(session, delta, node, op_delta: UpdateDelta, old_values) -> Pushed
     for i in K:
         if deltas[i]:
             C2 = C2 * pow(S_i[i], deltas[i], N) % N
-    new_delta = Digest(
-        U=delta.U, C=C2, n=n, offset=delta.offset, chunks=delta.chunks
-    )
+    new_delta = _dc_replace(delta, U=delta.U, C=C2)
 
     st_new, I_new, FI_new = _mod_node_state(node, K, F_new, deltas, S_i, primegen, N)
     witness = UpdateWitness(op="mod", K=K, S_K=S_K, F_K=tuple(old[i] for i in K))
@@ -420,13 +412,18 @@ def _push_add(session, delta, node, op_delta: UpdateDelta) -> PushedUpdate:
     if not F_new:
         raise ValueError("至少要追加一个位置")
     n, k = delta.n, len(F_new)
-    offset = int(getattr(delta, "offset", 0))
-    if offset + n + k > session.n_max:
-        raise ValueError(
-            f"追加后本文件要占到全局位置 {offset + n + k - 1}，"
-            f"超出全系统位置预算 n_max = {session.n_max}；"
-            f"段在 Bootstrap 阶段定死、且永不回收，用满只能重建 CRS"
-        )
+    # ★ 位置预算只在**老坐标**下存在：那边第 ``i`` 块算素数表第 ``offset+i`` 个，
+    #   而表长在 Bootstrap 阶段就定死了。新坐标（``identity`` 非空）下素数是按
+    #   块身份现算的，没有任何容量概念 —— 所以这里必须放行，否则「追加到第
+    #   8193 块」会被一条已经不成立的约束拦下。
+    if not getattr(delta, "identity", ""):
+        offset = int(getattr(delta, "offset", 0))
+        if offset + n + k > session.n_max:
+            raise ValueError(
+                f"追加后本文件要占到全局位置 {offset + n + k - 1}，"
+                f"超出全系统位置预算 n_max = {session.n_max}；"
+                f"段在 Bootstrap 阶段定死、且永不回收，用满只能重建 CRS"
+            )
 
     # ★ 本文件那段的素数表，不是全局第 0 段那张。
     primegen, N = session.primegen_for(delta), session.crs.N
@@ -443,13 +440,7 @@ def _push_add(session, delta, node, op_delta: UpdateDelta) -> PushedUpdate:
     # ★ offset 必须带下去：丢了它就等于把这份文件挪回第 0 段。
     #   后果比想象的严重：节点侧是按 offset 存视图的，于是新文件的
     #   “空视图”会注册到 offset=0，把老文件那份视图**覆盖掉**。
-    new_delta = Digest(
-        U=S_cur,
-        C=Lam_cur,
-        n=n + k,
-        offset=delta.offset,
-        chunks=delta.chunks,
-    )
+    new_delta = _dc_replace(delta, U=S_cur, C=Lam_cur, n=n + k)
 
     # 新位置在**旧**累加器下的成员见证
     #
@@ -512,12 +503,8 @@ def _push_del(session, delta, node, op_delta: UpdateDelta, old_values) -> Pushed
 
     crs_n = session.crs_n_for(delta)
     pi_K = disagg(crs_n, list(node.I), list(node.FI), node.st, K)
-    new_delta = Digest(
-        U=pi_K.S_I,
-        C=pi_K.Lambda_I,
-        n=n - k,
-        offset=delta.offset,
-        chunks=delta.chunks,
+    new_delta = _dc_replace(
+        delta, U=pi_K.S_I, C=pi_K.Lambda_I, n=n - k
     )
 
     old = dict(old_values) if old_values is not None else {
@@ -765,7 +752,10 @@ def update_append(
         raise ValueError("至少要追加一个位置")
 
     n, k = delta.n, len(F_new)
-    if n + k > session.n_max:
+    # ★ 位置预算只对**老坐标**成立（那边第 i 块算素数表第 offset+i 个，
+    #   而表长在 Bootstrap 阶段就定死了）。新坐标下素数是按块身份现算的，
+    #   没有容量概念 —— 所以这里必须放行。
+    if not getattr(delta, "identity", "") and n + k > session.n_max:
         raise ValueError(
             f"追加后长度 {n + k} 超过会话上限 n_max = {session.n_max}；"
             f"隐藏阶群的可用位置在 Bootstrap 阶段就定死了"

@@ -38,8 +38,23 @@ const refMap = computed(() => {
 function srcOf(gi) {
   const r = refMap.value[gi]
   if (!r) return ''
-  if (r.owner) return `${r.owner} / ${r.file_key} 第 ${r.block_idx} 块`
+  if (r.owner) return `${r.owner} / ${r.file_key}`
   return ''
+}
+
+/**
+ * 这一行**左边的标签**。
+ *
+ * ★★ 说「第几块」而不是把全局下标摆出来 —— 后者是**内部坐标**（由上传顺序
+ *   决定），界面上只说「哪份文件的第几块」。块号算不出来（很旧的卡没存
+ *   ``refs``）才如实退回数字，**不假装它是个块号**。
+ */
+function labelOf(gi) {
+  const r = refMap.value[gi]
+  if (r && r.block_idx !== undefined && r.block_idx !== null) {
+    return `第 ${r.block_idx} 块`
+  }
+  return String(gi)
 }
 
 /** 部分结果时，缺的那几块要说出来 —— 不然"少了几个下标"要靠人自己数。 */
@@ -51,13 +66,13 @@ function missing(gi, i) {
 <template>
   <div class="fp-list">
     <div v-for="(gi, i) in shown" :key="gi" class="fp-row">
-      <span class="mono idx">{{ gi }}</span>
+      <span class="mono idx">{{ labelOf(gi) }}</span>
       <HashText v-if="!missing(gi, i)" :value="values[i]" :len="len" />
       <span v-else class="text-3" style="font-size: 12px">（这次没取到）</span>
       <span v-if="srcOf(gi)" class="src text-3">{{ srcOf(gi) }}</span>
     </div>
     <p v-if="truncated" class="note" style="margin: 6px 0 0">
-      只列了前 {{ limit }} 个下标（这一份共 {{ indices.length }} 个）—— 指纹的位数与含义不变。
+      只列了前 {{ limit }} 块（这一份共 {{ indices.length }} 块）—— 指纹的位数与含义不变。
     </p>
   </div>
 </template>

@@ -9,7 +9,7 @@ const STAGES = [
   { key: 'split', label: '分片', en: 'CHUNK', detail: '切成固定大小的块', tone: 'blue' },
   { key: 'commit', label: '承诺生成', en: 'COMMIT', detail: '计算摘要与证明', tone: 'violet' },
   { key: 'store', label: '分布式存储', en: 'REPLICATE', detail: '写入节点并创建副本', tone: 'green' },
-  { key: 'query', label: '查询取证', en: 'PROVE', detail: '按全局下标取证', tone: 'amber' },
+  { key: 'query', label: '查询取证', en: 'PROVE', detail: '按你指定的块取证', tone: 'amber' },
   { key: 'verify', label: '完整性验证', en: 'VERIFY', detail: '公开验证数据状态', tone: 'rose' },
 ]
 </script>

@@ -22,6 +22,7 @@ __all__ = [
     "DisaggIn",
     "FilePatchIn",
     "DeployIn",
+    "FaultDrillIn",
     "PortsIn",
     "RestartIn",
 ]
@@ -138,13 +139,17 @@ class AuditRemarkIn(BaseModel):
 
 #: 请求里「下标 / 值」列表的长度上限。
 #:
-#: ★ 它**必须 ≥ 系统的块数上限**，否则会出现「**传得上去、验不了**」：
-#:   ``n_max`` 现在是 8192（1 KB 块 ⇒ 8 MB 文件正好 8192 块），
-#:   这里也放到 8192 —— 否则一个 8 MB 文件的**完整查询**会被 pydantic
-#:   以 422 拒掉（而且是一坨英文校验转储，界面上很难看）。
+#: ★ 它现在是一个纯粹的**请求体大小**限制，与密码学无关。
+#:   改造前它还兼一职：必须 ≥ 系统的块数上限（``n_max``），
+#:   否则会出现「**传得上去、验不了**」—— 一个 8 MB 文件的完整查询
+#:   会被 pydantic 以 422 拒掉。改造后块数**没有上限**，
+#:   所以这个数不再是"必须 ≥ 某个系统上限"，而是
+#:   "一次请求多大了算过分"：8192 个下标 ≈ 每个下标一个十进制串，
+#:   请求体在 100 KB 量级，JSON 解析与校验都很快。
 #:
-#: **调大 ``Settings.n_max`` 时，这个数也要跟着调**。
-#: （它写在 pydantic 里，静态声明、没法从配置读，但改一行就生效。）
+#: ★ 真遇到"一份文件好几万块、想一次全验"时，**提高它是对的**
+#:   （而以前提高它还要先动 ``n_max``）—— 但更该做的是分批：
+#:   超出时界面会建议分批验（见 ``stores/basket.js``）。
 MAX_INDICES = 8192
 
 #: 一个群元素 / 分量写成十进制串时的**最长**字符数。
@@ -424,3 +429,30 @@ class FilePatchIn(BaseModel):
         """解出原始字节。校验已在 :meth:`_valid_base64` 里做过。"""
         assert self.data_b64 is not None  # 由 _required_fields 保证
         return base64.b64decode(self.data_b64)
+
+
+class FaultDrillIn(BaseModel):
+    r"""★ **故障演练**的入参（``POST /api/admin/fault-drill``）。
+
+    :param action: ``knock_out``（让节点出事）/ ``restore``（让节点回来）/
+        ``status``（只看不改）。
+    :param nodes: 哪几台。``restore`` 时给 ``None`` = 全部恢复；
+        ``knock_out`` 时必须给。
+    :param mode: 只在 ``knock_out`` 时有意义。
+
+        * ``down`` —— **掉线**：机器联系不上，磁盘好端端的。
+          对应"网线拔了 / 进程挂了 / 机房断电"。恢复之后数据**照样在**。
+        * ``destroyed`` —— **永久损毁**：机器联系不上，**数据也没了**。
+          对应"地震 / 海啸 / 机房烧了"。**不可逆** —— 恢复时它回来是空的，
+          只能靠副本重建；某个块的每一份副本都在这张名单里 ⇒ 那块真丢了。
+
+    .. note::
+
+       它**只是模拟**：不改密码学、不改分片，只让指定节点不可达。
+       所以接下来看到的失败，是真代码在"节点没了"时的真实行为。
+       **只对管理员开放** —— 它会主动制造全网不一致，是破坏性操作。
+    """
+
+    action: str = Field(pattern="^(knock_out|restore|status)$")
+    nodes: list[str] | None = Field(default=None, max_length=4096)
+    mode: str = Field(default="down", pattern="^(down|destroyed)$")

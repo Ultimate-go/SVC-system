@@ -1,7 +1,14 @@
 /**
  * 前端表单校验 —— 与后端 schemas.py 保持同一套约束。
  * （后端只认这些，前端要做同样的约束，否则提交上去才被 422 拒掉。）
+ *
+ * ★ 相对 import 带 `.js`：本模块被 `tests/validate-msg.test.js` 直接喂给
+ *   `node --test`，而 Node 的 ESM 解析**不认**无扩展名的相对路径
+ *   （Vite 认，所以打包一直是好的）。为了别让一句打包能过、测试跑不起来的
+ *   import 挡路，这里写全 —— `crypto/verify.js` 等被测试用到的模块同样是全的。
  */
+
+import { MAX_QUERY_INDICES } from './constants.js'
 
 /** 用户名：1–64 字符，正则 ^[A-Za-z0-9_.-]+$（与后端一致）。 */
 export function validUsername(v) {
@@ -33,8 +40,11 @@ export function validPassword(v) {
  *   下标集合上做切片，那里本来就在内部坐标里。
  * :param maxCount: 一次最多允许展开成多少个下标。**必须在展开之前判** ——
  *   见函数里的注解（安全审计 I6）。默认值与后端的 ``MAX_INDICES`` 对齐。
+ * :param noun: 报错文案里怎么称呼这些数 —— 主路径填的是「第几块」，
+ *   所以 ``parseBlockRange`` 传 ``块``；「高级」里直接填全局下标，就用默认的。
+ *   同一个函数两种说法，免得界面说的是块、报错说的是下标（实测很割裂）。
  */
-export function parseIndexRange(text, maxCount = 8192) {
+export function parseIndexRange(text, maxCount = MAX_QUERY_INDICES, noun = '下标') {
   const s = String(text ?? '').trim()
   if (!s) return []
   const out = new Set()
@@ -53,15 +63,15 @@ export function parseIndexRange(text, maxCount = 8192) {
       //   现在**没等展开**就把它挡回去，而且把上限说清楚。
       if (b - a + 1 > maxCount) {
         throw new Error(
-          `区间太大了：${p} 要展开成 ${b - a + 1} 个下标，一次最多 ${maxCount} 个`,
+          `区间太大了：${p} 要展开成 ${b - a + 1} 个${noun}，一次最多 ${maxCount} 个（可分几次填）`,
         )
       }
       for (let i = a; i <= b; i++) out.add(i)
       if (out.size > maxCount) {
-        throw new Error(`一次最多 ${maxCount} 个下标，现在已经 ${out.size} 个`)
+        throw new Error(`一次最多 ${maxCount} 个${noun}（可分几次填），现在已经 ${out.size} 个`)
       }
     } else {
-      throw new Error(`下标写法不对：${p}`)
+      throw new Error(`${noun}写法不对：${p}`)
     }
   }
   return [...out].sort((a, b) => a - b)
@@ -77,12 +87,18 @@ export function parseIndexRange(text, maxCount = 8192) {
  *
  * :param maxBlocks: 这份文件的块数。给了就顺手校验越界 —— 块号从 0 数到
  *   n-1，越界当场说清"这份文件只有几块"，不必等服务端回一个 400 让人猜。
+ *   ★★ 它还要跟 ``MAX_QUERY_INDICES`` **取小**（审计 N2）：块数**没有上限**
+ *   （64 字节一块的话，1 MB 文件就能切出 16384 块），只拿块数当上限会
+ *   放行一个 >8192 块的区间，然后由 ``/api/query/files`` 回 400。
  */
 export function parseBlockRange(text, maxBlocks = null) {
-  // 块号是**这份文件内部**的坐标：给了块数就用它当上限（更严），
-  // 没给就退回与后端一致的整体上限。
-  const limit = typeof maxBlocks === 'number' && maxBlocks > 0 ? maxBlocks : 8192
-  const blocks = parseIndexRange(text, limit)
+  // 块号是**这份文件内部**的坐标：给了块数就用它当上限（更严）；
+  // 没给就退回与后端一致的整体上限。两者取小 —— 见函数头的审计 N2 说明。
+  const fileLimit =
+    typeof maxBlocks === 'number' && maxBlocks > 0 ? maxBlocks : MAX_QUERY_INDICES
+  const limit = Math.min(fileLimit, MAX_QUERY_INDICES)
+  // ★ 说「块」而不是「下标」：这一路上用户填的就是块号（见函数头注释）。
+  const blocks = parseIndexRange(text, limit, '块')
   if (typeof maxBlocks === 'number' && maxBlocks > 0) {
     const over = blocks.filter((b) => b >= maxBlocks)
     if (over.length) {

@@ -122,7 +122,7 @@ const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: 
         <div class="hero-row"><div><div class="hero-value">{{ fmt(totalOpsPerMin) }}<span> ops/min</span></div><div class="hero-label">系统实时吞吐 <b>· 最近 60 秒</b></div></div><div class="health" :class="health === false ? 'bad' : ''"><span>{{ health === null ? '待采样' : health ? 'SLA 达标' : '尾延迟超标' }}</span><small>{{ latencyPercentile.toUpperCase() }} ≤ {{ slaMs }} ms</small></div></div>
         <div class="hero-meta"><span>采样数 <b>{{ fmt(samples) }}</b></span><span>在线节点 <b>{{ scale.nodes ?? '—' }}</b></span><span>当前文件 <b>{{ fmt(scale.files) }}</b></span><span>向量块 <b>{{ fmt(scale.blocks) }}</b></span></div>
       </div>
-      <div class="scheme-panel"><div class="section-kicker">SCHEME CONTEXT</div><h3>可验证分布式存储</h3><p>性能结果与密码参数绑定，便于竞赛评审复现。</p><div class="scheme-grid"><span>CRS 位数<strong>{{ crs.n_bits || '—' }}</strong></span><span>向量维度<strong>{{ crs.l || '—' }}</strong></span><span>最大块数<strong>{{ crs.n_max || '—' }}</strong></span><span>数据来源<strong>运行时内存</strong></span></div></div>
+      <div class="scheme-panel"><div class="section-kicker">SCHEME CONTEXT</div><h3>可验证分布式存储</h3><p>性能结果与密码参数绑定，便于竞赛评审复现。</p><div class="scheme-grid"><span>CRS 位数<strong>{{ crs.n_bits || '—' }}</strong></span><span>向量维度<strong>{{ crs.l || '—' }}</strong></span><span>素数表容量<strong>{{ crs.n_max || '—' }}</strong></span><span>数据来源<strong>运行时内存</strong></span></div></div>
     </section>
 
     <section class="kpi-grid">

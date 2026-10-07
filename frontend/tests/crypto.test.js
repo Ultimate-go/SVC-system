@@ -170,6 +170,78 @@ test('素数：位长/区间/单调性不符要拒（这些是形状检查真正
   assert.equal(low.ok, false)
 })
 
+/** 从 `from` 起向上找第一个 `bits` 位概率素数（仅测试用）。 */
+function pickPrime(from, bits) {
+  const limit = 1n << BigInt(bits)
+  let c = from | 1n
+  while (c < limit && !isProbablePrime(c)) c += 2n
+  if (c >= limit) throw new Error(`${bits} 位里没找到素数`)
+  return c
+}
+
+test('★ 素数检查：新坐标（按块身份派生）不查单调，但仍查素性/位长', () => {
+  // 身份坐标下素数是 `H(owner‖file_key‖i)` 派生出来的 128 位素数 ——
+  // **没有任何顺序**。以前后端把它按"257 位、从 2^256 起递增"的旧口径下发，
+  // 前端于是把每一份新文件都判成"素数序列被改过"，解密与验证全废（实测踩过）。
+  const bits = 128
+  const start = 1n << 127n
+  // 刻意挑一组**递减**的 128 位素数：老坐标下必拒，新坐标下必须放行
+  const e0 = pickPrime((1n << 127n) + 1001n, bits)
+  const e1 = pickPrime((1n << 127n) + 3003n, bits)
+  const e2 = pickPrime((1n << 127n) + 5005n, bits)
+  const desc = [e2, e1, e0]
+
+  const asOld = checkPrimes({ bits, start, indices: [0, 1, 2], values: desc, ordered: true })
+  assert.equal(asOld.ok, false, '老坐标下递减必须被拒')
+  assert.match(asOld.message, /不比前一个小/)
+
+  const asNew = checkPrimes({ bits, start, indices: [0, 1, 2], values: desc, ordered: false })
+  assert.equal(asNew.ok, true, asNew.message)
+
+  // 位长照样要查：128 位的表里塞个 257 位数必须当场抓住
+  const tooBig = checkPrimes({
+    bits,
+    start,
+    indices: [0],
+    values: [BigInt(V.svc.primes[0])],
+    ordered: false,
+  })
+  assert.equal(tooBig.ok, false, '128 位的表里塞 257 位数必须被拒')
+})
+
+test('★ 素数检查：新坐标下"撞素数"必须被拒（否则 shamir_trick 会静默算错）', () => {
+  const bits = 128
+  const start = 1n << 127n
+  const e0 = pickPrime((1n << 127n) + 1001n, bits)
+  const dup = checkPrimes({ bits, start, indices: [0, 1], values: [e0, e0], ordered: false })
+  assert.equal(dup.ok, false)
+  assert.match(dup.message, /重复|撞/)
+
+  // 同一个下标出现两次同样是"拼过"
+  const sameIdx = checkPrimes({ bits, start, indices: [3, 3], values: [e0, e0], ordered: false })
+  assert.equal(sameIdx.ok, false, sameIdx.message)
+})
+
+test('★ 素数检查：ordered 缺省为 true —— 老服务端不传这个字段时行为不变', () => {
+  const s = V.svc
+  const start = 1n << BigInt(s.l)
+  const r = checkPrimes({
+    bits: s.prime_bits,
+    start,
+    indices: [0, 1, 2, 3],
+    values: s.primes.slice(0, 4).map((v) => BigInt(v)),
+  })
+  assert.equal(r.ok, true, r.message)
+  // 单调是"有序表"才有的约束：给个递减的必须拒
+  const desc = checkPrimes({
+    bits: s.prime_bits,
+    start,
+    indices: [0, 1],
+    values: [BigInt(s.primes[1]), BigInt(s.primes[0])],
+  })
+  assert.equal(desc.ok, false)
+})
+
 test('证据验证：应当通过的必须通过', () => {
   const s = V.svc
   const k = s.ok_case

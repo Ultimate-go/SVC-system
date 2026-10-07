@@ -34,14 +34,19 @@ function makeItem(i, src = {}) {
 function load() {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    if (!raw) return { items: [], n: null }
+    if (!raw) return { items: [], n: null, live: null }
     const o = JSON.parse(raw)
     const items = Array.isArray(o.items)
       ? o.items.filter((x) => x && Number.isInteger(Number(x.i)) && Number(x.i) >= 0).map((x) => makeItem(x.i, x))
       : []
-    return { items, n: typeof o.n === 'number' ? o.n : null }
+    return {
+      items,
+      n: typeof o.n === 'number' ? o.n : null,
+      //: 缓存里的“存活下标”只在没法重新拉列表时用一下（拉到了就以接口为准）。
+      live: Array.isArray(o.live) ? o.live.map(Number).filter(Number.isFinite) : null,
+    }
   } catch {
-    return { items: [], n: null }
+    return { items: [], n: null, live: null }
   }
 }
 
@@ -52,6 +57,17 @@ export const useBasketStore = defineStore('basket', {
     items: [...cached.items],
     //: 最近一次看到的全局块数 —— 用它判"集合里的块还在不在"（**不**用来判作废）。
     n: cached.n,
+    /**
+     * **当前还活着哪些下标**（`GET /api/files` 里各文件 ``indices`` 的并集）。
+     *
+     * ★★ ``[]`` = **确实一个不剩**（库空了）；``null`` = **还不知道**。
+     *   这两种必须分开 —— 混起来会把"还没加载"当成"全被删了"，
+     *   于是整个集合都标红。
+     *
+     * 为什么不用 ``n``：删掉**中间**那份文件会留下空洞（位置段永不回收），
+     * 那时 ``blocks`` 会**小于**仍然有效的下标（审计 F3）。
+     */
+    live: cached.live,
   }),
 
   getters: {
@@ -92,12 +108,23 @@ export const useBasketStore = defineStore('basket', {
     },
 
     /**
-     * 已经被删掉的那些下标（≥ 当前块数）。
+     * 已经被删掉的那些下标。
      *
-     * ★ 只有这一种情况会让集合里的块"失效" —— 集合是清单、不是凭据，
-     *   所以 n 变了**不影响**其余下标：验证时后端按**当前** δ 现取现证。
+     * ★★ 判据**不能**是 `i >= n`（`n` = `/api/status` 的 ``blocks``）：
+     *   删掉**中间**那份文件会留下空洞，而空洞**不回收** —— 这时 ``blocks``
+     *   会**小于**某些仍然有效的下标。于是同一个式子两头都错：
+     *   活着的块被标成"已作废"，而真正被删掉的反而一个都标不出来
+     *   （审计 F3，实测复现）。
+     *
+     *   正确判据是**当前存活下标的集合**（:attr:`live`，来自
+     *   ``GET /api/files`` 里每份文件的 ``indices``）。拿不到那份清单时
+     *   退回旧判据 —— 不精确，但比什么都不标强，而且下拉刷新后立刻纠正。
      */
     goneIndices(state) {
+      if (Array.isArray(state.live)) {
+        const live = new Set(state.live)
+        return this.indices.filter((i) => !live.has(i))
+      }
       if (typeof state.n !== 'number') return []
       return this.indices.filter((i) => i >= state.n)
     },
@@ -105,11 +132,20 @@ export const useBasketStore = defineStore('basket', {
     /** 某块在不在集合里（文件列表页/筛选结果里那颗"已入集合"标记用它）。 */
     has: (state) => (i) => state.items.some((x) => x.i === i),
 
-    /** 一个文件的块里有多少已经在集合里。 */
+    /** 一个文件的块里有多少已经在集合里。
+     *
+     *  ★ 用 Set 而不是对每个下标 `some()` 一遍：集合大、文件也大时那是
+     *    ``O(块数 × 集合大小)``，而它每次渲染都跑（审计 F6）。
+     */
     countOf:
       (state) =>
-      (indices = []) =>
-        indices.filter((i) => state.items.some((x) => x.i === i)).length,
+      (indices = []) => {
+        if (!indices.length) return 0
+        const have = new Set(state.items.map((x) => x.i))
+        let n = 0
+        for (const i of indices) if (have.has(i)) n += 1
+        return n
+      },
   },
 
   actions: {
@@ -178,10 +214,28 @@ export const useBasketStore = defineStore('basket', {
       this._persist()
     },
 
-    /** 同步"当前有多少块"（用来标出已经被删掉的下标）。 */
+    /** 同步"当前有多少块"（旧判据的傅底 —— 新代码请用 :func:`syncLive`）。 */
     syncN(n) {
       if (typeof n !== 'number' || n < 0 || this.n === n) return
       this.n = n
+      this._persist()
+    },
+
+    /**
+     * 同步"当前**还活着哪些下标**"（
+     * ``GET /api/files`` 里各文件 ``indices`` 的并集）。
+     *
+     * :param indices: 存活下标数组；传 ``null`` = 标记为"不知道"（回退旧判据）。
+     */
+    syncLive(indices) {
+      const next = Array.isArray(indices)
+        ? [...new Set(indices.map(Number).filter(Number.isFinite))].sort((a, b) => a - b)
+        : null
+      if (this.live === null && next === null) return
+      if (next && this.live && next.length === this.live.length && next.every((v, i) => v === this.live[i])) {
+        return
+      }
+      this.live = next
       this._persist()
     },
 
@@ -207,7 +261,7 @@ export const useBasketStore = defineStore('basket', {
 
     _persist() {
       try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify({ items: this.items, n: this.n }))
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ items: this.items, n: this.n, live: this.live }))
       } catch {
         /* 存储被禁用或写满 —— 忽略（集合仍然在内存里可用） */
       }

@@ -2,6 +2,45 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 /**
+ * 把后端 `detail` 变成**一句人话**。
+ *
+ * ★★ 为什么需要它：FastAPI 的**参数校验**错误（422）里 ``detail`` 是
+ *   一个**数组**（``[{type, loc, msg, input, ctx}, …]``），而 Element Plus
+ *   的 message 只接受字符串 / VNode ⇒ 直接塞进去弹出来的不是原因，
+ *   是一团乱码（形如 `[object Object]` 或裸数组）。
+ *
+ *   最容易撞上的场景：一次 ``POST /api/query`` 带超过 8192 个下标 ——
+ *   块数**没有上限**，所以“拿一份大文件的全部块去入池”就会走到这里
+ *   （审计 F1）。归一之后至少能看见“indices：List should have at most
+ *   8192 items”。
+ *
+ *   数组形态取每条 ``msg`` 拼起来，并带上字段路径 —— 不带路径的话，
+ *   “at most 8192 items” 根本不知道说的是哪个字段。
+ *
+ * （导出它是为了能被测试钉住：``frontend/tests/apiDetail.test.js``。）
+ */
+export function readableDetail(detail) {
+  if (detail == null) return ''
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const parts = detail.map((d) => {
+      if (d == null) return ''
+      if (typeof d === 'string') return d
+      const where = Array.isArray(d.loc)
+        ? d.loc.filter((x) => x !== 'body' && x !== 'query' && x !== 'path').join('.')
+        : ''
+      const msg = d.msg || d.message || JSON.stringify(d)
+      return where ? `${where}：${msg}` : msg
+    })
+    return parts.filter(Boolean).join('；')
+  }
+  if (typeof detail === 'object') {
+    return detail.msg || detail.message || detail.detail || JSON.stringify(detail)
+  }
+  return String(detail)
+}
+
+/**
  * 统一的 axios 实例。
  *
  * baseURL 留空 = 请求同源 /api/...，由 vite.config.js 的 proxy 转给后端。
@@ -31,7 +70,18 @@ api.interceptors.response.use(
   (resp) => resp,
   (err) => {
     const status = err.response?.status
-    const detail = err.response?.data?.detail
+    // ★ 归一成一句人话（后端 422 的 detail 是数组，见 readableDetail）
+    const detail = readableDetail(err.response?.data?.detail)
+
+    // ★★ 归一要**全局生效**（审计 N8）：以前只归一拦截器自己要弹的那条 toast，
+    //   而视图层大量 `catch` 直接把 `e?.response?.data?.detail` 摆到界面上
+    //   （全项目 35 处）—— 一旦 422 走到那些分支，屏幕上就是一坨 JSON 数组。
+    //   所以这里**就地换掉** `detail`（原始值另存 `rawDetail` 备查）。
+    //   已核实：全项目只有 readableDetail 自己依赖数组形态，换掉不会破坏谁。
+    if (err.response?.data && err.response.data.detail != null) {
+      err.rawDetail = err.response.data.detail
+      err.response.data.detail = detail || err.response.data.detail
+    }
 
     // ★ ``silent``：调用方自己会把这条错误**完整**呈现出来（比如用对话框显示
     //   后端那段好几句的中文解释），拦截器就别再弹一个被截断的 toast 了。
