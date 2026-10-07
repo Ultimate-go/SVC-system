@@ -3,7 +3,7 @@
  * 新增节点向导 —— 这页不是表单页。
  *
  * 后端没有「新增节点」接口 —— 节点是 python scripts/run_nodes.py 起的独立进程，
- * 地址与令牌写在环境变量里，改台数还要求 --reset 重建库。
+ * 地址与令牌写在环境变量里；改台数在界面上改，重启后生效，数据一行都不动。
  * 所以这一页的价值是「把正确的命令生成出来」，不要放一个假的保存按钮。
  */
 import { ref, computed, reactive } from 'vue'
@@ -45,7 +45,7 @@ async function copy(text) {
   <div>
     <PageHeader title="新增存储节点" subtitle="这一页不保存设置，只生成命令" />
 
-    <el-alert type="info" :closable="false" class="mb-3" title="后端没有「新增节点」接口：节点是独立进程，地址与令牌写在环境变量里；改台数需要 --reset 重建库。" />
+    <el-alert type="info" :closable="false" class="mb-3" title="后端没有「新增节点」接口：节点是独立进程，地址与令牌写在环境变量里；改台数在界面上改（重启后生效，数据不动）。" />
 
     <div class="panel form-panel">
       <el-form :model="form" label-width="110px">
@@ -74,7 +74,7 @@ async function copy(text) {
       <template #default>
         <ol class="premises">
           <li>VDS_NODE_IDS 与 VDS_NODE_URLS 必须列出同样的节点，否则启动闸拒绝启动。</li>
-          <li>改台数必须 --reset：单进程模式与跨进程模式的库不能混用。</li>
+          <li>改台数在「集群」页改，重启后生效，数据一行都不动；单进程与跨进程模式的库仍然不能混用。</li>
           <li>漏设环境变量会让后端静默退回单进程模式，然后被启动闸以「节点与协调者不同步」拒绝启动。</li>
         </ol>
       </template>

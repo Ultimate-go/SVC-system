@@ -59,6 +59,7 @@ def current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
+    mgr: StoreManager = Depends(get_manager),
 ) -> UserRow:
     if creds is None or not creds.credentials:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少令牌，请先登录")
@@ -66,6 +67,14 @@ def current_user(
         claims = decode_token(creds.credentials, settings)
     except TokenError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    # ★ 这张令牌被作废了吗（安全审计 I1）：`logout` 之后它必须**真的**不能用，
+    #   否则“退出登录”只挡住了解密，而上传/改块/删除照样能发。
+    if mgr.is_token_revoked(claims):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "这张令牌已被作废（已退出登录），请重新登录",
+        )
 
     username = claims.get("sub", "")
     user = db.execute(

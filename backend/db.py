@@ -11,21 +11,28 @@
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-__all__ = ["Base", "Database", "WRITE_LOCK"]
+__all__ = ["Base", "Database"]
 
 
 class Base(DeclarativeBase):
     """所有表的基类。"""
 
 
-#: 全局写锁 —— SQLite 只允许一个写事务，串行化比死锁好。
-WRITE_LOCK = threading.RLock()
+# 这里曾有一个 ``WRITE_LOCK = threading.RLock()``，**从未被任何地方获取**
+# （安全审计 I2）；而 ``__all__`` 里又导出了它 —— 读代码的人会以为
+# 写操作已经被串行化了。声明了却不用，比不声明更危险，所以直接删掉。
+#
+# 本项目真正的并发模型是：
+#   * **单进程单 worker**（``backend/manager.py`` 的模块说明里写死了这一点）；
+#   * 所有会改**内存状态**的操作由 ``StoreManager._lock`` 串行化；
+#   * 每个请求各开一个 SQLAlchemy ``Session``（各一个连接），所以**并发写**
+#     仍可能撞 SQLITE_BUSY —— 那是 SQLite 的固有行为，由 ``_sqlite_pragmas``
+#     里的 WAL + busy_timeout 兜着，**不是**靠这把锁。
 
 
 class Database:
@@ -46,6 +53,12 @@ class Database:
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA synchronous=NORMAL")
+            # ★ busy_timeout（安全审计 N5）：上面那段注释提到了它，但以前
+            #   **从未设置** —— 注释与实现不一致，读代码的人会以为撞上
+            #   SQLITE_BUSY 时有等待窗口。每个请求各开一个 Session（各一个
+            #   连接），并发写仍可能撞上；给 5 秒等待窗口比立刻报
+            #   “database is locked”合理得多。
+            cur.execute("PRAGMA busy_timeout=5000")
             cur.close()
 
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)

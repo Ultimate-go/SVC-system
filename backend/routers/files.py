@@ -41,7 +41,7 @@ from ..manager import (
     StoreManager,
 )
 from ..models import BlockRow, FileRow, UserRow
-from ..schemas import DecryptIn, FilePatchIn
+from ..schemas import DecryptIn, FilePatchIn, ReplayIn
 from core.keywrap import KeyWrapError
 from core.timing import collect
 from core.transport import TransportError, WriteError
@@ -206,11 +206,16 @@ def upload(
         两边都有限制：下面的下限防“1 字节一块把位置上限撞了”（那时的报错
         看起来像“文件太大”，指不到真正原因），上限防“一块 1 GB 把内存吃光”。
 
-    **用同步路由 + ``file.file.read()``**（而不是 ``await file.read()``）：
+    **用同步路由 + ``file.file.read(n)``**（而不是 ``await file.read()``）：
     向量追加要拿全局锁、还是纯 CPU 的模幂，写成异步只会阻塞事件循环；
     交给 FastAPI 的线程池更合适。
+
+    ★ 读的时候**带上上限**（安全审计 I4）：以前是 ``file.file.read()`` ——
+    先把整份读进内存，然后才判 8 MB 上限。那么 8 MB 上限根本拦不住内存峰值，
+    一个 2 GB 的请求会先把进程吃掉。现在只读“上限 + 1”字节：
+    多读的那 1 字节是为了区分“刚好等于上限”与“超过上限”。
     """
-    data = file.file.read()
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if not data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件为空")
     if len(data) > MAX_UPLOAD_BYTES:
@@ -491,7 +496,9 @@ def _do_append(
         ),
     )
     db.refresh(row)
-    metrics.record("truncate", sw.total_ms(), sw.rows())
+    # ★ 这里记的必须是 **append**（安全审计 P5）：以前 append 记成 "truncate"、
+    #   truncate 记成 "append"，两个数在性能页上完全颠倒 —— 排查时会误导人。
+    metrics.record("append", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 
@@ -553,7 +560,8 @@ def _do_truncate(
         ),
     )
     db.refresh(row)
-    metrics.record("append", sw.total_ms(), sw.rows())
+    # ★ 同理：这里记的必须是 **truncate**（安全审计 P5）。
+    metrics.record("truncate", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 
@@ -704,6 +712,119 @@ def file_detail(
 
 
 # ---------------------------------------------------------------------------
+# 客户端自解密（服务器不可信）
+# ---------------------------------------------------------------------------
+
+@router.post("/{file_id}/replay")
+def replay_route(
+    file_id: int,
+    body: ReplayIn,
+    user: UserRow = Depends(current_user),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    r"""**回滚演示**：让服务器对某一块交回「旧版本」（演示“服务器不可信”）。
+
+    ★ 这不是“业务功能”，是**演示工具** —— 把“服务器不可信”这句话变成看得见
+      的一幕：打开它，服务器就**真的**开始对这块交回旧密文（后续 ``/cipher``
+      里换掉），客户端自己算出的分量对不上当前基准，于是**验证不通过**。
+
+    ★ 演示顺序（重要）：**先**打开（存下当前这版）→ **再**改块 → **然后**解密。
+      这样服务器交回的正好是“改之前那一版”。关掉就恢复正常。
+
+    ★ 只有**所有者**（或管理员）能开：这是对自己的文件做演示。
+      开关本身进审计流水 —— 演示归演示，动作要留痕。
+    """
+    row = db.get(FileRow, file_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+    if row.owner != user.username and user.role != "admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有文件所有者能对这份文件做回滚演示",
+        )
+    try:
+        out = mgr.replay_arm(row.owner, row.file_key, body.block_idx, on=body.on)
+    except Exception as exc:  # noqa: BLE001 - 文件/块不存在或越界，都归 400
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    audit(
+        db,
+        user.username,
+        "replay_arm" if body.on else "replay_disarm",
+        f"{row.owner}/{row.file_key} 第 {body.block_idx} 块",
+        detail=(
+            "打开回滚演示：/cipher 对这一块将交回存下来的旧版本"
+            if body.on
+            else "关闭回滚演示：恢复交回当前版本"
+        ),
+    )
+    return out
+
+
+@router.post("/{file_id}/cipher")
+def cipher_route(
+    file_id: int,
+    body: DecryptIn,
+    with_primes: bool = True,
+    user: UserRow = Depends(current_user),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    """**取密文（不解密）** —— 浏览器自解密 + 自验证那条路的入口。
+
+    与 :func:`decrypt` 的差别只有一句话，但它是整个安全模型的分界：
+
+    * ``/decrypt``：服务端拿会话私钥把内容解开，再把**明文**给你。
+      于是你拿到的东西**无法被你自己检验** —— 服务器给什么就是什么；
+    * ``/cipher``：服务端只交出**材料** —— 密文段、IV、明文长度、
+      块密钥的 SM2 密文、一份证据，以及公开参数（N / g / 素数）。
+      块密钥的解封与内容解密都在**浏览器**里做，
+      而且密文→分量→承诺这条链每一步都能被浏览器独立重算。
+
+    服务端在这条路上**不掌握任何秘密**（会话私钥不再参与），
+    它唯一能作恶的地方是"给一份过不了验证的应答" —— 而那会被当场拒绝。
+
+    ★ 权限与 ``/decrypt`` 一致（只有所有者）—— 但这**不是**"别人拿不到密文"：
+      密文本就存在不可信节点上，任何登录用户都能通过 ``/api/query`` 拿到
+      它对应的**分量**（验证不受限）。限制在这条路上只是"别让界面把
+      块密钥密文当成可读的东西散出去"。
+    """
+    row = _file_or_404(db, file_id)
+
+    if not can_decrypt(user, row):
+        audit(
+            db,
+            user.username,
+            "cipher_denied",
+            f"{row.owner}/{row.file_key}",
+            ok=False,
+            detail="不是所有者",
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, DENIED_NOT_OWNER)
+
+    try:
+        with collect() as sw:
+            out = mgr.cipher_pack(
+                row.owner, row.file_key, body.indices, with_primes=with_primes
+            )
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except OutOfRange as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    audit(
+        db,
+        user.username,
+        "cipher",
+        f"{row.owner}/{row.file_key}",
+        detail=f"{len(out['blocks'])} 块密文（未解密）",
+    )
+    out["file_id"] = row.id
+    out["timings"] = sw.payload()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 解密（受限）
 # ---------------------------------------------------------------------------
 
@@ -759,8 +880,12 @@ def decrypt(
         )
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "这次会话里没有你的私钥（它只在登录时用口令解封、只放在后端内存里）。\n"
-            "  重新登录一次即可 —— 后端重启、或换了张令牌，都会看到这一句。",
+            "服务端这次会话里没有你的私钥 —— 这是**默认模型**：\n"
+            "  私钥在浏览器里用口令解封（登录响应里的 key_blob），"
+            "后端不解封、也不保存。\n"
+            "  要解密请走客户端路径：POST /api/files/{id}/cipher 取密文，"
+            "由浏览器解封块密钥并 SM4 解密。\n"
+            "  （想对比旧模型：登录时显式传 server_key=true。）",
         )
 
     try:

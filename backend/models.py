@@ -33,13 +33,17 @@ from .db import Base
 
 __all__ = [
     "CrsRow",
-    "GlobalRow",
+    "MetaRow",
+    "FileDeltaRow",
     "UserRow",
     "FileRow",
     "BlockRow",
     "NodeBlobRow",
     "NodeStateRow",
+    "NodeRegistryRow",
     "AuditRow",
+    "RevokedTokenRow",
+    "ReplayRow",
     "utcnow",
 ]
 
@@ -344,3 +348,69 @@ class AuditRow(Base):
     #: 最后写备注的人与时间（空 = 从没人批注过）。留痕是为了批注本身也可追溯。
     remark_by: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     remark_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class RevokedTokenRow(Base):
+    """已作废的令牌 / 已按人撤销的账号（安全审计 I1、I2）。
+
+    ★ 为什么**必须落库**：撤销表放内存时，“登出 / 改口令 / 停用”的效力与
+      **进程寿命**一样长。而按生产惯例设了 ``VDS_SECRET_KEY`` 之后，
+      签名密钥跨重启**不变**、令牌本身仍然有效 —— 于是一旦重启，
+      已经登出（或已经泄露）的令牌就**复活**了，最长能活到
+      ``token_ttl_minutes``。
+
+    ★ 两种记录同住一张表（由 ``jti`` 前缀区分）：
+
+    * **按张**撤销（登出）：``jti`` 就是令牌的 jti，只看 ``exp_ts``；
+    * **按人**撤销（改口令 / 停用 / 改角色）：``jti = "*user*<用户名>"``，
+      这时 ``before_ts`` 才有意义 —— “**此刻之前**签发的令牌一律作废”。
+      服务端根本不知道某个人签过多少张令牌（JWT 本来就是无状态的），
+      所以只能退回时间戳黑名单。
+    """
+
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 令牌属于谁 / 被撤销的那个账号。
+    sub: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: 这条记录**什么时候可以删**（Unix 秒）—— 清理只看它。
+    exp_ts: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    #: 按人撤销时的**签发时刻阈值**（Unix 秒）；按张撤销时为 0（不看它）。
+    before_ts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReplayRow(Base):
+    """**回滚演示**：让服务器对某一块交回“旧版本”（演示“服务器不可信”）。
+
+    ★ 它是什么：拥有者在**改块之前**把“回滚开关”打开，这一块**当时**的密文
+      就存在这行里；此后 ``/cipher`` 对这一块交回的就是**这一份**，而不是
+      当前那份。客户端拿到的是**真的旧密文** —— 走的是同一条真链路，
+      于是它自己算出的分量对不上**当前**基准，验证不通过。
+
+    ★ 为什么不“前端假装”：演示要经得住追问。“服务器真的交回了旧数据”
+      与“前端自己造了个假的”是两回事 —— 前者才叫“服务器不可信”。
+
+    ★ 关掉开关就把这行删掉，行为立刻恢复正常；开关本身会进审计流水。
+    """
+
+    __tablename__ = "replay_blocks"
+    __table_args__ = (
+        UniqueConstraint("owner", "file_key", "block_idx", name="uq_replay_pos"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    block_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 存下来那一版的密文（十六进制）。
+    ciphertext_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    iv_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 块密钥密文（JSON 文本）—— 与 ``blocks.key_ct`` 同形，否则客户端解不开。
+    key_ct: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 服务端声称的分量。**要一并存**：不存的话“声称的分量”与旧密文不符，
+    #: 会额外暴露“这一块被动过脚”，演示反而失真。
+    element: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 存下来那一刻的全局位置（只供审计/显示）。
+    global_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    armed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

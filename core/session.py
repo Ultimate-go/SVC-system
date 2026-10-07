@@ -53,8 +53,20 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
+import os
+import time
+from pathlib import Path
 
-from svc import CRS, CRSn, DeterministicRNG, PrimeGen, generate_primes, product_tree
+from svc import (
+    CRS,
+    CRSn,
+    DeterministicRNG,
+    PrimeGen,
+    generate_primes,
+    is_probable_prime_screened,
+    product_tree,
+)
 
 from vds.digest import Digest
 
@@ -64,6 +76,9 @@ __all__ = [
     "MappingPrimeGen",
     "make_crs",
     "get_primegen",
+    "prime_cache_path",
+    "warm_prime_cache",
+    "DEFAULT_PRIME_CACHE_DIR",
     "crs_to_dict",
     "crs_from_dict",
     "new_session",
@@ -94,11 +109,221 @@ DEFAULT_MODULUS_BITS: int = 1024
 # 素数表缓存（规划 §6.2）
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 素数表的**磁盘**缓存（跨进程 / 跨重启共享）
+# ---------------------------------------------------------------------------
+#
+# 为什么能落盘：素数序列完全由 ``bits`` 决定（起点恒为 2^(bits-1)、单调扫描），
+# 是**公开参数**，不含任何秘密；落盘只是把“重算一遍”换成“读回来”。
+# 为什么值得落盘：257 位素数实测 **5-7 ms/个**，8192 个就是 40 s 以上；
+# 而系统里同时有 **5 个进程**（协调者 + 4 台节点）各持一份内存表，重启就从头再来。
+#
+# 安全边界（把它当**不可信输入**）：本地能改这个文件的人本来也能改数据库。
+# 读回来的前缀要过四道校验：头三行（位长 / 个数 / 指纹）、严格递增与位长区间
+# （``PrimeGen._adopt``）、**前 8 个与现场重算逐位相同**、以及均匀抽样 8 个做
+# 素性测试。任何一道不过就丢弃重算，并把文件重写一遍。
+
+#: 素数表磁盘缓存的目录。可用 ``VDS_PRIME_CACHE`` 覆盖（演示 / 冒烟指到临时目录）。
+DEFAULT_PRIME_CACHE_DIR: Path = Path(__file__).resolve().parents[1] / ".primecache"
+
+#: 缓存文件的格式标记。改了格式就换一个 mark，老文件会被当成不认得而重建。
+_CACHE_MAGIC = "# VDS prime cache v1"
+
+#: 每次校验抽多少个点（前 8 个重算对拍 + 均匀抽样 8 个）。
+_SAMPLE_CHECKS = 8
+
+
+def prime_cache_path(bits: int, *, directory: str | Path | None = None) -> Path:
+    """某个位长对应的缓存文件路径。"""
+    base = directory or os.environ.get("VDS_PRIME_CACHE") or DEFAULT_PRIME_CACHE_DIR
+    return Path(base) / f"primes-b{int(bits)}.txt"
+
+
+def _disk_count(path: Path) -> int:
+    """只读头部看盘上已经有多少个素数（决定“要不要写”）。读不到就当 0。"""
+    try:
+        with path.open("r", encoding="ascii") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.startswith("# count="):
+                    return int(line.split("=", 1)[1])
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+
+def _load_prime_cache(path: Path, bits: int) -> list[int] | None:
+    """读回并校验磁盘上的素数前缀。任何一项不对就返回 ``None``（调用方重算）。"""
+    try:
+        text = path.read_text(encoding="ascii")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if len(lines) < 5 or lines[0].strip() != _CACHE_MAGIC:
+        return None
+    head: dict[str, str] = {}
+    for line in lines[1:4]:
+        if not line.startswith("# ") or "=" not in line:
+            return None
+        key, val = line[2:].split("=", 1)
+        head[key.strip()] = val.strip()
+    try:
+        if int(head["bits"]) != bits:
+            return None
+        want_count = int(head["count"])
+    except (KeyError, ValueError):
+        return None
+    body = lines[4:]
+    if want_count <= 0 or len(body) != want_count:
+        return None
+    if hashlib.sha256(("\n".join(body) + "\n").encode("ascii")).hexdigest() != head.get(
+        "sha256"
+    ):
+        return None
+    try:
+        primes = [int(s) for s in body]
+    except ValueError:
+        return None
+    # ① 前若干个与现场重算逐位相同 —— 这一步顺带钉住“起点没被改过”
+    probe = min(_SAMPLE_CHECKS, len(primes))
+    if primes[:probe] != PrimeGen(max_sz=_SAMPLE_CHECKS, bits=bits).first(probe):
+        return None
+    # ② 均匀抽样做素性测试（全量逐个查太贵，等于把省下的时间又花回去）
+    step = max(1, len(primes) // _SAMPLE_CHECKS)
+    for p in primes[::step][:_SAMPLE_CHECKS]:
+        if not is_probable_prime_screened(int(p)):
+            return None
+    return primes
+
+
+class _PersistentPrimeGen(PrimeGen):
+    """生成素数时顺手**落盘**的 ``PrimeGen``。
+
+    只在本层做 IO（``svc`` 保持零依赖、不碰文件），四条分寸：
+
+    * **节流**：个数涨到 ``max(64, 上次落盘数 × 1.5)`` 才写一次 ——
+      8192 个素数全程只写 ~13 次；
+    * **原子**：先写 ``*.tmp`` 再 ``os.replace``，读者永远看不到半截文件；
+    * **不倒退**：盘上若已经比手上多（别的进程写得更快），就不写，
+      免得把小前缀盖回去；
+    * **失败只警告一次**：落盘是优化，写不进去也必须能继续算。
+    """
+
+    __slots__ = ("_path", "_saved", "_warned")
+
+    def __init__(
+        self,
+        max_sz: int,
+        bits: int,
+        *,
+        path: Path,
+        seed: list[int] | None = None,
+        saved: int | None = None,
+    ) -> None:
+        super().__init__(max_sz=max_sz, bits=bits, seed=seed)
+        self._path = path
+        self._saved = int(saved if saved is not None else self.count)
+        self._warned = False
+
+    def _extend(self, count: int) -> None:
+        super()._extend(count)
+        self._maybe_save()
+
+    def _maybe_save(self) -> None:
+        n = self.count
+        if n <= self._saved or n < max(64, int(self._saved * 1.5)):
+            return
+        self.flush()
+
+    def flush(self) -> bool:
+        """立即把当前前缀写盘（返回是否真的写了）。预热与收尾用它。"""
+        n = self.count
+        if n <= 0 or _disk_count(self._path) >= n:
+            self._saved = max(self._saved, n)
+            return False
+        body = "\n".join(str(p) for p in self._cache)
+        text = (
+            "\n".join(
+                (
+                    _CACHE_MAGIC,
+                    f"# bits={self._bits}",
+                    f"# count={n}",
+                    f"# sha256={hashlib.sha256((body + chr(10)).encode('ascii')).hexdigest()}",
+                )
+            )
+            + "\n"
+            + body
+            + "\n"
+        )
+        tmp = self._path.with_name(f"{self._path.name}.tmp{os.getpid()}")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(text, encoding="ascii")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            if not self._warned:
+                self._warned = True
+                print(f"[素数表] 落盘失败（不影响计算）：{exc}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return False
+        self._saved = n
+        return True
+
+
+def warm_prime_cache(bits: int, count: int) -> dict:
+    """确保磁盘缓存里至少有 ``count`` 个 ``bits`` 位素数（不足就补齐并落盘）。
+
+    供启动脚本用：**一次性**把当前用量需要的素数算好并落盘，之后协调者与
+    4 台节点启动时都只是“读回来”，不会再出现“某个进程在上传途中独自补一批素数”
+    的那种尖峰（实测 643 ms / 896 ms，位置正好在 2 的幂的边界）。
+
+    :returns: ``{bits, have_before, count, generated, seconds, path}`` ——
+        给启动脚本如实报话用（“缓存命中”还是“首次生成、用了多少秒”）。
+    """
+    bits = int(bits)
+    count = max(1, int(count))
+    path = prime_cache_path(bits)
+    seed = _load_prime_cache(path, bits)
+    have = len(seed) if seed else 0
+    if have >= count:
+        return {
+            "bits": bits,
+            "have_before": have,
+            "count": have,
+            "generated": False,
+            "seconds": 0.0,
+            "path": str(path),
+        }
+    pg = _PersistentPrimeGen(
+        max_sz=max(count, have, _SAMPLE_CHECKS),
+        bits=bits,
+        path=path,
+        seed=seed,
+        saved=have,
+    )
+    t0 = time.monotonic()
+    pg.first(count)
+    pg.flush()
+    return {
+        "bits": bits,
+        "have_before": have,
+        "count": pg.count,
+        "generated": True,
+        "seconds": round(time.monotonic() - t0, 3),
+        "path": str(path),
+    }
+
+
 #: ``(n_max, bits) -> PrimeGen``。素数只由这两个参数决定，可以全局共享。
 _PRIMEGEN_CACHE: dict[tuple[int, int], PrimeGen] = {}
 
 
-def get_primegen(n_max: int, bits: int) -> PrimeGen:
+def get_primegen(n_max: int, bits: int, *, disk: bool = True) -> PrimeGen:
     """取（或新建）一个按 ``(n_max, bits)`` 缓存的素数映射。
 
     :class:`~svc.primegen.PrimeGen` 是**惰性**的：构造耗时 0 ms，成本全在
@@ -109,6 +334,11 @@ def get_primegen(n_max: int, bits: int) -> PrimeGen:
     快照之所以安全：``PrimeGen`` 完全由 ``(max_sz, bits)`` 决定
     （起点恒为 :math:`2^{\\text{bits}-1}`，单调扫描），同一个键必然给出
     逐位相同的素数序列。
+
+    另有一条**磁盘**缓存：先试 ``prime_cache_path(bits)``（默认 ``.primecache/``，
+    可用 ``VDS_PRIME_CACHE`` 覆盖），命中就直接接住那段前缀，一个素数都不用算；
+    没命中就现场算，并在算的过程中按节流策略落盘 —— 这样**5 个进程**与**重启**
+    都不用各自从零算一遍。``disk=False`` 可关掉它（对照 / 测试用）。
     """
     if n_max <= 0:
         raise ValueError("n_max 必须为正")
@@ -117,9 +347,25 @@ def get_primegen(n_max: int, bits: int) -> PrimeGen:
     key = (n_max, bits)
     pg = _PRIMEGEN_CACHE.get(key)
     if pg is None:
-        pg = PrimeGen(max_sz=n_max, bits=bits)
+        pg = _new_primegen(n_max, bits, disk=disk)
         _PRIMEGEN_CACHE[key] = pg
     return pg
+
+
+def _new_primegen(n_max: int, bits: int, *, disk: bool) -> PrimeGen:
+    """新建一个素数映射：先试磁盘缓存，没有再现场算（算的过程中顺手落盘）。"""
+    if not disk:
+        return PrimeGen(max_sz=n_max, bits=bits)
+    path = prime_cache_path(bits)
+    seed = _load_prime_cache(path, bits)
+    saved = len(seed) if seed else 0
+    if seed and saved > n_max:
+        # 本次只申请了更小的容量：取前缀就够（``_adopt`` 拒绝超容量）
+        seed = seed[:n_max]
+        saved = len(seed)
+    return _PersistentPrimeGen(
+        max_sz=n_max, bits=bits, path=path, seed=seed, saved=saved
+    )
 
 
 # ---------------------------------------------------------------------------

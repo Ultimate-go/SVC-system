@@ -466,7 +466,21 @@ def tail(path: Path, lines: int = 25) -> str:
 
 
 def load_token() -> str:
-    """令牌：环境变量 > ``nodes/token.txt`` > 现场生成并存下来。"""
+    """令牌：环境变量 > ``nodes/token.txt`` > 现场生成并存下来。
+
+    ★★ **轮换方式**（安全审计 I7）：停服务 → 删 ``nodes/token.txt`` → 重启。
+      重启时 :func:`load_token` 会生成新的，并由 :func:`node_env` 统一发给
+      后端与全部节点进程 —— 旧令牌立刻失效，不需要改任何代码或配置。
+
+    ★ 为什么不做"一节点一令牌"：令牌是**环形**的（节点之间互相校验），
+      要按节点隔离就得把分发与轮换做成 N×N 的矩阵，配错的代价
+      （某两个节点互相拒收 → 现象是"数据莫名其妙推不过去"）远高于收益。
+      它的威胁模型是"**防局域网内有人随手调节点接口**"，不是"防本机同用户" ——
+      同一用户本来就能读后端进程内存、读协调者库。所以这里只做三件事：
+      ① 令牌不打印、不进命令行（只进环境变量与这个文件）；
+      ② 文件权限收到只有属主可读写（``0o600``，类 Unix 上生效）；
+      ③ 轮换路径短且文档化（就是上面那句）。
+    """
     env = os.environ.get("VDS_NODE_TOKEN", "").strip()
     if env:
         return env
@@ -477,6 +491,10 @@ def load_token() -> str:
     fresh = secrets.token_urlsafe(24)
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_FILE.write_text(fresh, encoding="utf-8")
+    try:
+        os.chmod(TOKEN_FILE, 0o600)   # ★ 类 Unix 上生效；Windows 上无副作用。
+    except OSError:
+        pass
     say(f"  生成节点令牌并记到 {TOKEN_FILE.relative_to(ROOT)}（以后每次都用它）")
     return fresh
 
@@ -1014,7 +1032,7 @@ def banner() -> None:
     say("  登录页不列演示账号：用上面这些账号 + 统一口令登录。")
     # ★ 这里**不能**写死“默认没有任何预设文件”：`--demo` 启动时上一步刚灌了
     #   5 个演示文件，同一屏里印这句就是自相矛盾 —— 用户会以为库里是空的，
-    #   直接去上传新文件。上一步 [3/5] 已经如实说了这次灌没灌，这里只描述入口。
+    #   直接去上传新文件。上一步 [4/6] 已经如实说了这次灌没灌，这里只描述入口。
     say("  库里要不要有文件：带 --demo 启动会灌 5 个演示文件，否则是空的 ——")
     say("  也可以直接去「文件与块」页自己选文件、自己决定切成几块。")
     say()
@@ -1025,6 +1043,67 @@ def banner() -> None:
 
 
 # ---------------------------------------------------------------- 主流程
+
+
+def _used_positions() -> int:
+    """库目前用掉多少个全局位置（只读 vds.db 的 blocks 表；读不到就当 0）。
+
+    ★ 只读 + 容错：库不存在 / 表不存在 / 被占用，一律返回 0 —— 预热只是个
+    优化，绝不能因为它起不来。
+    """
+    db = ROOT / "vds.db"
+    if not db.exists():
+        return 0
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1.0)
+        try:
+            row = con.execute(
+                "SELECT COALESCE(MAX(global_index), -1) FROM blocks"
+            ).fetchone()
+            return int(row[0]) + 1
+        finally:
+            con.close()
+    except Exception:
+        return 0
+
+
+def warm_primes(target: int | None) -> None:
+    """按需把素数表落盘：让协调者与 4 台节点启动时都只是“读回来”。
+
+    ``target is None`` —— 按当前用量自动（覆盖到下一个 2 的幂，至少 256 个）；
+    ``target == 0``    —— 跳过；``target > 0`` —— 直接算到这么多个。
+
+    为什么要预热：257 位素数实测 5-7 ms/个，而系统里有 5 个进程各持一份内存表。
+    不预热的话，某个进程会在**上传途中**独自补一批素数（实测 643 ms / 896 ms
+    两个尖峰，位置正好在 2 的幂的边界）；预热一次之后大家都只是读文件。
+    """
+    try:
+        from backend.config import Settings
+        from core.session import warm_prime_cache
+    except Exception as exc:  # 依赖缺失也不该拦住启动
+        say(f"  跳过（{type(exc).__name__}: {exc}）")
+        return
+    st = Settings()
+    bits = int(st.l) + 1
+    n_max = int(st.n_max)
+    if target == 0:
+        say("  按要求跳过（--warm 0）")
+        return
+    if target is None:
+        used = _used_positions()
+        want = 256
+        while want < min(used + 1, n_max):
+            want *= 2
+        target = min(want, n_max)
+    target = max(1, min(int(target), n_max))
+    info = warm_prime_cache(bits, target)
+    if info["generated"]:
+        say(f"  首次生成到 {info['count']} 个素数（{info['seconds']} s），已落盘")
+    else:
+        say(f"  磁盘缓存命中 {info['count']} 个素数（{info['seconds']} s）")
+    say(f"  {info['path']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1042,6 +1121,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--demo", action="store_true", help="顺带灌 5 个演示文件（默认不灌）")
     ap.add_argument("--stop", action="store_true", help="只把节点/后端/前端停掉")
     ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    ap.add_argument(
+        "--warm",
+        type=int,
+        default=None,
+        metavar="N",
+        help="素数表预热到 N 个（不填=按当前用量自动，0=跳过，8192=直接算满）",
+    )
     ap.add_argument(
         "--strict",
         action="store_true",
@@ -1148,7 +1234,7 @@ def main(argv: list[str] | None = None) -> int:
             say("  这次不启动：否则会拿着旧数据接着跑，而节点数据已经清过了，两边对不上。")
             return 1
 
-    say("\n[1/5] 库的清理判定")
+    say("\n[1/6] 库的清理判定")
     got_db = (ROOT / "vds.db").exists()
     need_seed = args.reset or not got_db
     if got_db and not args.reset:
@@ -1160,14 +1246,17 @@ def main(argv: list[str] | None = None) -> int:
         say("  没有 vds.db —— 节点数据也一并清掉（否则两边对不上）")
         reset_data()
 
-    say(f"\n[2/5] 存储节点（{len(NODES)} 台）")
+    say("\n[2/6] 素数表（预热）")
+    warm_primes(args.warm)
+
+    say(f"\n[3/6] 存储节点（{len(NODES)} 台）")
     nodes_proc = ensure_nodes(token)
     if nodes_proc is None and not all(
         node_state(node_port(i), token) == "up" for i in range(len(NODES))
     ):
         return 1
 
-    say("\n[3/5] 账号")
+    say("\n[4/6] 账号")
     if not need_seed:
         say("  账号不动（库还在）")
     elif seed_accounts(args.demo, token) != 0:
@@ -1176,12 +1265,12 @@ def main(argv: list[str] | None = None) -> int:
         suffix = "（含 5 个演示文件，已经真的推到节点上）" if args.demo else "（没有预设文件）"
         say("  账号已建" + suffix)
 
-    say("\n[4/5] 后端")
+    say("\n[5/6] 后端")
     backend_proc = start_backend(token)
     if backend_proc is None and not alive(PORTS.backend):
         return 1
 
-    say("\n[5/5] 前端")
+    say("\n[6/6] 前端")
     frontend_proc = start_frontend()
 
     if not args.no_browser and alive(PORTS.frontend):

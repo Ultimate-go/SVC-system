@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vds-system"
 dynamic = ["version"]
-description = "基于增量聚合向量承诺的可验证分布式存储与可控共享系统（ASIACRYPT 2020 §5.2 / §8.2，全系统一条向量）"
+description = "基于增量聚合向量承诺的可验证分布式存储与可控共享系统（ASIACRYPT 2020 §5.2 / 会议版 §8 = 全文版 §7；一文件一向量 + 跳文件合并）"
 requires-python = ">=3.10"
 # svc / vds 两个算法包**零依赖**（纯标准库）；cryptography 只被 core/ 用到，
 # 供给 SM4 与 SM3。两者边界看得出：算法核不 import core。
