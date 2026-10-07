@@ -204,12 +204,13 @@ onMounted(() => {
           <span class="section-note mono">NO MASTER KEY</span>
         </div>
         <div class="panel key-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">私钥仅在登录会话中解封</span><span class="live-mark"><i />PROTECTED</span></div>
+          <div class="panel-title-row"><span class="panel-subtitle">私钥在浏览器里解封，服务端不留</span><span class="live-mark"><i />PROTECTED</span></div>
           <div class="keywrap">
             <div class="keywrap-item"><span class="k">方案</span><span class="v">{{ keywrap.scheme }}</span></div>
             <div class="keywrap-item"><span class="k">用户 / 有密钥</span><span class="v mono">{{ keywrap.users }} / {{ keywrap.user_keys }}</span></div>
-            <div class="keywrap-item"><span class="k">会话私钥在内存</span><span class="v mono">{{ keywrap.sessions_with_key }}</span></div>
+            <div class="keywrap-item"><span class="k">服务端内存中的私钥</span><span class="v mono">{{ keywrap.sessions_with_key }}<span class="text-3" style="font-size: 11px">（默认模型下恒为 0）</span></span></div>
             <div class="keywrap-item"><span class="k">私钥存储位置</span><span class="v">{{ keywrap.private_key_storage }}</span></div>
+            <div class="keywrap-item"><span class="k">解封在哪发生</span><span class="v">{{ keywrap.session_key_location || '——' }}</span></div>
           </div>
         </div>
       </section>

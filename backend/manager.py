@@ -26,7 +26,7 @@ from time import perf_counter
 from pathlib import Path
 from typing import Callable, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from core import GlobalSession, VectorStore, crs_from_dict, new_session
 from core.crypto import split_segments, vector_element
@@ -46,6 +46,7 @@ from core.keywrap import (
     wrap_private_key,
 )
 from core.store import proof_bytes
+from core.sm2 import public_key_of
 from core.timing import stage
 from core.transport import NodeTransport, TransportError, WriteError
 from svc import Opening, VerifyCode, as_index_set
@@ -57,7 +58,9 @@ from vds.digest import Digest
 from vds.pos import DEFAULT_LAMBDA_POS
 
 from .config import Settings, read_deploy_node_count
+from .security import decode_token, hash_password
 from .db import Database
+from .schemas import MAX_INDICES
 from .models import (
     BlockRow,
     CrsRow,
@@ -67,6 +70,8 @@ from .models import (
     NodeBlobRow,
     NodeRegistryRow,
     NodeStateRow,
+    ReplayRow,
+    RevokedTokenRow,
     UserRow,
 )
 
@@ -130,6 +135,26 @@ class OutOfRange(Exception):
     """请求超出当前向量范围，或超出全局位置上限。"""
 
 
+def _to_int(raw, *, what: str) -> int:
+    """十进制字符串 → 整数；**把“太长”变成 400，而不是 500**（安全审计 P6）。
+
+    ★ Python 3.12 起，``int("9" * 5000)`` 会抛 ``ValueError``
+      （``sys.set_int_max_str_digits()`` 默认 4300）。那是**用户输入**造成的，
+      而它以前会一路冒到 FastAPI 的默认处理器，表现为“服务端 500”——
+      把用户的错报成了服务端的错。
+
+    本方案的合法值最多 309 位十进制（``|N|`` = 1024 位），所以
+    schema 层已用 :data:`~backend.schemas.MAX_INT_CHARS` 拦了第一道；
+    这里是**第二道**：将来某个字段漏了约束，也不会变成 500。
+    """
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise OutOfRange(
+            f"{what} 不是合法的十进制整数（长度 {len(raw)}）：{exc}"
+        ) from exc
+
+
 class DecryptDenied(Exception):
     """**密码学那道门**拒绝了：块密钥解不开。
 
@@ -161,6 +186,12 @@ class StoreManager:
         self._keys: dict[str, tuple[str, int]] = {}
         #: 同时只保留这么多个会话私钥，超了丢掉最早的（防长期运行无限增长）。
         self._max_sessions: int = 64
+        #: 已作废令牌的 ``jti -> exp``（见 :meth:`revoke_token`）。
+        #: ★ 这只是**缓存**，真身在 ``revoked_tokens`` 表里（安全审计 I1）。
+        self._revoked: dict[str, float] = {}
+        #: “按人撤销”的签发时刻阈值：``用户名 -> before_ts``（见 :meth:`revoke_user_tokens`）。
+        #: 同样是缓存；0 表示“查过了，这个人没被按人撤销过”。
+        self._revoked_users: dict[str, int] = {}
         #: 写推失败时“还欠一步落库”的那个回调（见 :meth:`retry_push`）。
         #:
         #: ★ 为什么要有它：向量层的现场（``store._pending``）能保证
@@ -315,6 +346,64 @@ class StoreManager:
             _write(own)
             own.commit()
 
+    def rekey_with_blob(self, username: str, new_password: str, blob: dict) -> None:
+        """用**浏览器封好的**私钥密文改口令（安全审计 I8）。
+
+        ★ 与 :meth:`rewrap_user_key` 的分工：
+
+        * ``rewrap_user_key``：调用方**手里有明文私钥**（旧的
+          ``server_key=true`` 路径），由服务端自己重封 —— 代价是它必须
+          先从内存里拿到私钥；
+        * ``rekey_with_blob``：私钥**只在浏览器**，重封也在浏览器做，
+          服务端只登记结果。默认模型走的是这一条。
+
+        服务端仍要**验两件事**，否则“改口令”就成了一个可以任意写私钥的接口：
+
+        ① 新密文能用**新口令**解开（形状 / 口令 / 密文三者自洽）；
+        ② 解出来的私钥必须**就是这个人原来那把** —— 拿 ``users.pub_key``
+           对拍（``public_key_of(sk) == pub_key``）。
+
+        ★ ② 这一条不能省：少了它，攻击者可以把**自己的**私钥封装后交上来，
+          从此这个账号名下的文件全部归他解 —— 而 ``pub_key`` 就是那把
+          “当初封块密钥时用的公钥”，它绑定了唯一一把私钥。
+
+        ★ 口令哈希与私钥密文必须**同生同死**：分开写会留下
+          “新口令过不了哈希、旧口令解不开密文”的锁死账号。
+
+        :raises NotFound: 账号还没有密钥对。
+        :raises Conflict: 密文解不开，或解出来的私钥对不上公钥。
+        """
+        with self._lock, self.db.session() as db:
+            row = self._user_row(db, username)
+            if not row.pub_key:
+                raise NotFound(f"用户 {username} 还没有密钥对")
+
+            try:
+                sk = unwrap_private_key(new_password, blob)
+            except KeyWrapIntegrityError as exc:
+                raise Conflict(
+                    "新私钥密文与**新口令**不匹配（解不开）—— "
+                    "浏览器那边的重封可能没完成，或者密文在转交中被改过"
+                ) from exc
+            except KeyWrapError as exc:
+                raise Conflict(f"新私钥密文的格式不对：{exc}") from exc
+
+            # ★★ 必须比**同一种格式**：``public_bytes`` 返回的是 ``bytes``，
+            #   而库里 ``users.pub_key`` 存的是**十六进制字符串**（65 字节 → 130 字符）。
+            #   直接拿两者比会**恒不相等** —— 于是"改口令"这条路对任何人都是
+            #   400「新密文里的私钥与这个账号的公钥对不上」，看起来像密码学出了问题，
+            #   其实只是漏了一个 ``.hex()``。（实测踩到：zhangsan 改口令 400。）
+            if public_bytes(public_key_of(sk)).hex() != row.pub_key:
+                raise Conflict(
+                    "新密文里的私钥与这个账号的公钥**对不上** —— 拒绝替换。\n"
+                    "  改口令只应换个‘外壳’，私钥本体必须原样；"
+                    "对不上说明交上来的不是你自己的私钥。"
+                )
+
+            row.pwd_hash = hash_password(new_password)
+            row.sk_wrapped = json.dumps(blob, ensure_ascii=False)
+            db.commit()
+
     def user_public_key(self, username: str):
         """取用户的 SM2 公钥点 —— 上传/改块/追加时用它封块密钥。"""
         with self.db.session() as db:
@@ -346,6 +435,24 @@ class StoreManager:
             with stage("解封私钥（PBKDF2-HMAC-SM3）"):
                 return unwrap_private_key(password, json.loads(row.sk_wrapped))
 
+    def user_key_blob(self, username: str) -> dict:
+        """取用户的**私钥密文**（可以安全地交给浏览器）。
+
+        ★ 把它交出去**不构成泄露**：这份密文是用口令派生的 KEK 封起来的，
+          库连同它一起被拿走也解不开（这正是 ``core/keywrap`` 立这层的目的）。
+
+          它成立的前提也只有一条：**服务端不参与解封**。
+          所以默认登录路径（``server_key=False``）拿到它就直接交给前端，
+          内存里什么也不留 —— 服务端手里没有任何能解开文件的东西。
+
+        :raises NotFound: 这个账号还没有密钥对。
+        """
+        with self.db.session() as db:
+            row = self._user_row(db, username)
+            if not row.sk_wrapped:
+                raise NotFound(f"用户 {username} 还没有密钥对")
+            return json.loads(row.sk_wrapped)
+
     # -- 会话私钥（只在内存，只在登录那一刻存在） -------------------------
 
     def remember_key(self, token: str, username: str, sk: int) -> None:
@@ -367,6 +474,143 @@ class StoreManager:
         got = self._keys.get(token or "")
         return None if got is None else got[1]
 
+    # -- 令牌撤销（安全审计 I1） -----------------------------------------
+    #
+    # ★ 为什么需要它：JWT 是**无状态**的 —— 签出去就收不回来。于是
+    #   “退出登录”以前只能丢掉内存里的私钥（那挡住了**解密**），
+    #   却挡不住**写操作**：上传 / 改块 / 追加 / 截断 / 删除只校验令牌，
+    #   而令牌在 TTL（12 小时）内一直有效。令牌一旦泄露，
+    #   受害者“退出登录”完全无法止损。
+    #
+    #   这里按**张**作废：`logout` 把这张令牌的 `jti` 记下来，
+    #   `deps.current_user` 每次校验。
+    #
+    #   ★ 为什么**必须落库**（安全审计 I1 —— 原来那三条理由里第 ② 条站不住）：
+    #     原注释写的是“重启后签名密钥会变，全部令牌本来就失效”。那句话只在
+    #     **没设** ``VDS_SECRET_KEY`` 时成立（那种情况下密钥是随机生成的）。
+    #     按生产惯例设了它之后，签名密钥**跨重启不变**、令牌照样有效，
+    #     而撤销表却随进程消失 ⇒ 已经登出（或已经泄露）的令牌在重启后**复活**，
+    #     最长能活到 ``token_ttl_minutes``。所以现在写进 ``revoked_tokens`` 表，
+    #     内存这份只是一层缓存（少查库）。
+    #
+    #   ★ 两种撤销要分清：
+    #     ① **按张**（登出）：点名 ``jti``；
+    #     ② **按人**（改口令 / 停用 / 改角色）：JWT 是无状态的，服务端没有
+    #        “这个人一共签过哪些令牌”的记录，所以只能退回**时间戳黑名单** ——
+    #        记下“该用户在 T 时刻之前签发的全部作废”，校验时比 ``iat``。
+    #        （安全审计 I2：改口令与停用是最典型的两条**止损**动作，
+    #          原先它们只改库里的行、不碰已签出的令牌，被停用的用户在 TTL
+    #          内照样能写数据。）
+
+    def revoke_token(self, token: str) -> bool:
+        """作废一张令牌。返回是否真的记下了（不可解析 / 已过期 / 没有 jti → False）。"""
+        try:
+            claims = decode_token(token, self.settings)
+        except Exception:  # noqa: BLE001 - 解析不了就没什么可作废的
+            return False
+        return self.revoke_claims(claims)
+
+    def revoke_claims(self, claims: dict) -> bool:
+        """按 ``claims`` 记一条**按张**撤销。"""
+        jti = claims.get("jti")
+        if not jti:
+            # 老令牌（签出时还没有 jti）没得按张作废 —— 只能等它自己过期。
+            return False
+        exp = int(float(claims.get("exp", 0) or 0))
+        if exp and exp < time.time():
+            return False  # 它已经过期了，记下来没有意义
+        sub = str(claims.get("sub", "") or "")
+        with self._lock, self.db.session() as db:
+            if db.get(RevokedTokenRow, str(jti)) is None:
+                db.add(RevokedTokenRow(jti=str(jti), sub=sub, exp_ts=exp))
+                self._prune_revoked(db)
+                db.commit()
+            self._revoked[str(jti)] = float(exp)
+        return True
+
+    def revoke_user_tokens(self, username: str, *, reason: str = "") -> int:
+        """**按人**撤销：把 ``username`` 在**此刻之前**签发的全部令牌作废。
+
+        :returns: 本次记下的记录数（1 表示写了/更新了那条阈值记录）。
+
+        ★ 实现是**时间戳黑名单**（理由见上面 ②）：不依赖“服务端记得签过哪些
+          令牌” —— 它根本不记得。校验时拿令牌的 ``iat`` 与这条阈值比。
+
+        ★ 为什么不拆成“只撤某些设备”：那要求在服务端维护“每个 jti 属于哪次
+          登录”，等于把无状态令牌改造成有状态会话。**止损优先**：
+          一次全撤，用户重登即可。
+        """
+        now = int(time.time())
+        # 记录什么时候可以删：所有“此刻尚未签发”的令牌最多活到 now + TTL。
+        horizon = now + int(self.settings.token_ttl_minutes) * 60
+        key = f"*user*{username}"
+        with self._lock, self.db.session() as db:
+            row = db.get(RevokedTokenRow, key)
+            if row is None:
+                db.add(
+                    RevokedTokenRow(
+                        jti=key, sub=username, exp_ts=horizon, before_ts=now
+                    )
+                )
+            else:
+                row.exp_ts = horizon
+                # ★ 取**更晚**的那个阈值：两次撤销之间签出的令牌也不能漏。
+                row.before_ts = max(int(row.before_ts or 0), now)
+            self._prune_revoked(db)
+            db.commit()
+            self._revoked_users[username] = now
+        return 1
+
+    def _user_revoked_before(self, sub: str) -> int:
+        """该用户被“按人撤销”的签发时刻阈值（没有就 0）。缓存 + 查库兜底。"""
+        if sub in self._revoked_users:
+            return self._revoked_users[sub]
+        with self.db.session() as db:
+            row = db.get(RevokedTokenRow, f"*user*{sub}")
+        ts = int(row.before_ts or 0) if row is not None else 0
+        self._revoked_users[sub] = ts  # 0 也缓存（“查过了，没有”），免得每请求查库
+        return ts
+
+    def is_token_revoked(self, claims: dict) -> bool:
+        """这张令牌是否已被作废（**按张** + **按人**两条路）。"""
+        now = time.time()
+        jti = claims.get("jti")
+        if jti:
+            exp = self._revoked.get(str(jti))
+            if exp is None:
+                with self.db.session() as db:
+                    row = db.get(RevokedTokenRow, str(jti))
+                exp = float(row.exp_ts) if row is not None else 0.0
+                if exp:
+                    self._revoked[str(jti)] = exp
+            if exp:
+                if exp < now:
+                    # 它已经自然过期了 —— 顺手清掉，不必再拦
+                    self._revoked.pop(str(jti), None)
+                else:
+                    return True
+        sub = str(claims.get("sub", "") or "")
+        if sub:
+            before = self._user_revoked_before(sub)
+            if before and int(float(claims.get("iat", 0) or 0)) <= before:
+                return True
+        return False
+
+    def _prune_revoked(self, db) -> None:
+        """清掉已过期的撤销记录（否则这张表会一直涨）。
+
+        ★ 只管“什么时候可以删”：按张的看令牌自己的 ``exp_ts``，按人的看那条
+          阈值记录的有效期。**不动**还没到期的记录。
+        """
+        now = int(time.time())
+        rows = list(
+            db.execute(select(RevokedTokenRow).where(RevokedTokenRow.exp_ts < now)).scalars()
+        )
+        for row in rows:
+            db.delete(row)
+            self._revoked.pop(row.jti, None)
+            self._revoked_users.pop(row.sub, None)
+
     def keywrap_status(self) -> dict:
         """给界面看的密钥模型现状。**故意把“私钥在哪”说清楚**。"""
         with self.db.session() as db:
@@ -377,10 +621,20 @@ class StoreManager:
             "user_keys": sum(1 for u in users if u.pub_key and u.sk_wrapped),
             "sessions_with_key": len(self._keys),
             "private_key_storage": "用登录口令派生的 KEK 封装后入库（users.sk_wrapped）",
+            "session_key_location": (
+                "★ 默认模型：服务端没有私钥 —— 登录不再解封，只把 "
+                "users.sk_wrapped 的密文交给浏览器；解密与验证都在浏览器里完成"
+                "（frontend/src/utils/crypto/）。"
+            ),
             "note": (
                 "块密钥用文件所有者的 SM2 公钥封装；用户私钥用他自己的口令"
                 "包一层之后才入库。口令本身不落库、私钥明文从不落盘 ——"
-                "所以“数据库被拿走”拿到的只有解不开的密文。"
+                "所以“数据库被拿走”拿到的只有解不开的密文。\n"
+                "  ★ 默认登录路径（server_key=false）**服务端不解封私钥**："
+                "它只把私钥密文交给浏览器，解封在浏览器里用口令完成 ——"
+                "此后服务端手里没有任何能解开文件的东西，"
+                "它就算作恶也只能交出一份过不了浏览器验证的应答。\n"
+                "  （显式传 server_key=true 才回到旧的服务端代管模型，仅供对比。）"
             ),
         }
 
@@ -1109,6 +1363,15 @@ class StoreManager:
                                 replicas=json.dumps(list(store.replicas_of(gidx))),
                             )
                         )
+                    # ★★ 兜底：这个 (owner, file_key) 上的回滚演示记录一律清掉。
+                    #    正常路径上删文件时已经清了；但万一有窗口漏过来
+                    #    （库被手工改过、或旧版本删文件时没清），
+                    #    新上传的这份就会被塞进旧密文 —— 这里是最后一道闸。
+                    db.execute(
+                        delete(ReplayRow).where(
+                            ReplayRow.owner == owner, ReplayRow.file_key == file_key
+                        )
+                    )
                     self._persist_globals(db)
                     self._persist_nodes(db, done.indices)
                     db.commit()
@@ -1138,7 +1401,7 @@ class StoreManager:
                 raise OutOfRange(msg) from exc
 
             with stage("落库（文件与块登记）"):
-                frow = _finish()
+                frow = self._finish_or_pending(_finish)
             # 记一下这次上传把全局向量推到了哪里，方便排查
             assert store.n == n0 + frow.block_count
             return frow
@@ -1251,7 +1514,7 @@ class StoreManager:
                 raise OutOfRange(str(exc)) from exc
 
             with stage("落库（新密文与块登记）"):
-                return _finish()
+                return self._finish_or_pending(_finish)
 
     def zero_block(self, owner: str, file_key: str, block_idx: int) -> dict:
         r"""把第 ``block_idx`` 块的内容换成**等长的全 0 字节**。
@@ -1393,7 +1656,7 @@ class StoreManager:
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
             with stage("落库（新块与块登记）"):
-                return _finish()
+                return self._finish_or_pending(_finish)
 
     def truncate_file(self, owner: str, file_key: str, drop_blocks: int) -> dict:
         r"""删掉文件**末尾**的若干块（论文 §8.2 的 ``op = del``）。
@@ -1507,7 +1770,7 @@ class StoreManager:
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
             with stage("落库（删除登记）"):
-                out = _finish()
+                out = self._finish_or_pending(_finish)
             out["dropped_from"] = n_before
             return out
 
@@ -1570,6 +1833,17 @@ class StoreManager:
                             continue
                         db.execute(delete(BlockRow).where(BlockRow.file_id == fid))
                         db.execute(delete(FileRow).where(FileRow.id == fid))
+                        # ★★ 回滚演示记录**必须一起删**：它按
+                        #    `(owner, file_key, block_idx)` 索引，而 `file_key` 可复用 ——
+                        #    留着的话，下一次用同一个标识上传另一份文件，那几块会被
+                        #    塞回**这份旧文件**的密文，客户端当场报“本地验证不通过”
+                        #    （实测踩过；数据库里能看到“files 里没有、replay_blocks 里
+                        #    还躺着”的幽灵记录）。
+                        db.execute(
+                            delete(ReplayRow).where(
+                                ReplayRow.owner == o, ReplayRow.file_key == k
+                            )
+                        )
                     # 兜底：这个区间里的块行一个都不许剩（含不属于任何文件账目的）
                     db.execute(delete(BlockRow).where(BlockRow.global_index.in_(K)))
                     # ★ 单进程模式下节点密文是协调者代存的，也要一起抹掉：
@@ -1614,7 +1888,7 @@ class StoreManager:
                 )
 
             with stage("落库（删除文件与块）"):
-                out = _finish()
+                out = self._finish_or_pending(_finish)
             out["dropped_from"] = n_before
             return out
 
@@ -1640,10 +1914,24 @@ class StoreManager:
             store = self._require()
             try:
                 r = store.query(indices, allow_partial=allow_partial)
+            except KeyError as exc:
+                # ★ 下标的**空洞**（从未分配 / 删文件留下的遗弃位）——
+                #   `core/store.py::_group_by_file` 抛的是 `KeyError`。不接住它
+                #   就会一路落到兜底处理器变成 500「服务器内部错误」，把后端
+                #   自己写好的那句中文原因（“段永不回收”）丢掉，用户无法定位。
+                #   同类输入在 `/api/query/verify-batch` 上返回的就是 400，口径要一致。
+                #   ⚠ 用 `exc.args[0]`：`str(KeyError)` 会多带一对引号。
+                raise OutOfRange(exc.args[0] if exc.args else str(exc)) from exc
             except ValueError as exc:
                 raise OutOfRange(str(exc)) from exc
             return {
-                #: 这份证据覆盖到的**全局位置总数**（= 所有文件块数之和 + 历史空洞）。
+                #: 这份证据覆盖到的**存活块数**（= 各文件块数之和）。
+                #:
+                #: ⚠️ 它**不含**历史空洞，所以**不是**“合法下标的上界” ——
+                #: 删过文件之后它可能**小于**某些仍然有效的下标（见
+                #: `core/registry.py::total_blocks`：段永不回收、位置允许稀疏）。
+                #: 要判“下标是不是用超了”，看 ``/api/status`` 的
+                #: ``position_budget_used``（= ``registry.next_offset``）。
                 #: 新方案里每份文件自己一条向量，所以这里只是一个总量；
                 #: 每份文件自己的 ``n`` / 指纹在下面的 ``files`` 里。
                 "delta_n": store.n,
@@ -1705,27 +1993,64 @@ class StoreManager:
                 "nodes_used": list(r.node_used),
             }
 
+    @staticmethod
+    def normalize_block_plan(plan, n_targets: int) -> list[list[int] | None]:
+        """把 ``block_indices`` 的两种形态归一成“每个 target 一份块号清单”。
+
+        * ``None`` / 空         → 每个 target 都是 ``None``（取整份文件）；
+        * ``[0, 1]``            → 每个 target 都用 ``[0, 1]``（**共用**，老语义）；
+        * ``[[0,1], [5,6]]``    → **一一对应**；长度必须等于 target 数，否则 400。
+
+        ★ 为什么允许两种（而不是直接换成新形态）：这个接口已经在用，
+          而“多份文件取**同样**的块号”是个真实且更省事的用法（一份文件时
+          两种写法完全等价）。但**聚合出来的卡**只有新形态能表达 ——
+          它每份文件覆盖的块号是**不同**的。
+        """
+        if not plan:
+            return [None] * n_targets
+        first = plan[0]
+        if isinstance(first, (list, tuple)):
+            groups = [list(g) for g in plan]
+            if len(groups) != n_targets:
+                raise OutOfRange(
+                    f"block_indices 给了 {len(groups)} 组，但要查 {n_targets} 份文件 —— "
+                    "这种写法必须与 targets **一一对应**"
+                )
+            for g in groups:
+                if len(g) > MAX_INDICES:
+                    raise OutOfRange(f"一组块号最多 {MAX_INDICES} 个（收到 {len(g)} 个）")
+            return groups
+        shared = list(plan)
+        if len(shared) > MAX_INDICES:
+            raise OutOfRange(f"块号最多 {MAX_INDICES} 个（收到 {len(shared)} 个）")
+        return [shared] * n_targets
+
     def query_files(
-        self, targets: Sequence[tuple[str, str]], block_indices: Sequence[int] | None = None
+        self,
+        targets: Sequence[tuple[str, str]],
+        block_indices: Sequence[int] | Sequence[Sequence[int]] | None = None,
     ) -> dict:
         """一次查询**若干个文件** —— 设计 B 下这只需要一份证据。
 
-        :param block_indices: 给定时只取这几个**块序号**（对每个文件都取一遍，
-            越界的自动跳过），否则取整个文件。
+        :param block_indices: 块序号，两种形态（见 :meth:`normalize_block_plan`）：
+            ``[0, 1]`` 是**共用**（每个文件都取这几块），
+            ``[[0, 1], [5]]`` 是**与 ``targets`` 一一对应**。
+            越界的块号自动跳过；给 ``None`` 就取整个文件。
         """
+        plans = self.normalize_block_plan(block_indices, len(targets))
         with self._lock:
             store = self._require()
             picked: list[int] = []
             detail: list[dict] = []
-            for owner, file_key in targets:
+            for (owner, file_key), plan in zip(targets, plans):
                 got = store.file_indices(owner, file_key)
                 if not got:
                     raise NotFound(f"文件 {owner}/{file_key} 不存在")
-                if block_indices is None:
+                if plan is None:
                     chosen = list(got)
                 else:
                     chosen = [
-                        got[k] for k in block_indices if 0 <= k < len(got)
+                        got[k] for k in plan if 0 <= k < len(got)
                     ]
                 picked.extend(chosen)
                 d = store.delta_of(owner, file_key)
@@ -1740,11 +2065,15 @@ class StoreManager:
                         "n": int(d.n),
                         "block_count": len(got),
                         "delta_fp": self.delta_fingerprint((owner, file_key)),
+                        # ★ 这一份**实际取了哪些块** —— 用归一化后的 `plan`，
+                        #   不是请求里那份笼统的 `block_indices`。
+                        #   多份文件时请求可能是"一一对应"的形态（`[[0,1],[5,6]]`），
+                        #   直接拿它算会把它当成**一组**块号，`int(k)` 收到 list ——
+                        #   实测就是这里崩的（500: `'<=' not supported between
+                        #   int and list`）。
                         "block_indices": [
                             int(k)
-                            for k in (
-                                range(len(got)) if block_indices is None else block_indices
-                            )
+                            for k in (range(len(got)) if plan is None else plan)
                             if 0 <= k < len(got)
                         ],
                         "indices": [int(i) for i in chosen],
@@ -1789,7 +2118,7 @@ class StoreManager:
             store = self._require()
             I = as_index_set(evidence["I"])
             K_set = as_index_set(K)
-            vals_I = [int(v) for v in evidence["values"]]
+            vals_I = [_to_int(v, what="values 里的值") for v in evidence["values"]]
 
             if len(vals_I) != len(I):
                 raise OutOfRange(
@@ -1803,13 +2132,18 @@ class StoreManager:
                     "再与分解出来的部分聚合 —— 这正是证据池存在的理由。"
                 )
 
-            pi_I = Opening(int(evidence["S_I"]), int(evidence["Lambda_I"]), I)
             # ★ 按文件取 crs_n：新方案里每份文件一条向量，素数视图必须与
             #   这批下标所属的那份文件一致。跨文件就先报错 ——
             #   拿另一份文件的视图去 disagg 会算出一个“看起来正常”的证据。
-            _fids = sorted(
-                {(r.owner, r.file_key) for r in [store.describe(g) for g in I]}
-            )
+            try:
+                _refs = [store.describe(g) for g in I]
+            except KeyError as exc:
+                # ★ 空洞下标（从未分配 / 删文件留下的遗弃位）—— `store.describe`
+                #   抛的是 `KeyError`。不接住它会一路变成 500「服务器内部错误」，
+                #   而 `/api/query` 上同类输入返回的是 400（口径要一致）。
+                #   ⚠ 用 `exc.args[0]`：`str(KeyError)` 会多带一对引号。
+                raise OutOfRange(exc.args[0] if exc.args else str(exc)) from exc
+            _fids = sorted({(r.owner, r.file_key) for r in _refs})
             if len(_fids) != 1:
                 raise OutOfRange(
                     f"这套接口一次只支持「一份文件」的下标，"
@@ -1821,14 +2155,41 @@ class StoreManager:
             #   但下面构造 ClientNode 时会引用一个不存在的 _fd（NameError → 500）。
             _fd = store.delta_of(*_fids[0])
             crs_n = store.session.crs_n_for(_fd)
+
+            # ★★★ 两套下标口径，别混：``/api/query`` 的 ``indices`` / ``values``
+            #   是**全局位置号**（界面卡片上显示的就是它），而 ``proof.I`` 与
+            #   CRS 的指数是**文件内局部块号**，两者靠
+            #   ``位置 = _fd.positions[局部号]`` 换算。
+            #
+            #   ``svc.disagg`` 算的是 :math:`S_I^{e_K}`，指数必须走**局部**号 ——
+            #   拿全局号进去，只有 ``offset = 0`` 的那份文件恰好相等，其余文件
+            #   要么报 ``S_I 校验失败``、要么报 ``下标越界``。
+            #   （实测踩过：池子里除第一份文件外「分解」全废，而报错还赖到
+            #   “旧的 δ”头上 —— 卡片明明是刚取的。）
+            loc = {g: i for i, g in enumerate(_fd.positions)}
+            stray = sorted(set(I) - set(loc))
+            if stray:
+                raise OutOfRange(
+                    f"证据里的下标 {stray[:8]} 不属于这份文件 {_fids[0]}："
+                    f"它占的位置是 {list(_fd.positions)[:4]}…（共 {len(loc)} 块）。\n"
+                    "  传进来的 I 必须是**全局位置号**（即 /api/query 响应里的 "
+                    "indices），不是文件内局部块号。"
+                )
+            I_loc = [loc[g] for g in I]
+            K_loc = [loc[g] for g in K_set]
+            pi_I = Opening(
+                _to_int(evidence["S_I"], what="S_I"),
+                _to_int(evidence["Lambda_I"], what="Lambda_I"),
+                as_index_set(I_loc),
+            )
             with stage("拆出子集证据（svc.disagg）"):
-                pi_K = svc_disagg(crs_n, I, vals_I, pi_I, K_set)
+                pi_K = svc_disagg(crs_n, I_loc, vals_I, pi_I, K_loc)
 
             val_of = dict(zip(I, vals_I))
             F_K = tuple(val_of[i] for i in K_set)
             with stage("验证拆出来的证据（VerRetrieve）"):
                 report = ClientNode(store.session, _fd).ver_retrieve(
-                    list(K_set), list(F_K), pi_K
+                    list(K_loc), list(F_K), pi_K
                 )
             if not report.ok:
                 # 同样：会原样弹给前端，不用 Markdown 星号。
@@ -1837,6 +2198,8 @@ class StoreManager:
                     f"  最可能的原因是「这份证据是在旧的 δ 上取的」——\n"
                     f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让"
                     f"之前取到的证据失效。\n"
+                    f"  另一个可能是这张卡的 S_I/Lambda_I 与 indices 不是"
+                    f"同一次取的（或者被改过）。\n"
                     f"  请重新取一次（当前 n = {_fd.n}）。"
                 )
 
@@ -1890,7 +2253,23 @@ class StoreManager:
     def verify_batch(
         self, cards: Sequence[dict], *, locate: bool = True, compare: bool = True
     ) -> dict:
-        r"""**批量验证**：一次验池子里的多份证据（可跨文件、跨用户）。
+        r"""**批量验证**：一次验池子里的多份证据 —— 判据是它们**共享同一个承诺**。
+
+        是不是“同一份文件”不是关键，**哪条向量**才是：
+
+        * 卡只涉及**同一份文件** → 用那份文件的 ``(U_f, C_f)``；
+        * 卡涉及**多份文件**（即「聚合选中」归约出来的）→ 用**合并向量**的
+          ``(U' = g^E, C' = ∏_f C_f^{E/E_f})``，``P`` = 这些文件全部位置的并集
+          —— 与 :meth:`core.store.VectorStore._prove_merged` **同一套构造**
+          （见 ``core/store.py::universe_for``）。一份文件的合并向量恰好退化成它自己。
+
+        .. important::
+
+           **不同宇宙的卡不能混**：方程右边的 ``U'``/``C'`` 是所有份共享的，
+           学位论文 ``Def. 29`` 的聚合正确性原文就是「any commitment ``C`` …
+           Ver(pp, ``C``, J, v_J, π_J) = 1」。
+           所以这里按“卡自己涉及的文件集合”分组，发现多组时**明确报错**
+           （说清是哪几组），而不是硬算出一条没人验得了的方程。
 
         需求原句「选择若干证据验证、**聚合验证**」的后者。逐份验在
         ``/api/query`` 与 ``/api/evidence/disagg`` 里已经走过；这里是
@@ -1913,20 +2292,43 @@ class StoreManager:
         """
         with self._lock:
             store = self._require()
-            # ★ 这套接口一次只支持**一份文件**：先把卡片里出现过的下标并起来，
-            #   再看它们是不是都落在同一份文件里。
-            #   （迁到"一文件一向量"时这里漏了这行定义 —— 直接 NameError。
-            #   跨文件的一次性验证走 /api/query，所以一直没暴露出来。）
-            K_set = {int(i) for c in cards for i in c.get("indices", ())}
-            fids2 = sorted({(r.owner, r.file_key) for r in [store.describe(g) for g in K_set]})
-            if len(fids2) != 1:
-                raise OutOfRange(
-                    f"这套接口一次只支持「一份文件」的下标，"
-                    f"收到的下标跨了 {len(fids2)} 份文件：{fids2}"
+            # ---- ① 这批卡“在哪条向量上” ----
+            #
+            # ★★ 判据不是“几份文件”，而是“共享哪个 (U', C')”：
+            #   * 只涉及同一份文件 → 那份文件自己的向量（快路，直接用 δ.U / δ.C）；
+            #   * 涉及多份文件（「聚合选中」归约出来的）→ 合并向量。
+            #   两者用的是同一段构造：core/store.py::universe_for。
+            #
+            #   不同宇宙的卡**不能混** —— 方程右边的 U'/C' 是所有份共享的
+            #   （Def. 29 的前提就是同一个 C）。所以按“卡自己涉及的文件集合”
+            #   分组，发现多组就明确报错，而不是硬算出一条没人验得了的方程。
+            try:
+                refs = {
+                    int(i): store.describe(int(i))
+                    for i in {int(i) for c in cards for i in c.get("indices", ())}
+                }
+            except Exception as exc:  # noqa: BLE001 —— 下标越界等一律当“用户传错”
+                raise OutOfRange(f"卡片里有不存在的下标：{exc}") from exc
+            groups2: dict[frozenset, list[dict]] = {}
+            for c in cards:
+                fids_c = frozenset(
+                    (refs[int(i)].owner, refs[int(i)].file_key)
+                    for i in c.get("indices", ())
                 )
-            _fd2 = store.delta_of(*fids2[0])
-            crs_n = store.session.crs_n_for(_fd2)
-            C = _fd2.C
+                groups2.setdefault(fids_c, []).append(c)
+            if len(groups2) != 1:
+                desc = "；".join(
+                    "{" + "、".join(f"{o}/{k}" for o, k in sorted(fs)) + "}"
+                    for fs in groups2
+                )
+                raise OutOfRange(
+                    f"这些卡来自不同的合并向量，没法合成一条结论"
+                    f"（一次结论要求它们共享同一个承诺 C）：{desc}。\n"
+                    "  要么把它们分开验，要么先用「聚合选中」统一到一条向量上。"
+                )
+            fids2 = sorted(next(iter(groups2)))
+            crs_n, C, P, loc = store.universe_for(fids2)
+            merged = len(fids2) > 1
 
             cases = []
             for c in cards:
@@ -1936,14 +2338,25 @@ class StoreManager:
                 #   形状检查再也看不见它（实测踩过：重复下标被当成正常证据验过了）。
                 #   proof.I 只用来跟它对账（对不上就是 BAD_SHAPE）。
                 raw_I = [int(i) for i in c["indices"]]
+                # ★ 卡片的 indices 是**全局位置号**，而凭证与 CRS 的指数用**局部块号**
+                #   （``proof.I`` 本来就是这个宇宙里的局部号）。不换算的话，
+                #   除第一份文件外一律 ``BAD_SHAPE``。
+                stray2 = sorted({i for i in raw_I if i not in loc})
+                if stray2:
+                    raise OutOfRange(
+                        f"卡片里的下标 {stray2[:8]} 不属于这条向量"
+                        f"（涉及 {len(fids2)} 份文件、共 {len(P)} 个位置）"
+                    )
+                # 全局 → 局部；**保留重复**（形状检查要靠它才能报 BAD_SHAPE）。
+                I_loc = [loc[i] for i in raw_I]
                 cases.append(
                     (
-                        raw_I,
+                        I_loc,
                         [int(v) for v in c["values"]],
                         Opening(
                             int(proof["S_I"]),
                             int(proof["Lambda_I"]),
-                            as_index_set(proof.get("I") or raw_I),
+                            as_index_set(proof.get("I") or I_loc),
                         ),
                     )
                 )
@@ -1966,6 +2379,10 @@ class StoreManager:
                 #: 这份结论覆盖到的**全局位置总数**。
                 "delta_n": store.n,
                 "delta_fp": self.delta_fingerprint(),
+                #: 这次是在**哪条向量**上给的结论（跨文件的卡落在合并向量上）。
+                "universe_files": [f"{o}/{k}" for (o, k) in fids2],
+                "universe_n": len(P),
+                "merged_universe": merged,
                 "ok": bool(rep.ok),
                 "code": int(rep.code),
                 "code_name": verify_code_name(rep.code),
@@ -2081,6 +2498,41 @@ class StoreManager:
             if self._auto_attempts >= limit:
                 return
 
+    def _finish_or_pending(self, finish):
+        """落库；**失败时把这一步挂成“待补落库”**，然后把异常抛出去。
+
+        ★★ 为什么必须留这一手（安全审计 S3）：
+
+        写路径的次序是“**内存与节点先前进**，落库在后”。如果 ``store`` 那边
+        已经成功、而落库自己抛错（磁盘满 / SQLITE_BUSY / 唯一约束冲突），
+        那一刻的状态是“向量已经动了、库里少一行” —— 而它
+        **既不是 ``WriteError``（那条路有现场），也不是干净失败（无副作用）**。
+
+        不留现场的后果：
+
+        * ``_reject_if_pending`` 拦不住后续写 —— 它们会在**错位的账**上继续写；
+        * 重启时 ``_reload`` 从库重建（**缺这一份**），而节点那边有 ⇒
+          ``_verify_nodes_at_startup`` 以“节点与协调者不同步”**拒绝启动**，
+          而这时**没有任何补推路径**能收敛（它既没有 pending，也没有干净回滚）。
+
+        挂到 ``_pending_finish`` 之后：「补推」会在收尾时把它补上
+        （见 :meth:`retry_push`），而 ``persist_pending`` 会让
+        ``_reject_if_pending`` 拦住后续写 —— 两条路都通了。
+
+        .. note::
+
+           ``_finish`` 是 ``db.add`` 式的（**非幂等**）。补落库能安全重试的
+           前提是“失败时事务没有提交”（``Database.session()`` 在异常时回滚）。
+           若失败发生在 ``commit()`` **之后**（极少），重试会撞唯一约束 ——
+           那种情况在 :meth:`retry_push` 里会被如实报成 ``persist_error``，
+           不会被静默当成成功。
+        """
+        try:
+            return finish()
+        except Exception:
+            self._pending_finish = finish
+            raise
+
     def retry_push(self, *, manual: bool = False) -> dict:
         """**补推**：把上次没推成功的那次更新，**只补推给没跟上的那几台**。
 
@@ -2102,15 +2554,29 @@ class StoreManager:
                 # —— 后台线程自己不传，否则它会在自己的循环里反复给自己续命。
                 self._auto_attempts = 0
             store = self._require()
-            # ★ 先看"动手前到底有没有待补推"。不能只看 retry_pending 的 ok ——
-            #   没有现场时它也返回 ok=True（"没有待补推的更新"），那时调
-            #   `_finish()` 就会造出**假的收敛**：库里有文件、向量里没分量。
-            had_pending = store.pending_write() is not None
             out = store.retry_pending()
-            if had_pending and out.get("ok") and self._pending_finish is not None:
+            # ★★ 只要还有“欠着的落库”就补上 —— **不能**再要求 had_pending
+            #   （安全审计 S3）：落库失败那条路上，节点侧本来就是推成功的
+            #   （没有 pending），卡在库里的是那一行；要求 had_pending
+            #   会让它**永远补不上**，而重启时正是这种情况会被拒绝启动。
+            #
+            #   反向的假收敛这里不会发生：那种情况（**没有** _pending_finish
+            #   却去调 _finish()）压根进不来这个分支。
+            if out.get("ok") and self._pending_finish is not None:
                 finish, self._pending_finish = self._pending_finish, None
                 with stage("落库（补推收尾）"):
-                    finish()
+                    try:
+                        finish()
+                    except Exception as exc:  # noqa: BLE001 - 要如实报出来
+                        # 补落库本身又失败了：把现场**放回去**（下次还能补），
+                        # 并让这次补推如实标成失败 —— 不能静默当成功。
+                        self._pending_finish = finish
+                        out["ok"] = False
+                        out["persisted"] = False
+                        out["persist_error"] = f"{type(exc).__name__}: {exc}"
+                        out["pending"] = store.pending_write()
+                        out["persist_pending"] = True
+                        return out
                 out["persisted"] = True
             out["pending"] = store.pending_write()
             out["persist_pending"] = self._pending_finish is not None
@@ -2183,6 +2649,296 @@ class StoreManager:
         with self._lock:
             return self._read_with(owner, file_key, indices, sk)
 
+    def replay_arm(self, owner: str, file_key: str, block_idx: int, *, on: bool) -> dict:
+        """打开 / 关闭「回滚演示」：让 ``/cipher`` 对这块交回**旧版本**。
+
+        ★ 演示顺序（重要）：**先开开关，再改块**。
+          开开关时存下来的是“**当时**那一块的密文”，而开关的含义就是
+          “以后对这块都交回这一份”。所以：
+
+          1. 开开关（存下现在这版）
+          2. 改块（这一块变成新版）
+          3. 解密 → 服务器交回第 1 步存的那份（= 改之前的）→ 验证不通过
+          4. 关开关 → 恢复正常
+
+        ★ 存的东西必须**成套**（密文 + IV + 块密钥密文 + 分量）：
+          少一样都会变成另一种错误（“密钥解不开”或“声称的分量对不上密文”），
+          而不是干净的“这就是改之前那一版”。
+
+        :raises NotFound: 文件或这一块不存在。
+        """
+        with self._lock, self.db.session() as db:
+            store = self._require()
+            if (owner, file_key) not in store.files:
+                raise NotFound(f"文件 {owner}/{file_key} 不存在")
+            got = store.file_indices(owner, file_key)
+            if not got or not (0 <= block_idx < len(got)):
+                raise NotFound(f"这份文件没有第 {block_idx} 块")
+
+            row = db.execute(
+                select(ReplayRow).where(
+                    ReplayRow.owner == owner,
+                    ReplayRow.file_key == file_key,
+                    ReplayRow.block_idx == block_idx,
+                )
+            ).scalar_one_or_none()
+
+            if not on:
+                if row is not None:
+                    db.delete(row)
+                    db.commit()
+                return {"on": False, "block_idx": block_idx}
+
+            # 存“当前”这一版（在还没改块之前调，它就等于“改之前那一版”）。
+            pack = store.cipher_of(owner, file_key, [block_idx])
+            blk = pack["blocks"][0]
+            key_cts = self._blocks_of(owner, file_key)
+            krow = key_cts.get(int(block_idx))
+            payload = {
+                "ciphertext_hex": blk["ciphertext_hex"],
+                "iv_hex": blk["iv_hex"],
+                "element": str(blk["element"]),
+                "key_ct": krow["key_ct"] if krow else json.dumps({}),
+                "global_index": int(blk.get("global_index", 0) or got[block_idx]),
+            }
+            if row is None:
+                db.add(ReplayRow(owner=owner, file_key=file_key, block_idx=block_idx, **payload))
+            else:
+                for k, v in payload.items():
+                    setattr(row, k, v)
+            db.commit()
+            return {"on": True, "block_idx": block_idx}
+
+    def _replay_map(self, owner: str, file_key: str) -> dict[int, ReplayRow]:
+        """这份文件上被“回滚开关”盯上的块 —— ``block_idx -> 那一行``。"""
+        with self.db.session() as db:
+            rows = db.execute(
+                select(ReplayRow).where(
+                    ReplayRow.owner == owner, ReplayRow.file_key == file_key
+                )
+            ).scalars()
+            return {int(r.block_idx): r for r in rows}
+
+    def replay_status(self, owner: str, file_key: str) -> list[dict]:
+        """当前有哪些块正在“交回旧版本”（给界面显示开关状态）。"""
+        with self.db.session() as db:
+            rows = db.execute(
+                select(ReplayRow).where(
+                    ReplayRow.owner == owner, ReplayRow.file_key == file_key
+                )
+            ).scalars()
+            return [
+                {
+                    "block_idx": int(r.block_idx),
+                    "global_index": int(r.global_index),
+                    "armed_at": r.armed_at.isoformat() if r.armed_at else None,
+                }
+                for r in rows
+            ]
+
+    def cipher_pack(
+        self, owner: str, file_key: str, indices=None, *, with_primes: bool = True
+    ) -> dict:
+        """**客户端自解密**所需的全部材料：密文 + 证据 + 公开参数。
+
+        ★ 与 :meth:`read_plain` 的分工，就是「服务器可不可信」这条分界线：
+
+        * ``read_plain`` —— 服务端**替你把内容解开**，于是"服务器给你的东西"
+          在原理上无法被客户端检验（它想给什么就给什么）；
+        * ``cipher_pack`` —— 服务端只交出**可被独立校验**的材料：
+          密文段（客户端自己 ``SM3`` 得分量）、一份证据（客户端对着
+          **自己保存的** δ 验）、块密钥的 SM2 密文（只有所有者的私钥解得开）。
+
+          服务端在这里**不掌握任何秘密**，也无法伪造一个能通过验证的应答
+          —— 除非它能同时改掉客户端本地保存的 δ。
+
+        所以这里刻意**不给**：任何明文、任何解开的块密钥。
+        ``element``（分量）是服务端算的，客户端**必须自己重算**，
+        它只在界面上做对照用。
+
+        :param with_primes: 是否把整段素数表也带上（让客户端可以自己算
+            :math:`U_n = g^{e_{[n]}}`）。默认带上 —— 响应会大一截，
+            但"能自算"是这条路的价值所在；前端可以关掉它省流量。
+        """
+        with self._lock:
+            store = self._require()
+            if (owner, file_key) not in store.files:
+                raise NotFound(f"文件 {owner}/{file_key} 不存在")
+            try:
+                out = store.cipher_of(owner, file_key, indices)
+            except KeyError as exc:
+                raise NotFound(str(exc)) from exc
+            except (ValueError, IndexError) as exc:
+                raise OutOfRange(str(exc)) from exc
+
+            # ★ 块密钥密文（``key_ct``）只存在库里，不在 ``VectorStore`` 里 ——
+            #   由这里补上。它是 SM2 封给所有者公钥的，别人拿到也解不开。
+            key_cts = self._blocks_of(owner, file_key)
+            for b in out["blocks"]:
+                row = key_cts.get(int(b["block_idx"]))
+                b["key_ct"] = json.loads(row["key_ct"]) if row else None
+
+            # ★★ 回滚演示：被“回滚开关”盯上的那几块，改交回**存下来的旧版本**。
+            #
+            #    走的是**同一条真链路** —— 客户端拿到的确实是另一份密文，
+            #    它自己算出的分量对不上当前基准，于是验证不通过。
+            #    不是“前端假装”：演示要经得住追问。
+            #
+            #    放在补 `key_ct` **之后**：旧那块的块密钥密文也得用旧那一份 ——
+            #    否则客户端拿旧密文配新密钥一解，解出来是垃圾，（也能发现不对，
+            #    但那变成了“密钥不匹配”而不是“服务器交了旧版本”，性质不同）。
+            replay = self._replay_map(owner, file_key)
+            if replay:
+                # ★★ 必须核对**位置段**：`replay_blocks` 的键是
+                #    `(owner, file_key, block_idx)`，而 `file_key` 是**可复用**的 ——
+                #    删掉一份文件、再用同一个标识上传另一份内容时，`files` 里
+                #    是新账目，这条旧记录却还在。位置段（`global_index`）**永不回收**，
+                #    是文件实例级的唯一标识：对不上就说明这条记录属于**上一次**
+                #    那一份文件，当它不存在。
+                #
+                #    不核对会怎样（实测踩过）：新文件的那几块被塞回旧密文，
+                #    客户端算出的分量对不上当前基准，报“本地验证未通过” ——
+                #    而界面与操作序列都看不出任何异常，像玄学。
+                cur_pos = store.file_indices(owner, file_key)
+                for b in out["blocks"]:
+                    bi = int(b["block_idx"])
+                    r = replay.get(bi)
+                    if r is None:
+                        continue
+                    if not (0 <= bi < len(cur_pos)) or int(r.global_index) != int(cur_pos[bi]):
+                        # 属于上一份文件的那一块 —— 不是“这一份的这一块”。
+                        continue
+                    b["ciphertext_hex"] = r.ciphertext_hex
+                    b["iv_hex"] = r.iv_hex
+                    b["element"] = r.element
+                    b["key_ct"] = json.loads(r.key_ct)
+                    #: 让前端能如实标出“这一块是服务器交回的旧版”。
+                    b["replayed"] = True
+
+            delta = store.delta_of(owner, file_key)
+            sess = store.session
+            ell = int(sess.l)
+            primegen = sess.primegen_for(delta)
+            used_positions = [int(i) for i in out["proof"]["I"]]
+
+            out["crs"] = {
+                "N": str(sess.crs.N),
+                "g": str(sess.crs.g),
+                "l": ell,
+                "prime_bits": ell + 1,
+                "n_max": int(sess.n_max),
+            }
+            out["delta"] = {
+                "U": str(delta.U),
+                "C": str(delta.C),
+                "n": int(delta.n),
+                "offset": int(delta.offset),
+                "fp": self.delta_fingerprint((owner, file_key)),
+            }
+            # ★ 证据只用到 ``I`` 里那几个下标的素数，先给这几个 ——
+            #   客户端必须对它们**做素性检查**（塞合数会静默算错，见 primegen 的警告）。
+            out["primes"] = {
+                "bits": ell + 1,
+                "start": str(1 << ell),
+                "indices": used_positions,
+                "values": [str(primegen.get(i)) for i in used_positions],
+            }
+            if with_primes:
+                out["prime_table"] = {
+                    "count": int(delta.n),
+                    "values": [str(primegen.get(i)) for i in range(int(delta.n))],
+                }
+            return out
+
+    # -------------------------------------------------------------------
+    # 用户删除（墓碑改名）
+    # -------------------------------------------------------------------
+
+    def delete_user(self, user_id: int, *, actor: str) -> dict:
+        """删号：把该用户名下的一切改挂到**墓碑名**，然后删掉用户行。
+
+        ★ 三件事必须在**同一把写锁 + 同一个事务**里（审计 S1 / S2）：
+
+        1. **内存**：``registry`` / ``files`` / ``deltas``（以及子类的块密钥表）一起改名；
+        2. **库**：``blocks`` / ``files`` / **``file_deltas``** 三张表一起改名；
+        3. 删 ``users`` 那一行。
+
+        为什么不能少改任何一处 —— 后果不是"少改一行"，而是：
+
+        * 漏 ``deltas`` / ``file_deltas`` ⇒ 运行期 ``delta_of(墓碑名)`` 直接
+          ``KeyError``，而 ``/api/files`` 是**逐行序列化**的 ⇒
+          **一份墓碑文件就能让所有用户的文件列表 500**；
+        * 重启后 ``_reload`` 从 ``blocks``（墓碑名）与 ``file_deltas``（旧名）
+          重建出**两套身份** —— 库自己就不一致，所以**不自愈**。
+
+        为什么必须持锁：它改的是 ``registry`` / ``files`` / ``deltas`` 三个
+        **共享结构**，与并发的上传 / 查询是竞争关系。全项目其他写路径都在
+        ``_lock`` 保护下，只有它以前没有（审计 S2）——
+        而它的操作又跨内存与库，一旦看到半更新状态，故障要等到重启才"坐实"。
+
+        :param actor: 发起删除的管理员用户名（不能删自己）。
+        :raises NotFound: 用户不存在。
+        :raises Conflict: 想删自己，或改名会撞键。
+        :returns: ``{"deleted", "files_left", "tomb_name"}``
+        """
+        with self._lock, self.db.session() as db:
+            user = db.get(UserRow, user_id)
+            if user is None:
+                raise NotFound("用户不存在")
+            if user.username == actor:
+                raise Conflict("不能删除自己")
+
+            username = user.username
+            uid = user.id
+            # ★ 墓碑名里带 ``#id`` 是为了唯一：``ghost`` 被删两次会有两个墓碑名，
+            #   否则 (owner, file_key) 会撞唯一约束。
+            #   （SQLite 不强制 VARCHAR 长度，所以名字超过 64 字符也不会被截断。）
+            tomb = f"{username}（已删号#{uid}）"
+            n_files = int(
+                db.execute(
+                    select(func.count())
+                    .select_from(FileRow)
+                    .where(FileRow.owner == username)
+                ).scalar_one()
+            )
+
+            store = self._require()
+            # 先改内存（它会先做冲突检查，抛了就不会动库），再改库，最后删用户。
+            # 顺序反过来会留下"库已改、内存没改"的分叉 —— 而分叉只有重启后才看得出来。
+            try:
+                store.rename_owner(username, tomb)
+            except ValueError as exc:
+                raise Conflict(str(exc)) from exc
+
+            try:
+                for stmt in (
+                    update(BlockRow).where(BlockRow.owner == username),
+                    update(FileRow).where(FileRow.owner == username),
+                    # ★★ S1 的修复点：``file_deltas`` 以前**没有被改**。
+                    update(FileDeltaRow).where(FileDeltaRow.owner == username),
+                    # ★★ 回滚演示记录也要跟着走：不跟的话它会留在**活人**名下，
+                    #    而这个用户名一旦被重新注册，同一个
+                    #    ``(owner, file_key)`` 就会被复用 —— 又是
+                    #    “新文件被塞进旧密文”那条路（见 ``delete_file``）。
+                    update(ReplayRow).where(ReplayRow.owner == username),
+                ):
+                    db.execute(stmt.values(owner=tomb))
+                db.delete(user)
+                db.commit()
+            except Exception:
+                db.rollback()
+                # 库那半边失败就把内存**改回去**：分叉的后果是
+                # "重启前后文件列表不一样"，那种故障最难查。
+                # 这里宁可整体失败，也不留下一半。
+                store.rename_owner(tomb, username)
+                raise
+
+            return {
+                "deleted": username,
+                "files_left": n_files,
+                "tomb_name": tomb,
+            }
+
     # -------------------------------------------------------------------
     # 视图 / 状态
     # -------------------------------------------------------------------
@@ -2203,11 +2959,17 @@ class StoreManager:
                 #:   总量 + 每份文件各自的 offset / n / 指纹。
                 #:
                 #: ``n`` 是**旧字段，保留兼容**：在新架构里它等于
-                #: ``registry.total_blocks()``（= 各文件块数之和 + 历史空洞），
-                #: 也就是“全局位置总数”。旧代码里那句“当前向量长度”在单文件
-                #: 场景下数值不变，所以无需迁移；要按文件看就看 ``files``。
+                #: ``registry.total_blocks()``（= **各文件块数之和**，
+                #: **不含**历史空洞 —— 与 ``core/registry.py`` 的自述一致）。
+                #: 它**不是**“合法下标的上界”：删过文件之后可能小于某些有效下标。
+                #: 旧代码里那句“当前向量长度”在单文件场景下数值不变，所以无需迁移；
+                #: 要按文件看就看 ``files``。
                 "n": store.n,
                 "n_total": store.n,
+                #: ★ “位置预算已用”= ``registry.next_offset``：**单调不减**，
+                #:   把已废弃的空洞也算在内 —— 它才是“分配过的位置总量”。
+                #:   前端判“下标越界 / 是不是排在向量末尾”应当用它，而不是 ``n``。
+                "position_budget_used": int(store.registry.next_offset),
                 "files": [
                     {
                         "owner": own,

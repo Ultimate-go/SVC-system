@@ -41,7 +41,7 @@ from ..config import (
     write_deploy_ports,
 )
 from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
-from ..manager import StoreManager
+from ..manager import Conflict, NotFound, StoreManager
 from ..models import AuditRow, BlockRow, FileRow, UserRow, utcnow
 from ..schemas import (
     AuditRemarkIn,
@@ -200,16 +200,51 @@ def patch_user(
             )
         sk = mgr.session_key_of(token)
         if sk is None:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                "这次会话里没有你的私钥，无法重封 —— 请重新登录后再改口令。",
+            # ★★ 默认模型（私钥在客户端）下必然走到这里：后端**不持有私钥**
+            #   （安全审计 I8）。以前直接 403，等于逼用户先以 ``server_key=true``
+            #   登录 —— 那正是“把私钥交回服务端”，整套模型被绕过。
+            #
+            #   现在改走“**浏览器封装、服务端只登记**”那条路：新密文由前端
+            #   在本地用新口令封好交上来，服务端只验“解得开”与“私钥还是原来那把”
+            #   （见 :meth:`StoreManager.rekey_with_blob`）。
+            if body.sk_wrapped is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "这次会话里没有你的私钥（默认模型：后端不持有）—— "
+                    "请用「浏览器改口令」：前端会在本地用新口令把私钥重新封装，"
+                    "再把密文交上来。\n"
+                    "  （旧的 server_key=true 那条路仍然可用，"
+                    "但它会让服务端暂时拿到明文私钥。）",
+                )
+            try:
+                with collect() as sw:
+                    mgr.rekey_with_blob(user.username, body.password, body.sk_wrapped)
+            except (Conflict, NotFound) as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+            # ★ 改口令必须**同时把已签出的令牌作废**（安全审计 I2）：
+            #   否则旧口令对应的那些令牌在 TTL 内照样能用 ——
+            #   “改了密码却赶不走对方”是个很危险的空档。
+            mgr.revoke_user_tokens(user.username, reason="改口令")
+            # 库是在另一个 session 里改的，这里的 ORM 对象已经过期
+            db.refresh(user)
+            audit(
+                db,
+                actor.username,
+                "user_patch",
+                user.username,
+                detail="口令已更换（浏览器本地重封私钥）",
             )
+            out = user_public(user)
+            out["timings"] = sw.payload()
+            return out
         # ★ 先写私钥密文（不提交），再落哈希，**同一个事务里一起提交**。
         #   任何一步失败 ⇒ 两个都没变 ⇒ 账号仍然是"旧口令能正常登录"。
         with collect() as sw:
             mgr.rewrap_user_key(user.username, sk, body.password, db=db)
         user.pwd_hash = hash_password(body.password)
         db.commit()
+        # ★ 同上：改了口令就把这个人已签出的令牌全部作废（安全审计 I2）。
+        mgr.revoke_user_tokens(user.username, reason="改口令")
         audit(db, actor.username, "user_patch", user.username, detail="口令已更换（私钥已重封）")
         out = user_public(user)
         out["timings"] = sw.payload()
@@ -219,6 +254,10 @@ def patch_user(
     db.commit()
     db.refresh(user)
     audit(db, actor.username, "user_patch", user.username)
+    if body.disabled is not None or body.role is not None:
+        # ★ 停用 / 改角色同样是**止损**动作：不撤令牌的话，被停用的用户在令牌
+        #   过期前照样能读写（安全审计 I2）。
+        mgr.revoke_user_tokens(user.username, reason="停用或改角色")
     return user_public(user)
 
 
@@ -229,50 +268,36 @@ def delete_user(
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
-    user = db.get(UserRow, user_id)
-    if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
-    if user.username == admin.username:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除自己")
-    username = user.username
-    uid = user.id
-    # ★ 墓碑名：旧数据改挂到它名下。
-    #
-    #   为什么必须改名而不是直接删行：
-    #   登记表（``core.registry.BlockRegistry``）与向量是从 ``blocks`` 表
-    #   重建的（见 ``manager._reload``），而且下标必须**密集**：
-    #   删掉任何一行都会让后面所有下标错位，下次启动直接报"登记表重建错位"。
-    #   向量上的块只支持从**末尾**截断，压在中间的那些删不掉。
-    #
-    #   改名则完全不动下标、不动任何代数量 —— 这些块照样能被任何人验证。
-    #   改了名之后，同名重建的新账号与它们不再同名，界面上那个"可解密"
-    #   判据就**如实**了（不再出现"列表说能解、点了 403"）。
-    #
-    #   ★ 名字里带 ``#id`` 是为了唯一：``ghost`` 被删两次会有两个墓碑名，
-    #     否则 (owner, file_key) 会撞唯一约束。
-    #     （SQLite 不强制 VARCHAR 长度，所以名字超过 64 字符也不会被截断出错。）
-    tomb = f"{username}（已删号#{uid}）"
-    n_files = db.execute(
-        select(func.count()).select_from(FileRow).where(FileRow.owner == username)
-    ).scalar_one()
-
-    # 先改内存（它会先做冲突检查，抛了就不会动库），再改库，最后删用户。
-    # 顺序反过来会留下"库已改、内存没改"的分叉 —— 而分叉只有重启后才看得出来。
-    #
-    # ★ 库那半边失败就把内存改回去：分叉的后果是"重启前后文件列表不一样"，
-    #   那种故障最难查。这里宁可整体失败也不留下一半。
-    mgr.store.rename_owner(username, tomb)
+    # ★★ 内存与库必须**同时**改，而且要在**同一把写锁**里（审计 S1 / S2）：
+    #   内存侧 ``registry`` / ``files`` / ``deltas``（还有子类的块密钥表）
+    #   与库侧 ``blocks`` / ``files`` / ``file_deltas`` 六处一起改名。
+    #   所以整件事搬进了 :meth:`StoreManager.delete_user` ——
+    #   路由层只做参数校验的话，"改名"这一步就落在锁外面了。
     try:
-        db.execute(
-            update(BlockRow).where(BlockRow.owner == username).values(owner=tomb)
-        )
-        db.execute(update(FileRow).where(FileRow.owner == username).values(owner=tomb))
-        db.delete(user)
-        db.commit()
-    except Exception:
-        db.rollback()
-        mgr.store.rename_owner(tomb, username)
-        raise
+        out = mgr.delete_user(user_id, actor=admin.username)
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except Conflict as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    username = out["deleted"]
+    n_files = out["files_left"]
+    tomb = out["tomb_name"]
+    # ★ 墓碑名的构造搬到了 :meth:`StoreManager.delete_user`（它要带 ``#id`` 保唯一，
+    #   而只有那边能在同一个事务里拿到 ``user.id``）。这里只保留一条说明：
+    #
+    #   为什么必须"改名"而不是"删行"：登记表（``core.registry``）只支持从
+    #   **末尾**截断，压在中间的块物理删不掉；改名则不动任何下标、不动任何
+    #   代数量 —— 这些块照样能被任何人验证，而新账号与它们不再同名，
+    #   界面上"可解密"那条判据就**如实**了（不再出现"列表说能解、点了 403"）。
+    #
+    # 原实现保留在这里，说明为什么搬走：
+    #   它在**锁外面**直接 ``mgr.store.rename_owner(...)``，而那只改内存；
+    #   库那半边只 update 了 ``blocks`` / ``files`` 两张表 —— ``file_deltas``
+    #   被漏掉。改完之后：运行期 ``delta_of(墓碑名)`` KeyError → 文件列表 500；
+    #   重启后 ``_reload`` 从 ``blocks``（墓碑名）与 ``file_deltas``（旧名）
+    #   重建出**两套身份**，而且**不自愈**。
+    #   现在这三件事都在 :meth:`StoreManager.delete_user` 里、同一把锁内。
     audit(
         db,
         admin.username,

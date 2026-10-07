@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -61,6 +62,10 @@ def create_token(user: UserRow, settings: Settings) -> str:
     now = datetime.now(timezone.utc)
     claims = {
         **token_payload(user),
+        # ★ 唯一编号（安全审计 I1）。JWT 本身是**无状态**的、签出去就收不回来，
+        #   所以“作废某一张令牌”就必须有一个能**按张点名**的 ID。
+        #   `logout` 把它记进撤销表，`deps.current_user` 每次校验。
+        "jti": secrets.token_urlsafe(16),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.token_ttl_minutes)).timestamp()),
     }

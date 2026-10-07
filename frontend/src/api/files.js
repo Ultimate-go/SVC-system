@@ -33,4 +33,30 @@ export const filesApi = {
    */
   remove: (id) => api.delete(`/api/files/${id}`),
   decrypt: (id, indices) => api.post(`/api/files/${id}/decrypt`, { indices }),
+  /**
+   * 取**密文**（不解密）—— 浏览器自解密 + 自验证那条路的入口。
+   *
+   * ★ 与 ``decrypt`` 的分工就是"服务器可不可信"这条分界线：
+   *   ``decrypt`` 让**服务端**把内容解开（后端要拿私钥），
+   *   ``cipher`` 只把**材料**交出来（密文段 / IV / 块密钥密文 / 证据 / 公开参数），
+   *   解封与解密都在浏览器里做（见 ``utils/crypto/index.js::openBlocks``）。
+   *
+   * :param withPrimes: 是否让后端把整段素数表一并带上（供浏览器自算 U_n）。
+   */
+  cipher: (id, indices, withPrimes = true) =>
+    api.post(`/api/files/${id}/cipher`, { indices }, { params: { with_primes: withPrimes } }),
+
+  /**
+   * **回滚演示**：让服务器对某一块交回「旧版本」。
+   *
+   * 打开后服务器**真的**开始对这块交回旧密文（后续 /cipher 里换掉），
+   * 于是客户端自算的分量对不上当前基准，**验证不通过**。
+   *
+   * ★ 演示顺序：**先** on=true（存下当前这版）→ **再**改块 → **然后**解密。
+   * :param id: 文件 id
+   * :param blockIdx: 文件内的第几块（0 起算）
+   * :param on: true 打开演示，false 恢复正常
+   */
+  replay: (id, blockIdx, on) =>
+    api.post(`/api/files/${id}/replay`, { block_idx: blockIdx, on }),
 }

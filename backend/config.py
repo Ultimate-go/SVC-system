@@ -622,6 +622,16 @@ class Settings:
     secret_key: str = field(
         default_factory=lambda: os.environ.get("VDS_SECRET_KEY") or secrets.token_urlsafe(32)
     )
+    #: 签名密钥是不是**临时生成**的（没给 ``VDS_SECRET_KEY``）。
+    #:
+    #: ★ 这个标志存在的意义（安全审计 P3）：临时密钥**每次启动都换**，
+    #:   于是所有已签发的令牌立刻失效 —— 单进程 demo 里那是“设计如此”，
+    #:   但**必须能被看见**：以前没有任何地方提示它，
+    #:   用户只会看到“刚登录了怎么又要登录”。
+    #:   现在启动时会打一条 warning（见 ``backend/main.py``）。
+    secret_key_is_temporary: bool = field(
+        default_factory=lambda: not bool(os.environ.get("VDS_SECRET_KEY"))
+    )
     modulus_bits: int = 1024
     l: int = 256
     #: 全局位置上限。1 KB 一块 ⇒ **文件上限 = n_max 块 ≈ 8 MB**。

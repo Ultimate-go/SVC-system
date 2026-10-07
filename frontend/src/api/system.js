@@ -5,7 +5,7 @@ export const systemApi = {
   check: () => api.post('/api/admin/check'),
   /**
    * 审计流水。params 支持：
-   *   limit / target / actor —— 原有
+   *   page / page_size / target / actor —— 原有
    *   action                 —— 动作名精确匹配
    *   ok                     —— true 只看成功 / false 只看被拒
    *   since / until          —— **本地墙上时间**（后端换 UTC），半开区间 [since, until)
