@@ -17,7 +17,7 @@
  * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
  *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
@@ -698,11 +698,14 @@ async function runRegistry() {
     regRunning.value = false
   }
 }
+
+// 进入页面即自动拉取文件列表（列表是所有后续操作的前提）。
+onMounted(loadFiles)
 </script>
 
 <template>
-  <div>
-    <PageHeader title="完整性验证" subtitle="谁都能验证，登录即可" />
+  <div class="verify-page">
+    <PageHeader title="完整性验证" subtitle="公开验证；解密需所有权" />
 
     <!-- ============================================================= -->
     <!-- ⓪ 拉取文件列表（单独一块，放最上面）                            -->
@@ -715,7 +718,7 @@ async function runRegistry() {
       <div class="sec-head">
         <h4 class="sec-title">拉取文件列表</h4>
         <el-button type="primary" size="small" :loading="filesLoading" @click="loadFiles">
-          {{ allFiles.length ? '重新拉取' : '拉取文件列表' }}
+          重新拉取
         </el-button>
       </div>
       <!-- ★ 拉取结果**就地**展示在这个框里：概览 + 文件清单。
@@ -739,42 +742,17 @@ async function runRegistry() {
       </template>
 
       <div v-else-if="filesLoading" class="text-3" style="font-size: 12px">正在拉取…</div>
-      <div v-else class="text-3" style="font-size: 12px">还没拉取 —— 点右上角按钮。</div>
+      <div v-else class="text-3" style="font-size: 12px">列表为空。</div>
     </div>
 
     <!-- ============================================================= -->
-    <!-- ⓪′ 查存储槽位（内部坐标工具）                                    -->
+    <!-- ① 按文件 + 第几块验证（快速验证）                                -->
     <!-- ============================================================= -->
     <div class="panel mb-3">
-      <h4 class="sec-title">查存储槽位（槽位号 → 谁的第几块、存在哪台）</h4>
-      <p class="text-3" style="font-size: 12px; line-height: 1.7; margin: 0 0 10px; max-width: 76ch">
-        <b>这不是密码学坐标</b>：改造后「第 i 块配哪个素数」由<b>块身份</b>派生
-        （<span class="mono">H(身份‖块号)</span>），与槽位号毫无关系 ——
-        槽位只表示“密文放在存储节点的哪个位置”。
-        平时不用看它，排查“日志里那个编号到底是谁的块”时用它。
-      </p>
-      <div class="query-form">
-        <el-input v-model="regIndex" placeholder="槽位号，如 3" style="width: 160px" />
-        <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
+      <div class="sec-head">
+        <h4 class="sec-title">按文件 + 第几块验证</h4>
+        <span class="step-tag">快速验证</span>
       </div>
-      <div v-if="regResult" class="mt-3">
-        <template v-if="!regResult.error">
-          <div class="mono text-1" style="font-size: 13px">
-            槽位 {{ regResult.global_index }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ regResult.block_idx }} 块
-          </div>
-          <div class="text-2 mono" style="font-size: 12px">
-            holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
-          </div>
-        </template>
-        <div v-else class="text-danger">{{ regResult.error }}</div>
-      </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- ① 按文件 + 第几块验证                                            -->
-    <!-- ============================================================= -->
-    <div class="panel mb-3">
-      <h4 class="sec-title">按文件 + 第几块验证</h4>
       <div class="query-form">
         <template v-if="!advancedMode">
           <el-select v-model="verifyFileId" placeholder="选一份文件" style="width: 240px" filterable>
@@ -808,11 +786,13 @@ async function runRegistry() {
           {{ advancedMode ? '← 改用文件 + 块号' : '高级：直接填全局下标' }}
         </el-button>
       </div>
-      <p class="note">
-        这里是<strong>少量块</strong>的快路：选一份文件 + 填第几块 → 「验证」当场验完。
-        块多或者要<strong>跨文件</strong>时，用「加入集合」把这几块先攼到下面的集合里，
-        最后在集合上一次验完（同一请求、一份证据）。
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          适用于少量块的直接验证：选定文件并指定块号后即时完成。
+          块数较多或需跨文件时，先用「加入集合」收进集合，再在集合中统一验证（单次请求、一份证据）。
+        </p>
+      </details>
 
       <div v-if="result" class="mt-3">
         <VerifyResult :result="result" />
@@ -863,11 +843,12 @@ async function runRegistry() {
     </div>
 
     <!-- ============================================================= -->
-    <!-- ① 按指标筛选文件                                                -->
+    <!-- ② 按指标筛选文件                                                -->
     <!-- ============================================================= -->
     <div class="panel mb-3">
       <div class="sec-head">
         <h4 class="sec-title">按指标筛选文件</h4>
+        <span class="step-tag">选块入集合</span>
       </div>
 
       <!-- ★ 每个指标一组：`.flt` 里左边是定宽右对齐的标签、右边是控件。
@@ -948,13 +929,14 @@ async function runRegistry() {
         <el-button size="small" @click="resetFilters">重置筛选</el-button>
       </div>
 
-      <p class="note">
-        这些条件<strong>全在前端筛</strong>：「拉取文件列表」只调一次 GET /api/files，
-        不取证据、不验证，文件再多也只是筛一遍列表。
-        每行两个入口：<strong>收整份</strong>把这文件的全部块收进集合，
-        <strong>只收几块…</strong>只能填第几块、只把那几块收进去；
-        收集完到下面的「集合」里一次验完（跨文件也行）。
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          筛选在前端执行，仅调用一次文件列表接口，不触发取证与验证。
+          每行两个入口：<strong>收整份</strong>将该文件全部块收进集合，
+          <strong>只收几块…</strong>仅按块号收取指定块；收集完成后在下方「集合」统一验证（支持跨文件）。
+        </p>
+      </details>
 
       <template v-if="allFiles.length">
         <div class="match-head">
@@ -991,16 +973,17 @@ async function runRegistry() {
         </div>
       </template>
       <div v-else-if="!filesLoading && !loadError" class="note">
-        还没拉取列表 —— 点右上角「拉取文件列表」。
+        列表未加载。请执行「重新拉取」。
       </div>
     </div>
 
     <!-- ============================================================= -->
-    <!-- ② 集合（清单）：一次把整个集合验完                              -->
+    <!-- ③ 集合（清单）：一次把整个集合验完                              -->
     <!-- ============================================================= -->
     <div class="panel mb-3">
       <div class="sec-head">
         <h4 class="sec-title">集合</h4>
+        <span class="step-tag">统一验证</span>
         <span class="mono text-2" style="font-size: 12px">
           {{ basket.size }} 块 · {{ basket.fileCount }} 份文件
         </span>
@@ -1051,12 +1034,13 @@ async function runRegistry() {
         >验证集合里的全部块（{{ basket.size }} 块 · {{ basket.fileCount }} 份文件）</el-button>
         <el-switch v-model="basketAllowPartial" active-text="允许部分结果" />
       </div>
-      <p class="note">
-        一次请求把整个集合验完，<strong>跨文件也行</strong>：
-        同一份文件内的块直接聚合（快），跨多份文件时后端在「合并位置集」上
-        重算一份证据（秒级）—— 两种都只出<strong>一份</strong>证据、一次验证。
-        验证完的报告在下面，也会自动进证据池。
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          集合内的块在单次请求中完成验证：同一文件内的块直接聚合；跨文件时服务端在合并位置集上重算一份证据。
+          两种情形均输出单一证据与单一结论，验证结果同步写入证据池。
+        </p>
+      </details>
 
       <div v-if="basketError" class="file-error">{{ basketError }}</div>
 
@@ -1096,6 +1080,39 @@ async function runRegistry() {
           :refs="basketResult.refs || []"
         />
         <StageTimeline v-if="basketResult.timings" :timings="basketResult.timings" class="mt-2" />
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- ④ 查存储槽位（内部坐标工具，排最后）                            -->
+    <!-- ============================================================= -->
+    <div class="panel mb-3">
+      <div class="sec-head">
+        <h4 class="sec-title">查存储槽位</h4>
+        <span class="step-tag">内部坐标</span>
+      </div>
+      <details class="note-collapse">
+        <summary>槽位号 → 谁的第几块、存在哪台</summary>
+        <p class="note">
+          这不是密码学坐标：改造后「第 i 块配哪个素数」由块身份派生
+          （<span class="mono">H(身份‖块号)</span>），与槽位号无关 ——
+          槽位仅表示密文在存储节点上的位置。该视图用于按槽位反查块归属与所在节点，常规操作无需使用。
+        </p>
+      </details>
+      <div class="query-form">
+        <el-input v-model="regIndex" placeholder="槽位号，如 3" style="width: 160px" />
+        <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
+      </div>
+      <div v-if="regResult" class="mt-3">
+        <template v-if="!regResult.error">
+          <div class="mono text-1" style="font-size: 13px">
+            槽位 {{ regResult.global_index }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ regResult.block_idx }} 块
+          </div>
+          <div class="text-2 mono" style="font-size: 12px">
+            holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
+          </div>
+        </template>
+        <div v-else class="text-danger">{{ regResult.error }}</div>
       </div>
     </div>
   </div>
@@ -1334,5 +1351,30 @@ async function runRegistry() {
   padding: 1px 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+/* 主流程步骤徽标：快速验证 / 选块入集合 / 统一验证 / 内部坐标 */
+.step-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* 说明段落统一收进可展开区，默认折叠，减少页面文字墙 */
+.note-collapse {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.note-collapse summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-2);
+}
+.note-collapse .note {
+  margin-top: 6px;
+  margin-bottom: 0;
 }
 </style>
