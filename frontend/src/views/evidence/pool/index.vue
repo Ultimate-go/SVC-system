@@ -750,15 +750,14 @@ onMounted(() => {
         <el-button v-if="pool.cards.length" link type="danger" @click="pool.clear()">清空</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
-      <p class="note">
-        只存在当前标签页（sessionStorage），关掉就没了。是否作废看 δ 指纹。
-        ｜「聚合选中」在同一份文件内走论文的 VC.Agg（只收凭证，很快）；
-        <b>跨文件时它做的是「归约」</b>：把各文件的承诺抬进一条合并向量、
-        再用全量值重开一份证据（要取密文，秒级）——
-        两条路的产物一样：两个群元素（256 字节），之后仍可再聚合、可分解。
-        ｜要把某一份文件单独取一份证据，到「文件与块」页点它那行的「入池」
-        （或右上角的「一键入池」）。
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          选中一张或多张卡片，点「聚合选中」合并成一份，或点「一次验这 N 份」批量验证，
+          点「分解」拆出部分数据。这里的数据只保存在当前页面，关闭后不会保留；
+          要单独取某份文件的证据，可到「文件与块」页点「入池」。
+        </p>
+      </details>
     </div>
 
     <div v-if="!pool.cards.length">
@@ -830,12 +829,13 @@ onMounted(() => {
          ★ 与旁边那个「分解（单文件）」是两件事（见 openCrossDisagg 的注释）。
          弹框挂在 body 上，所以放在模板哪个位置都不影响渲染。 -->
     <el-dialog v-model="crossOpen" title="分解（跨文件）—— 选一份文件" width="600px">
-      <p class="note">
-        从这张跨文件的卡里，把「某一份文件」的那一部分「单独取回来」，
-        得到一份属于它自己的、可以独立验证的证据。
-        （跨文件的卡本身是在一条**合并向量**上开的，所以不能直接按单文件块号去拆；
-        这里是按你选的那一份重新向节点取一次。）
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          选择要拆出的文件，点「拆出」，把这份文件的数据单独取出来，得到它自己的证据。
+          跨文件的证据需要按所选文件重新获取一次。
+        </p>
+      </details>
       <el-select v-model="crossFileIdx" placeholder="选要拆出哪一份文件" style="width: 100%">
         <el-option
           v-for="f in crossFileList"
@@ -875,12 +875,18 @@ onMounted(() => {
         <span class="sep">·</span>
         <span>逐份 {{ batchResult.ms_separate }} ms</span>
       </div>
-      <p v-if="batchResult.ms_batch != null" class="note">批量验证比逐份慢（实测约 1.68 倍），换来的是一次结论。</p>
+      <details v-if="batchResult.ms_batch != null" class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">批量验证比逐份慢（实测约 1.68 倍），换来的是一次结论。</p>
+      </details>
       <!-- 成功时把“这是在哪种向量上给的结论”说清：一文件一向量 vs 合并向量 -->
-      <p v-if="batchResult.universe_files?.length" class="note">
-        结论是在 <b>{{ batchResult.universe_files.join(' + ') }}</b> 这条向量上做的
-        （{{ batchResult.universe_n }} 个位置<template v-if="batchResult.merged_universe">，由多份文件归约而来</template>）。
-      </p>
+      <details v-if="batchResult.universe_files?.length" class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          本次结论由 <b>{{ batchResult.universe_files.join(' + ') }}</b> 共同得出
+          （共 {{ batchResult.universe_n }} 个位置<template v-if="batchResult.merged_universe">，由多份文件合并计算</template>）。
+        </p>
+      </details>
       <!--
         ★ 只有“卡来自不同宇宙”时后端才拒绝。这必须给出可执行的下一步，因为它不是故障：
           一次结论要求所有份共享同一个承诺 C（学位论文 Def. 29），而每张纯单文件的卡
@@ -888,12 +894,12 @@ onMounted(() => {
           注意：一张“归约”出来的跨文件卡本身**可以**一次结论（它已经落在一条向量上）。
       -->
       <template v-if="batchResult.needsMerge">
-        <p class="note">
-          一次结论要求所有份共享同一个承诺 C（论文 Def. 29），而这几张卡各绑在自己那份文件的 C 与 U 上
-          —— 所以没法合成一条方程。注意：一张「聚合选中」归约出来的跨文件卡
-          「可以」一次结论（它已经落在一条向量上）；要一次验好几张不同的卡，
-          先用「聚合选中」把它们并成一张，再验那一张。
-        </p>
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            这几张卡片来自不同文件，无法直接合并验证。先点「聚合选中」把它们并成一张，再点「一次验这 N 份」验证。
+          </p>
+        </details>
         <el-button type="primary" size="small" :loading="aggregating" @click="mergeNow">
           改用聚合选中（并成一条向量）
         </el-button>
@@ -909,7 +915,10 @@ onMounted(() => {
         拆出 {{ blockText(disaggCard, disaggResult.indices || []) }}，
         丢弃 {{ blockText(disaggCard, disaggResult.dropped || []) }}
       </div>
-      <p class="note">第 3 步不能省：要拆出新块，得先把它取回来。</p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">拆出来的新块需要先获取对应数据，这一步不能跳过。</p>
+      </details>
     </div>
 
     <!--
@@ -978,9 +987,12 @@ onMounted(() => {
         <div class="dg-idx" :class="{ open: showAllIndices }">
           <span class="mono">{{ blockText(disaggCard, disaggIndices, showAllIndices) }}</span>
         </div>
-        <p class="note">
-          界面上只说「哪份文件的第几块」—— 全局下标是内部坐标，不摆出来。
-        </p>
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            这里列出所选文件里的块，用「从哪分到哪」选择要拆出的范围。
+          </p>
+        </details>
 
         <div class="dg-row mt-2">
           <span class="dg-lbl">从哪分到哪</span>
@@ -999,7 +1011,10 @@ onMounted(() => {
           <p v-if="!disaggDropped.length" class="dg-warn">
             丢弃为空 —— 这样等于原样复制一份，分解的意义在于「只留一部分」。把范围缩小一点。
           </p>
-          <p v-else class="note">分解不发任何网络请求；含「新」块的证据得另外去取（第 3 步不能省）。</p>
+          <details v-else class="note-collapse">
+            <summary>说明</summary>
+            <p class="note">分解只在本页计算，不重新获取数据。如果结果里包含新块，需先点「重新取一次」。</p>
+          </details>
         </div>
       </template>
       <template #footer>

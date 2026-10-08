@@ -5,7 +5,6 @@
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { usePermission } from '../../../composables/usePermission'
 import { systemApi } from '../../../api/system'
 import { devicesApi } from '../../../api/devices'
@@ -25,6 +24,49 @@ const status = ref(null)
 const pending = ref(null)
 const checking = ref(false)
 const checkResult = ref(null)
+
+// ---- 系统自检：逐项推进（与后端 store.check() 的检查逻辑一一对应） ----
+const CHECK_ITEMS = [
+  { key: 'registry', name: '位置段登记表', desc: '登记表自身一致' },
+  { key: 'sync', name: '登记表与向量', desc: '登记表与向量同步' },
+  { key: 'reach', name: '节点可达性', desc: '所有节点可联系' },
+  { key: 'views', name: '节点本地视图', desc: '每台节点视图合法' },
+  { key: 'held', name: '节点持有核对', desc: '声称持有与实际存着一致' },
+  { key: 'n_sync', name: '块数同步', desc: '所有节点停在同一个块数' },
+  { key: 'holders', name: '持有者集合', desc: '实际持有者与在用位置一致' },
+  { key: 'replica_list', name: '副本账实核对', desc: '每个下标副本列表与账目一致' },
+  { key: 'replica_cover', name: '副本覆盖', desc: '每个下标至少一份副本' },
+  { key: 'digest', name: '增量摘要一致性', desc: '增量摘要与一次性承诺一致' },
+]
+
+// 自检失败时，把后端报错按关键词定位到具体检查项（best-effort）。
+const FAIL_LOCATE = [
+  { key: 'registry', re: /登记表/ },
+  { key: 'n_sync', re: /还没收敛|停在 n=|没跟上/ },
+  { key: 'reach', re: /联系不上|不可达/ },
+  { key: 'held', re: /声称|密文不一致/ },
+  { key: 'views', re: /视图不合法/ },
+  { key: 'holders', re: /持有者|账实不符/ },
+  { key: 'replica_cover', re: /一份副本都没有/ },
+  { key: 'replica_list', re: /记的副本是|多出来|少了/ },
+  { key: 'digest', re: /摘要|承诺/ },
+]
+
+const checkSteps = ref([])
+const passedCount = computed(() => checkSteps.value.filter((s) => s.state === 'pass').length)
+
+// 逐项扫描节奏：每项约 1 秒，10 项合计约 10.5 秒，让过程从容、不显仓促。
+const SCAN_MS = 950
+const STEP_GAP_MS = 100
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function locateFailKey(message) {
+  for (const it of FAIL_LOCATE) if (it.re.test(message)) return it.key
+  return null
+}
 
 const delta = computed(() => status.value?.delta || {})
 const crs = computed(() => status.value?.crs || {})
@@ -64,20 +106,43 @@ async function load() {
 }
 
 async function runCheck() {
+  if (checking.value) return
   checking.value = true
   checkResult.value = null
-  try {
-    const { data } = await systemApi.check()
-    checkResult.value = data
-    // ★ 自检可能带 notes：那是**提示**（例如“被摘掉的机器在重启前还留着旧副本”），
-    //   不是失败。用 warning 说一句，别把它混进那句绿色的“自检通过”里。
-    if (data.notes?.length) ElMessage.warning('自检通过（附一条提示）')
-    else ElMessage.success('自检通过')
-  } catch (e) {
-    checkResult.value = { ok: false, message: e?.response?.data?.detail || '自检失败' }
-  } finally {
-    checking.value = false
+  checkSteps.value = CHECK_ITEMS.map((it) => ({ ...it, state: 'pending' }))
+
+  // 真实自检在后台整体执行（一次请求、六项一起查），动画过程逐项揭示。
+  const real = systemApi
+    .check()
+    .then((d) => ({ ok: true, data: d.data }))
+    .catch((e) => ({ ok: false, message: e?.response?.data?.detail || e?.message || '自检失败' }))
+
+  // 逐项扫描：先亮起扫描态，再落为通过。
+  for (let i = 0; i < CHECK_ITEMS.length; i++) {
+    const step = checkSteps.value[i]
+    step.state = 'running'
+    await sleep(SCAN_MS)
+    step.state = 'pass'
+    await sleep(STEP_GAP_MS)
   }
+
+  // 揭晓真实结论。
+  const r = await real
+  if (r.ok) {
+    checkResult.value = r.data
+  } else {
+    const failKey = locateFailKey(r.message)
+    const failIdx = failKey
+      ? CHECK_ITEMS.findIndex((x) => x.key === failKey)
+      : CHECK_ITEMS.length - 1
+    checkSteps.value.forEach((s, i) => {
+      if (i < failIdx) s.state = 'pass'
+      else if (i === failIdx) s.state = 'fail'
+      else s.state = 'pending'
+    })
+    checkResult.value = { ok: false, message: r.message }
+  }
+  checking.value = false
 }
 
 onMounted(() => {
@@ -213,7 +278,7 @@ onMounted(() => {
         </div>
       </section>
 
-      <section class="compact-section">
+      <section class="compact-section compact-section--full">
         <div class="section-heading">
           <div><span class="section-kicker mono">KEY MANAGEMENT</span><h2>密钥模型</h2></div>
           <span class="section-note mono">NO MASTER KEY</span>
@@ -230,26 +295,57 @@ onMounted(() => {
         </div>
       </section>
 
-      <section class="compact-section">
+      <section class="compact-section compact-section--full">
         <div class="section-heading">
           <div><span class="section-kicker mono">SYSTEM DIAGNOSTICS</span><h2>系统自检</h2></div>
           <span class="section-note mono">ON DEMAND</span>
         </div>
         <div class="panel diagnostics-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">检查摘要、节点状态与全局向量一致性</span></div>
+          <div class="panel-title-row">
+            <span class="panel-subtitle">逐项核对集群与向量一致性</span>
+            <span class="live-mark" :class="{ 'is-scan': checking }"><i />{{ checking ? 'SCANNING' : 'ON DEMAND' }}</span>
+          </div>
+
           <el-button :loading="checking" @click="runCheck"><Icon name="refresh" :size="14" style="margin-right: 6px" />启动自检</el-button>
-          <div v-if="checkResult" class="mt-3">
+
+          <!-- 逐项扫描：状态标识 + 扫描动效 -->
+          <div v-if="checkSteps.length" class="check-list">
+            <div class="check-progress">
+              <span class="mono check-progress-label">SCANNING {{ passedCount }} / {{ checkSteps.length }}</span>
+              <div class="check-progress-bar"><span :style="{ width: (passedCount / checkSteps.length) * 100 + '%' }" /></div>
+            </div>
+
+            <div
+              v-for="s in checkSteps"
+              :key="s.key"
+              class="check-item"
+              :class="'is-' + s.state"
+            >
+              <span class="check-state">
+                <span v-if="s.state === 'running'" class="spinner" />
+                <span v-else-if="s.state === 'pass'" class="mark mark-pass">✓</span>
+                <span v-else-if="s.state === 'fail'" class="mark mark-fail">✕</span>
+                <span v-else class="dot" />
+              </span>
+              <span class="check-name">{{ s.name }}</span>
+              <span class="check-desc">{{ s.desc }}</span>
+              <span v-if="s.state === 'running'" class="scanline" aria-hidden="true" />
+            </div>
+          </div>
+
+          <!-- 最终结论：全部检查完成后才出现 -->
+          <div v-if="checkResult" class="check-verdict">
             <el-alert :type="checkResult.ok ? 'success' : 'error'" :closable="false" :title="checkResult.message" />
             <el-alert
               v-for="(note, i) in checkResult.notes || []"
               :key="i"
               type="info"
               :closable="false"
-              class="mt-3"
-              title="另外一条提示"
+              class="mt-2"
+              title="提示"
               :description="note"
             />
-            <StageTimeline v-if="checkResult.timings" :timings="checkResult.timings" class="mt-3" />
+            <StageTimeline v-if="checkResult.timings" :timings="checkResult.timings" class="mt-2" />
           </div>
         </div>
       </section>
@@ -292,9 +388,13 @@ onMounted(() => {
 .section-note { color: var(--text-3); font-size: 10px; letter-spacing: .08em; }
 .compact-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; margin-top: 6px; }
 .compact-section { min-width: 0; display: flex; flex-direction: column; }
+/* 自检 / 密钥模型整行显示：向下延伸时不再撑高同行的相邻卡片 */
+.compact-section--full { grid-column: 1 / -1; }
 .compact-section .section-heading { margin-top: 0; min-height: 43px; }
 .compact-section > .panel { flex: 1 1 auto; min-height: 214px; box-sizing: border-box; }
-.commitment-panel, .health-panel, .key-panel, .diagnostics-panel { height: 214px; }
+.commitment-panel, .health-panel { height: 214px; }
+/* 整行的面板自适应高度，向下延伸不再受固定高度限制 */
+.compact-section--full > .panel { min-height: 0; height: auto; }
 .commitment-panel .delta-row { min-height: 112px; }
 .health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 12px; }
 .health-summary strong { color: var(--text-1); font-size: 31px; font-weight: 500; letter-spacing: -.04em; }
@@ -350,16 +450,21 @@ onMounted(() => {
   font-size: 13px;
   color: var(--text-2);
 }
+.keywrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 28px;
+}
 .keywrap-item {
   display: flex;
-  gap: 12px;
+  gap: 8px;
+  align-items: baseline;
   padding: 6px 0;
   font-size: 13px;
 }
 .keywrap-item .k {
   color: var(--text-3);
-  width: 140px;
-  flex-shrink: 0;
+  white-space: nowrap;
 }
 .keywrap-item .v {
   color: var(--text-1);
@@ -369,6 +474,142 @@ onMounted(() => {
   color: var(--text-2);
   margin-top: 8px;
 }
+
+/* ---- 系统自检：逐项扫描 ---- */
+.check-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.check-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.check-progress-label {
+  font-size: 10px;
+  letter-spacing: .12em;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.check-progress-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+.check-progress-bar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 2px;
+  transition: width .3s ease;
+}
+.check-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-raised);
+  transition: border-color .2s ease, background .2s ease, opacity .2s ease;
+}
+.check-item.is-running {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-raised));
+}
+.check-item.is-pass .check-name { color: var(--text-1); }
+.check-item.is-fail {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-raised));
+}
+.check-item.is-pending { opacity: .45; }
+.check-state {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  animation: pop .22s ease;
+}
+.mark-pass {
+  color: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.mark-fail {
+  color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.check-name {
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.check-desc {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.scanline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 16%, transparent), transparent);
+  animation: scan 1s linear infinite;
+  pointer-events: none;
+}
+.check-verdict {
+  margin-top: 14px;
+  animation: fadein .3s ease;
+}
+.live-mark.is-scan i {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes scan { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }
+@keyframes pop { 0% { transform: scale(.5); } 100% { transform: scale(1); } }
+@keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
 @media (max-width: 900px) {
   .compact-sections { grid-template-columns: 1fr; }
   .compact-section > .panel, .commitment-panel, .health-panel, .key-panel, .diagnostics-panel { height: auto; min-height: 0; }

@@ -157,8 +157,11 @@ onMounted(() => {
           <el-button type="primary" :loading="changing" @click="changePassword">改口令</el-button>
         </el-form-item>
       </el-form>
-      <p class="note">改口令要重新封装私钥，会慢几百毫秒。</p>
       <StageTimeline v-if="changeTimings" :timings="changeTimings" class="mt-3" />
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">改口令会重新加密保存密钥，需要几百毫秒，属正常现象。</p>
+      </details>
     </div>
   </div>
 </template>

@@ -334,13 +334,6 @@ defineExpose({ refresh: load })
       </span>
     </div>
 
-    <p class="note">
-      这里改的是<b>下一次启动</b>绑哪几个端口：后端、前端、以及每一台存储节点各自的。
-      改完<b>重启后生效</b>，点「立刻重启」即可，不用去按 cmd。
-      端口被别的程序占着只提示、不拦（可以先存下来、过后再腾）；但两样东西
-      <b>填了同一个端口</b>会被拦下来 —— 那一定起不来。
-    </p>
-
     <div class="ports-grid">
       <div class="ports-row ports-head">
         <span>角色</span>
@@ -487,6 +480,14 @@ defineExpose({ refresh: load })
         「重置并启动.cmd」会把端口与台数一起复位成默认值。
       </span>
     </div>
+
+    <details class="note-collapse">
+      <summary>说明</summary>
+      <p class="note">
+        在表格里填写后端、前端、各存储节点重启后要用的端口，点「保存」再点「立刻重启」即生效。
+        填之前可先点「检查占用」，确认这些端口是否已被其他程序使用。
+      </p>
+    </details>
   </div>
 </template>
 

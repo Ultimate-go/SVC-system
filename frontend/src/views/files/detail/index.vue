@@ -563,12 +563,6 @@ onMounted(load)
           <h4 class="sec-title" style="margin-bottom: 0">块明细（每块的公开分量）</h4>
           <DetailToggle />
         </div>
-        <p class="note">
-          每一块的<b>分量</b>就是它的指纹：验证比的就是它 —— 而分量是验证方
-          <b>自己从这串密文算</b>出来的（对方替你声明的那个不作数），
-          所以缺一块、换一块都会在这里露出来。
-          鼠标停在任意指纹上会显示<b>完整十六进制</b>。
-        </p>
         <BlockPreviewBar
           :total="(file.layout || []).length"
           :limit="BLOCK_PREVIEW_LIMIT"
@@ -608,23 +602,18 @@ onMounted(load)
             </template>
           </el-table-column>
         </el-table>
-        <p v-if="!detailed" class="note mt-2" style="margin-bottom: 0">
-            现在是最简略态：只列块号、明文长度与所在节点。点右上角「详细」
-          可以看到每块的分量指纹（悬浮看完整十六进制）—— 那一次会多问后端要一份
-          分量数据，所以切换时会重新拉一次详情。
-        </p>
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            本表按块号列出文件每一块的内容长度与存放节点。点右上角「详细」可展开查看每块指纹，
+            鼠标停在指纹上会显示完整值。
+          </p>
+        </details>
       </div>
 
       <!-- 回滚演示：让服务器交回旧版本（演示“服务器不可信”） -->
       <div class="panel mb-3">
         <h4 class="sec-title">演示：服务器交回旧版数据</h4>
-        <p class="note">
-          该开关用于演示存储方返回存量旧版本密文的情形：启用后，指定块的读取将返回改块前的密文。
-        </p>
-        <p class="note">
-          演示步骤：<b>①</b> 启用开关；<b>②</b> 修改该块；<b>③</b> 执行解密。
-          此时浏览器本地验证将不通过：重算分量与当前基准不一致。停用开关即恢复。
-        </p>
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
           <span class="text-2">第</span>
           <el-input-number
@@ -647,6 +636,14 @@ onMounted(load)
           ★ 这次服务器交回了<b>第 {{ decryptResult.replayedBlocks.join('、') }} 块</b>的<b>旧版本</b>（改块之前那一版）——
           所以上面的本地验证不通过。这是<b>回滚</b>，不是“内容被改坏”。
         </p>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            输入块号并点「打开」记录当前版本，再到下方「改一块」中修改该块内容，最后执行解密，
+            即可看到本地验证不通过。点「关闭」恢复。用于演示存储方返回旧版本数据的情形。
+          </p>
+        </details>
       </div>
 
       <div class="panel mb-3">
@@ -788,13 +785,6 @@ onMounted(load)
 
       <div class="panel">
         <h4 class="sec-title">解密预览（浏览器本地解密 + 本地验证）</h4>
-        <p class="note">
-          这条路上服务端<b>只交材料</b>（密文 / IV / 块密钥密文 / 证据 / 公开参数），
-          解封与解密均在浏览器本地执行，<b>私钥不上送至服务端</b>。
-          下面那条「验证结论」是浏览器拿<b>本地保存的 δ</b> 自己跑
-          <span class="mono">add_back</span> 链算出来的，
-          不是后端那句 <span class="mono">ok: true</span>。
-        </p>
         <el-button
           type="primary"
           :loading="decrypting"
@@ -869,6 +859,14 @@ onMounted(load)
             <pre class="plain">{{ decodePreview.text }}</pre>
           </div>
         </div>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            点「解密并本地验证」，在浏览器本地把文件解出来并校验是否完整，解出的内容显示在下方。
+            整个过程在本地完成，无需把密钥交给服务端。
+          </p>
+        </details>
       </div>
     </template>
   </div>

@@ -74,3 +74,38 @@ html.compact .panel {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* 说明性小字统一收进可折叠区：默认闭合，点 summary 才展开。
+   用在 <details class="note-collapse"><summary>说明</summary>…</details>。 */
+.note-collapse {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.note-collapse > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-2);
+}
+/* 自绘灰色实心三角，紧贴文字，展开时旋转 90° */
+.note-collapse > summary::before {
+  content: '';
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4.5px solid var(--text-2);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  margin-right: 3px;
+  transition: transform 0.15s ease;
+}
+.note-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
+.note-collapse .note {
+  margin-top: 6px;
+  margin-bottom: 0;
+}

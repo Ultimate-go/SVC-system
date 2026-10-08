@@ -786,13 +786,6 @@ onMounted(loadFiles)
           {{ advancedMode ? '← 改用文件 + 块号' : '高级：直接填全局下标' }}
         </el-button>
       </div>
-      <details class="note-collapse">
-        <summary>说明</summary>
-        <p class="note">
-          适用于少量块的直接验证：选定文件并指定块号后即时完成。
-          块数较多或需跨文件时，先用「加入集合」收进集合，再在集合中统一验证（单次请求、一份证据）。
-        </p>
-      </details>
 
       <div v-if="result" class="mt-3">
         <VerifyResult :result="result" />
@@ -840,6 +833,14 @@ onMounted(loadFiles)
         </div>
         <StageTimeline v-if="result.timings" :timings="result.timings" class="mt-2" />
       </div>
+
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          选一份文件、填第几块，点「验证」即可查看结果。要验证多块或跨文件时，
+          点「加入集合」把块收进集合，再到下方「集合」统一验证。
+        </p>
+      </details>
     </div>
 
     <!-- ============================================================= -->
@@ -929,15 +930,6 @@ onMounted(loadFiles)
         <el-button size="small" @click="resetFilters">重置筛选</el-button>
       </div>
 
-      <details class="note-collapse">
-        <summary>说明</summary>
-        <p class="note">
-          筛选在前端执行，仅调用一次文件列表接口，不触发取证与验证。
-          每行两个入口：<strong>收整份</strong>将该文件全部块收进集合，
-          <strong>只收几块…</strong>仅按块号收取指定块；收集完成后在下方「集合」统一验证（支持跨文件）。
-        </p>
-      </details>
-
       <template v-if="allFiles.length">
         <div class="match-head">
           <span class="text-2" style="font-size: 12px">
@@ -975,6 +967,14 @@ onMounted(loadFiles)
       <div v-else-if="!filesLoading && !loadError" class="note">
         列表未加载。请执行「重新拉取」。
       </div>
+
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          用上面的条件筛选文件，勾选后点「把勾选的…收进集合」，或点每行的「收整份」「只收几块…」
+          把文件收进集合。收集完成后到下方「集合」统一验证。
+        </p>
+      </details>
     </div>
 
     <!-- ============================================================= -->
@@ -1034,13 +1034,6 @@ onMounted(loadFiles)
         >验证集合里的全部块（{{ basket.size }} 块 · {{ basket.fileCount }} 份文件）</el-button>
         <el-switch v-model="basketAllowPartial" active-text="允许部分结果" />
       </div>
-      <details class="note-collapse">
-        <summary>说明</summary>
-        <p class="note">
-          集合内的块在单次请求中完成验证：同一文件内的块直接聚合；跨文件时服务端在合并位置集上重算一份证据。
-          两种情形均输出单一证据与单一结论，验证结果同步写入证据池。
-        </p>
-      </details>
 
       <div v-if="basketError" class="file-error">{{ basketError }}</div>
 
@@ -1081,6 +1074,13 @@ onMounted(loadFiles)
         />
         <StageTimeline v-if="basketResult.timings" :timings="basketResult.timings" class="mt-2" />
       </div>
+
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          把要验证的块收进集合后，点「验证集合里的全部块」，一次验完集合里的所有块，结果显示在下方。
+        </p>
+      </details>
     </div>
 
     <!-- ============================================================= -->
@@ -1091,14 +1091,6 @@ onMounted(loadFiles)
         <h4 class="sec-title">查存储槽位</h4>
         <span class="step-tag">内部坐标</span>
       </div>
-      <details class="note-collapse">
-        <summary>槽位号 → 谁的第几块、存在哪台</summary>
-        <p class="note">
-          这不是密码学坐标：改造后「第 i 块配哪个素数」由块身份派生
-          （<span class="mono">H(身份‖块号)</span>），与槽位号无关 ——
-          槽位仅表示密文在存储节点上的位置。该视图用于按槽位反查块归属与所在节点，常规操作无需使用。
-        </p>
-      </details>
       <div class="query-form">
         <el-input v-model="regIndex" placeholder="槽位号，如 3" style="width: 160px" />
         <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
@@ -1114,6 +1106,14 @@ onMounted(loadFiles)
         </template>
         <div v-else class="text-danger">{{ regResult.error }}</div>
       </div>
+
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          输入存储槽位号，点「查询」，查看该槽位存放的是哪个文件的哪一块、存放在哪些节点。
+          这是排查用的辅助工具，常规验证不需要用到。
+        </p>
+      </details>
     </div>
   </div>
 </template>
@@ -1361,20 +1361,5 @@ onMounted(loadFiles)
   border-radius: 999px;
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-/* 说明段落统一收进可展开区，默认折叠，减少页面文字墙 */
-.note-collapse {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-.note-collapse summary {
-  cursor: pointer;
-  user-select: none;
-  color: var(--text-2);
-}
-.note-collapse .note {
-  margin-top: 6px;
-  margin-bottom: 0;
 }
 </style>

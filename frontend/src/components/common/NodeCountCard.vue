@@ -267,12 +267,6 @@ defineExpose({ refresh: load })
       </span>
     </div>
 
-    <p class="note">
-      这里配置集群存储节点数，<b>重启后生效</b>。保存后执行「立即重启」。
-      台数<b>调小</b>时，保存那一步会趁被摘掉的机器还在，把已经承诺过的文件块搬到留下的
-      节点上，块内容、下标与承诺不变。
-    </p>
-
     <div class="deploy-row">
       <span class="deploy-label">台数</span>
       <el-input-number
@@ -358,11 +352,13 @@ defineExpose({ refresh: load })
            **仍然显示持有块** —— 因为搬块是"再存一份"，不是"搬走"；
            而 VDS 只能删向量末尾，那几份多出来的副本结构上删不掉。
            它们已不参与写给/读（账目以留下的那几台为准），重启后就不见了。 -->
-      <p v-if="info?.restart_required" class="note mt-3" style="margin-bottom: 0">
-        重启前：要摘掉的那几台<b>仍然显示持有块</b>，因为搬块是「再存一份」，不是「搬走」；
-        而 VDS 只能删向量末尾，多出来的这几份副本删不掉。它们已经不参与读写，
-        <b>重启后这一栏就没了</b>。自检也会把它列成「提示」。
-      </p>
+      <details v-if="info?.restart_required" class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          重启前，被摘掉的节点仍会显示持有数据，这是迁移先复制、再清理造成的。
+          这些记录已不参与读写，重启后会自动消失，无需手动处理。
+        </p>
+      </details>
     </template>
 
     <div v-else-if="plan && growing" class="mt-3 text-3" style="font-size: 12px">
@@ -385,6 +381,14 @@ defineExpose({ refresh: load })
         补齐不足的副本
       </el-button>
     </div>
+
+    <details class="note-collapse">
+      <summary>说明</summary>
+      <p class="note">
+        在「台数」输入要运行的节点数量，点「保存」，再点「立刻重启」即可生效。
+        台数调小时，保存这一步会先把受影响的数据迁到保留的节点上，再执行重启。
+      </p>
+    </details>
   </div>
 </template>
 

@@ -71,9 +71,12 @@ function missing(gi, i) {
       <span v-else class="text-3" style="font-size: 12px">（这次没取到）</span>
       <span v-if="srcOf(gi)" class="src text-3">{{ srcOf(gi) }}</span>
     </div>
-    <p v-if="truncated" class="note" style="margin: 6px 0 0">
-      只列了前 {{ limit }} 块（这一份共 {{ indices.length }} 块）—— 指纹的位数与含义不变。
-    </p>
+    <details v-if="truncated" class="note-collapse">
+      <summary>说明</summary>
+      <p class="note" style="margin: 6px 0 0">
+        只列了前 {{ limit }} 块（这一份共 {{ indices.length }} 块）—— 指纹的位数与含义不变。
+      </p>
+    </details>
   </div>
 </template>
 

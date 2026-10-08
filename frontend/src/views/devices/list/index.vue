@@ -208,13 +208,6 @@ async function refreshAll() {
       <!-- ★ 仅管理员：故障演练。放在节点现状之前 —— 它就是“让这些机器出事”。 -->
       <div v-if="isAdmin" class="panel mb-3">
         <h4 class="sec-title">故障演练（模拟节点突然下线 / 永久损毁）</h4>
-        <p class="note">
-          故障注入仅修改节点可达性标记：读操作即时失败，写操作按节点分批失败。
-          <b>密码学运算与分片策略不变</b>，不执行数据删除；撤销后节点恢复在线。
-          <br />
-          <b>掉线</b>表示模拟节点不可达；<b>永久损毁</b>表示模拟介质损毁，结果展示不可逆影响。
-          影响面显示不可恢复的块数量。
-        </p>
         <el-checkbox-group v-model="drillNodes" class="drill-pick">
           <el-checkbox v-for="n in nodes" :key="n.node_id" :value="n.node_id">
             <span class="mono">{{ n.node_id }}</span>
@@ -262,14 +255,22 @@ async function refreshAll() {
             style="margin-right: 6px"
           >{{ f.owner }}/{{ f.file_key }}（会丢 {{ f.lost_blocks }} 块）</el-tag>
         </div>
-        <p v-if="drill && drill.faulty && drill.faulty.length" class="note mt-2">
-          现在可以去试：<b>完整性验证</b> / <b>文件详情</b> 取块 —— 只要涉及的块在故障机器上，
-          就会看到取不到密文的报错；<b>改块 / 追加 / 截断</b> 会失败并留下「待补推」现场
-          （写推不到那几台）—— 点「恢复全部」之后，到「文件与块」页点一次「补推」即可收敛。
-          <br />
-          <b>这份现场过得了重启</b>：就算这时候把服务停掉再起（写失败的机器还没弄活），
-          重启后现场还在、这个横幅也还在，不会因为一次重启就要求人工去节点上清数据。
-        </p>
+        <details v-if="drill && drill.faulty && drill.faulty.length" class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            故障生效后，可到「完整性验证」或「文件详情」页读取相关数据，会看到读取失败；
+            在故障节点上做修改也会失败，并留下待补推的记录。点「恢复全部」后，
+            到「文件与块」页点「补推」即可完成写入。写失败的状态会保留到重启之后。
+          </p>
+        </details>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            勾选要模拟故障的节点，点「模拟掉线」或「模拟永久损毁」使其下线，点「恢复全部」即可撤销。
+            掉线只让该节点读写失败、不删数据；永久损毁会标出哪些数据无法恢复。
+          </p>
+        </details>
       </div>
 
       <div class="grid mb-3">
@@ -325,9 +326,6 @@ async function refreshAll() {
 
       <div class="panel mb-3">
         <h4 class="sec-title">存储证明（PoR）挑战</h4>
-        <p class="note">
-          它问的是「你还在存着吗」，与完整性验证问的「对不对」不是同一件事；而且它一个字节的内容都不取。
-        </p>
         <div class="por-control">
           <span>挑战位置数 λ_pos：</span>
           <el-input-number v-model="lambdaPos" :min="1" :max="256" />
@@ -363,6 +361,14 @@ async function refreshAll() {
           </el-table>
           <StageTimeline v-if="porResult.timings" :timings="porResult.timings" class="mt-3" />
         </div>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            设置挑战的位置数，点「发起挑战」，检查各节点是否仍持有数据。
+            挑战只确认数据还在，不读取数据内容，也不会修改任何数据。
+          </p>
+        </details>
       </div>
     </template>
   </div>

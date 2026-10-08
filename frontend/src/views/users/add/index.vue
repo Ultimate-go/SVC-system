@@ -90,9 +90,12 @@ async function submit() {
     <div v-if="timings" class="panel mt-3">
       <h4 class="sec-title">耗时（后端实测）</h4>
       <StageTimeline :timings="timings" />
-      <p class="note text-2">
-        生成 SM2 密钥对 + 用口令封装私钥（20 万次 PBKDF2），慢一点是正常的。
-      </p>
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note text-2">
+          生成密钥并加密保存，需要一定的计算时间，速度慢属正常现象。
+        </p>
+      </details>
     </div>
   </div>
 </template>
