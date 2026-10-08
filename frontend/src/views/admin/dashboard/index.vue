@@ -101,12 +101,11 @@ onMounted(() => {
       type="warning"
       :closable="false"
       class="mb-3"
-      :title="pending?.restored ? '上次写失败的现场已经跨重启保住了' : '有写推没完成，摘要暂不一致'"
+      :title="pending?.restored ? '写失败状态已跨重启持久化' : '写操作未完成，摘要暂不一致'"
     >
       <template #default>
         <p class="mb-2">
-          别重新上传（那批下标已经分配过了）。到「设备」页点「补推」即可
-          —— 也可以不动手：后台会自己试几轮。
+          请勿重复上传（该批全局下标已分配）。可在「设备」页执行补推；系统亦以固定间隔自动重试。
         </p>
         <p v-if="pending?.site_note" class="mb-2">{{ pending.site_note }}</p>
         <el-button size="small" @click="router.push('/devices')">去补推</el-button>

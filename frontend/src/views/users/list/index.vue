@@ -98,7 +98,7 @@ async function removeUser(u) {
   // 删除成功后把返回的 warning 原样弹出来。
   try {
     await ElMessageBox.confirm(
-      `确定删除用户 ${u.username} 吗？他名下的文件会改挂在「已删号」的名字下，之后谁也解不开。`,
+      `确认删除用户 ${u.username}。其名下文件将归属已注销账户，原有块密钥不可恢复。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -188,7 +188,7 @@ onMounted(load)
         </template>
       </el-table-column>
       <template #empty>
-        <EmptyState title="没有匹配的用户" description="调整筛选条件试试" />
+        <EmptyState title="无匹配用户" description="请调整筛选条件" />
       </template>
     </el-table>
 

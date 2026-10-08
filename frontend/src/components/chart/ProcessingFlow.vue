@@ -9,25 +9,25 @@ const STAGES = [
   { key: 'split', label: '分片', en: 'CHUNK', detail: '切成固定大小的块', tone: 'blue' },
   { key: 'commit', label: '承诺生成', en: 'COMMIT', detail: '计算摘要与证明', tone: 'violet' },
   { key: 'store', label: '分布式存储', en: 'REPLICATE', detail: '写入节点并创建副本', tone: 'green' },
-  { key: 'query', label: '查询取证', en: 'PROVE', detail: '按你指定的块取证', tone: 'amber' },
-  { key: 'verify', label: '完整性验证', en: 'VERIFY', detail: '公开验证数据状态', tone: 'rose' },
+  { key: 'query', label: '查询取证', en: 'PROVE', detail: '按指定块取证', tone: 'amber' },
+  { key: 'verify', label: '完整性验证', en: 'VERIFY', detail: '公开验证完整性', tone: 'rose' },
 ]
 </script>
 
 <template>
-  <div class="processing" aria-label="数据处理链路演示">
+  <div class="processing" aria-label="数据处理链路">
     <div class="flow-head">
       <div>
         <span class="flow-kicker mono">LIVE PIPELINE / 06 STAGES</span>
-        <p class="flow-caption">从明文进入系统，到证明数据仍然完整</p>
+        <p class="flow-caption">明文入库至完整性证明的处理链路</p>
       </div>
-      <span class="flow-state"><i />实时处理链路</span>
+      <span class="flow-state"><i />数据处理链路</span>
     </div>
 
     <div class="pipeline">
       <template v-for="(s, i) in STAGES" :key="s.key">
         <div class="stage" :class="`tone-${s.tone}`" :style="{ '--i': i }">
-          <div class="stage-topline"><span class="stage-index mono">0{{ i + 1 }}</span><span class="stage-status">READY</span></div>
+          <div class="stage-topline"><span class="stage-index mono">0{{ i + 1 }}</span></div>
           <div class="icon-wrap">
             <svg viewBox="0 0 64 64" aria-hidden="true" class="stage-icon">
               <template v-if="s.key === 'upload'">

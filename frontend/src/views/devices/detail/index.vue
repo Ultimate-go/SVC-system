@@ -98,7 +98,7 @@ onMounted(load)
         <p class="por-note">
           流程：协调者随机抽一批块 → 让节点交出这些块的密文 →
           协调者<b>自己重算</b>分量（<code class="mono">v = SM3(密文)</code>）
-          并与登记表里的记录对拍。对得上才算“答到”，对不上或连不上就是“没答到”。
+          并与登记表里的记录比对：一致则记为已响应，不一致或不可达则记为未响应。
           所以「问到 N / 答到 M」里 <b>M &lt; N</b> 的含义很明确：<b>它答不上来</b>。
         </p>
         <p class="por-note">
@@ -114,7 +114,7 @@ onMounted(load)
             :type="myShare.unreachable ? 'error' : 'success'"
             :closable="false"
             :title="`本节点问到 ${myShare.asked} 个 / 答到 ${myShare.answered} 个`"
-            :description="myShare.unreachable ? '连不上' : myShare.error || ''"
+            :description="myShare.unreachable ? '不可达' : myShare.error || ''"
           />
         </div>
         <div v-if="porResult && !porResult.ok" class="mt-2 text-danger">{{ porResult.message }}</div>

@@ -1,0 +1,1 @@
+import{t as e}from"./client-ByU4aThH.js";var t={query:(t,n=!1)=>e.post(`/api/query`,{indices:t,allow_partial:n}),queryFiles:(t,n=null)=>e.post(`/api/query/files`,{targets:t,block_indices:n}),verifyBatch:(t,n=!0,r=!0)=>e.post(`/api/query/verify-batch`,{items:t,locate:n,compare:r}),disagg:t=>e.post(`/api/evidence/disagg`,t),registry:t=>e.get(`/api/registry/${t}`)};export{t};

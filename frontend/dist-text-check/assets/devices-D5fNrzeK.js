@@ -1,0 +1,1 @@
+import{t as e}from"./client-ByU4aThH.js";var t={nodes:()=>e.get(`/api/nodes`),pending:()=>e.get(`/api/nodes/pending`),retryPush:()=>e.post(`/api/nodes/retry-push`),por:t=>e.post(`/api/por`,{lambda_pos:t}),plan:(t,n)=>e.post(`/api/plan`,{size:t,prefer:n}),faultStatus:()=>e.get(`/api/admin/fault-drill`),faultDrill:t=>e.post(`/api/admin/fault-drill`,t)};export{t};

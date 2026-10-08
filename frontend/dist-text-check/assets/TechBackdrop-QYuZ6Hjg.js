@@ -1,0 +1,1 @@
+import{L as e,p as t}from"./runtime-core.esm-bundler-D8DVY3xR.js";import{t as n}from"./_plugin-vue_export-helper-BDNMzG2s.js";var r={class:`tech-backdrop`,"aria-hidden":`true`},i=n({__name:`TechBackdrop`,setup(n){return(n,i)=>(e(),t(`div`,r))}},[[`__scopeId`,`data-v-8401b7dc`]]);export{i as t};

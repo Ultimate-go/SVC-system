@@ -154,7 +154,7 @@ async function askPlan() {
     ])
     planAdvice.value = { size, fewest: fewest.data, finer: finer.data, defaultBytes: defaultBytes.value }
   } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '顾问询问失败')
+    ElMessage.error(e?.response?.data?.detail || '获取分块建议失败')
   } finally {
     askingPlan.value = false
   }
@@ -223,7 +223,7 @@ function applyPlan(seg) {
   if (!seg) return
   uploadForm.segmentBytes = Math.min(maxBytes.value, Math.max(minBytes.value, seg))
   uploadForm.splitMode = 'by_size'
-  ElMessage.success(`已按这一档切：每块 ${uploadForm.segmentBytes} 字节`)
+  ElMessage.success(`已应用该方案：单块 ${uploadForm.segmentBytes} 字节`)
 }
 
 /**
@@ -427,8 +427,8 @@ async function tryDecrypt(file) {
   }
   if (!file.can_decrypt) {
     ElMessage.warning(
-      `这不是你的文件（所有者：${file.owner}）—— 拿不到块密钥，解不开。` +
-        '完整性验证是公开的，点「详情」就能看到验证结果。',
+      '当前账户非文件所有者，无块密钥解封权限。' +
+        '完整性验证为公开能力，可在详情页查看。',
     )
     return
   }
@@ -464,11 +464,11 @@ async function tryDecrypt(file) {
       ] ?? opened.deltaVerdict
     await ElMessageBox.alert(
       `文件：${file.owner} / ${file.file_key}\n` +
-        `解密：${len} 字节（在你的浏览器里解出来的，服务端没参与）\n` +
+        `解密：${len} 字节（本地浏览器解封，服务端未参与）\n` +
         `本地验证：${opened.verify.ok ? '通过' : `未通过 —— ${opened.verify.message}`}\n` +
         `δ 钉扎：${verdict}`,
       '试解密结果（浏览器本地）',
-      { confirmButtonText: '知道了' },
+      { confirmButtonText: '关闭' },
     )
     if (head) {
       // 单独弹一个“看得到内容”的提示：这是“真的解出来了”的最直观证据
@@ -731,7 +731,7 @@ onMounted(load)
             </div>
 
             <div class="actions">
-              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">问顾问</el-button>
+              <el-button :disabled="!selectedFile" :loading="askingPlan" @click="askPlan">获取分块建议</el-button>
               <el-button type="primary" :loading="uploading" @click="doUpload">上传</el-button>
               <span v-if="uploading" class="mono elapsed">已用 {{ (uploadElapsed / 1000).toFixed(1) }} s</span>
             </div>
@@ -748,7 +748,7 @@ onMounted(load)
             :description="planAdvice.fewest.reason"
           />
           <div class="plan-head">
-            顾问给了 {{ planRows.length }} 种切法。<b>点某一行的「用这一档」才会采用</b>，
+            分块建议提供 {{ planRows.length }} 组候选。<b>选定某行方可启用对应方案</b>，
             不点就按上面的「本次切法」走。带「最快 / 最细 / 自动档」标签的是三种常见选择；
             「部署基准」是后端配置里那个基准块大小（自动档算不出值时才兜底用它）。
           </div>
@@ -781,11 +781,11 @@ onMounted(load)
                 size="small"
                 :disabled="r.allowed === false"
                 @click="applyPlan(r.segment_bytes)"
-              >用这一档</el-button>
+              >采用该方案</el-button>
             </div>
           </div>
           <el-collapse class="why">
-            <el-collapse-item title="为什么这么建议" name="why">
+            <el-collapse-item title="建议依据" name="why">
               <p class="text-2" style="font-size: 12px">【块数最少】{{ planAdvice.fewest.why }}</p>
               <p class="text-2" style="font-size: 12px">【粒度最细】{{ planAdvice.finer.why }}</p>
               <p class="text-3" style="font-size: 11px">估算来源：{{ planAdvice.fewest.measured_source }}</p>
@@ -876,7 +876,7 @@ onMounted(load)
             </template>
           </el-table-column>
           <template #empty>
-            <EmptyState title="还没有文件" description="上传一份试试，切法随你选" />
+            <EmptyState title="尚无文件" description="可通过上方上传区创建" />
           </template>
         </el-table>
         <StageTimeline v-if="poolTimings" :timings="poolTimings" class="mt-3" />

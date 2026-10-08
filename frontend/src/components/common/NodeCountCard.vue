@@ -97,15 +97,14 @@ async function save() {
   if (plan.value && lostCount.value) {
     try {
       await ElMessageBox.confirm(
-        `有 ${lostCount.value} 块搬不走：下标 ${fmtList(plan.value.lost)}。\n\n` +
-          '它们的每一份副本都在联系不上的机器上，现在收缩就把这几块永久丢掉。\n\n' +
-          '保险的做法是先把那几台起起来再收缩，那时就搬得动了。\n\n' +
-          '要带着这个损失继续吗？',
-        '会丢数据',
+        `存在 ${lostCount.value} 块不可迁移（下标 ${fmtList(plan.value.lost)}）。\n\n` +
+          '其全部副本位于不可达节点，当前收缩将导致这些块永久丢失。\n\n' +
+          '建议待节点恢复后执行收缩。',
+        '存在不可迁移块',
         {
           type: 'error',
-          confirmButtonText: '我知道这几块会丢，继续',
-          cancelButtonText: '先起来那几台再说',
+          confirmButtonText: '继续',
+          cancelButtonText: '取消',
           confirmButtonClass: 'el-button--danger',
         },
       )
@@ -119,10 +118,10 @@ async function save() {
         `从 ${running.value} 台减到 ${want.value} 台，要搬走 ${orphanCount.value} 块` +
           `（下标 ${fmtList(plan.value.orphan)}）。\n\n` +
           `这些块现在只在 ${(plan.value.will_be_removed || []).join('、')} 上还有副本。` +
-          '保存时会趁那几台还在，把内容搬到留下的机器上；\n' +
-          '块内容、下标和承诺都不变，不会丢。\n\n继续吗？',
+          '保存时将把内容迁移至保留节点；\n' +
+          '块内容、下标与承诺不变。',
         '要重新分配文件块',
-        { type: 'warning', confirmButtonText: '继续', cancelButtonText: '再想想' },
+        { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' },
       )
       confirmShrink = true
     } catch {
@@ -159,11 +158,11 @@ async function askRestart() {
     await ElMessageBox.confirm(
       changed
         ? `重启后按 ${target} 台跑（现在是 ${running.value} 台）。\n\n` +
-            '节点、后端、前端会全部停掉再起一遍，大约十几秒。' +
-            '期间页面连不上，恢复后自动回到登录页（要重新登录一次）。\n' +
+            '节点、后端、前端将全部重启，预计耗时十几秒。' +
+            '期间页面不可达，恢复后自动回到登录页（需重新认证）。\n' +
             '数据、账号、文件都不动。'
         : `台数没变（还是 ${running.value} 台），只是停掉重起一遍。\n\n` +
-            '大约十几秒，期间页面连不上，恢复后自动回到登录页（要重新登录一次）。',
+            '预计耗时十几秒，期间页面不可达，恢复后自动回到登录页（需重新认证）。',
       '立刻重启',
       { type: 'warning', confirmButtonText: '现在重启', cancelButtonText: '取消' },
     )
@@ -269,9 +268,9 @@ defineExpose({ refresh: load })
     </div>
 
     <p class="note">
-      这里决定集群用几台存储服务器，<b>重启后生效</b>。保存之后点「立刻重启」，不用再去按 cmd。
+      这里配置集群存储节点数，<b>重启后生效</b>。保存后执行「立即重启」。
       台数<b>调小</b>时，保存那一步会趁被摘掉的机器还在，把已经承诺过的文件块搬到留下的
-      机器上，一块都不会丢。
+      节点上，块内容、下标与承诺不变。
     </p>
 
     <div class="deploy-row">

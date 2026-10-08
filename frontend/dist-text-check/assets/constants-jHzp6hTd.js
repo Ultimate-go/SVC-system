@@ -1,0 +1,1 @@
+var e=8192,t=[{value:`auto`,label:`自动（按大小）`},{value:`by_size`,label:`按块大小`},{value:`by_count`,label:`按块数`}];export{t as n,e as t};

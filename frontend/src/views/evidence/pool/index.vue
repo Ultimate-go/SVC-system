@@ -290,7 +290,7 @@ function cardTitle(card) {
  */
 function showFullTitle(card) {
   ElMessageBox.alert(cardTitle(card), '完整标题', {
-    confirmButtonText: '知道了',
+    confirmButtonText: '关闭',
   })
 }
 
@@ -507,7 +507,7 @@ async function confirmCrossDisagg() {
   }
   const blocks = crossBlocks.value
   if (!blocks.length) {
-    ElMessage.warning('这份文件在这张卡里没有块 —— 换一份试试')
+    ElMessage.warning('该卡片不包含所选文件的任何块。请重新选择。')
     return
   }
   // ★ 与「入池」同口径的闸门（审计 N6）：`blocks` 是这张卡在该文件区间内的
@@ -762,7 +762,7 @@ onMounted(() => {
     </div>
 
     <div v-if="!pool.cards.length">
-      <EmptyState title="池子是空的" description="取一份证据，或从「完整性验证」页把结果收进来" icon="list" />
+      <EmptyState title="证据池为空" description="可取自取证结果，或从「完整性验证」页加入验证结果" icon="list" />
     </div>
 
     <div v-else class="cards">
