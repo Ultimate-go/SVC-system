@@ -109,13 +109,13 @@ api.interceptors.response.use(
     } else if (status === 403) {
       // ★ 演示亮点：把后端的中文拒绝理由原样弹出来。
       //   解密被拒时后端会说「你仍然可以验证它的完整性 —— 验证是公开的」。
-      ElMessage.error(detail || '没有权限')
+      ElMessage.error(detail || '无访问权限')
     } else if (status === 413) {
-      ElMessage.error(detail || '文件超过大小上限')
+      ElMessage.error(detail || '文件超出大小上限')
     } else if (detail) {
       ElMessage.error(detail)
     } else if (err.code === 'ECONNABORTED') {
-      ElMessage.error('请求超时 —— 后端可能正在做模幂，稍后重试')
+      ElMessage.error('请求超时。若后端正在执行模幂运算，请延后重试')
     } else {
       ElMessage.error('请求失败：' + (err.message || '未知错误'))
     }

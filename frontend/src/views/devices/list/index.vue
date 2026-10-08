@@ -145,8 +145,8 @@ async function runDrill(action, mode = 'down') {
     } else {
       ElMessage.warning(
         mode === 'destroyed'
-          ? '已模拟永久损毁（不可逆）；看下面的影响面，再去验证 / 改块页试试'
-          : '已模拟掉线（可恢复）；看下面的影响面，再去验证 / 改块页试试',
+          ? '已模拟永久损毁（不可逆）；影响面见下方，可在验证或改块页继续观察'
+          : '已模拟掉线（可恢复）；影响面见下方，可在验证或改块页继续观察',
       )
     }
     await load()
@@ -194,7 +194,7 @@ async function refreshAll() {
       <template #default>
         <p class="mb-2">
           别重新上传（那批下标已经分配过）。把机器弄活，点「补推」即可收敛
-          —— 也可以不动手：后台会自己试几轮。
+          系统亦以固定间隔自动重试。
         </p>
         <!-- ★ 后端在启动时把这份现场从盘上装回来，会留一句“它是什么、该怎么办”。
              把原话摆出来（而不是界面上重新编一句）—— 真相只有一份。 -->
@@ -209,16 +209,11 @@ async function refreshAll() {
       <div v-if="isAdmin" class="panel mb-3">
         <h4 class="sec-title">故障演练（模拟节点突然下线 / 永久损毁）</h4>
         <p class="note">
-          只做一件事：让指定节点「联系不上」—— <b>读</b>当场失败，<b>写</b>逐台失败。
-          <b>密码学与分片一个字都不改</b> —— 所以接下来看到的失败，
-          是真代码在「这台机器没了」时的真实行为。
+          故障注入仅修改节点可达性标记：读操作即时失败，写操作按节点分批失败。
+          <b>密码学运算与分片策略不变</b>，不执行数据删除；撤销后节点恢复在线。
           <br />
-          <b>它不会删任何数据</b>：只把节点标成「不可达」，
-          点「恢复全部」立刻全部复原。
-          <br />
-          <b>掉线</b>：机器联系不上（网线拔了 / 进程挂了）。
-          &nbsp;<b>永久损毁</b>：现实中磁盘也没了（地震 / 海啸）——
-          影响面会告诉你「如果这是真的，哪几块就永远回不来了」。
+          <b>掉线</b>表示模拟节点不可达；<b>永久损毁</b>表示模拟介质损毁，结果展示不可逆影响。
+          影响面显示不可恢复的块数量。
         </p>
         <el-checkbox-group v-model="drillNodes" class="drill-pick">
           <el-checkbox v-for="n in nodes" :key="n.node_id" :value="n.node_id">
@@ -347,20 +342,20 @@ async function refreshAll() {
             :description="porResult.message || ''"
           />
           <div class="por-stats mono mt-2">
-            <span>点名 {{ porResult.asked_total }} 个 / 答齐 {{ porResult.answered_total }} 个</span>
+            <span>已挑战 {{ porResult.asked_total }} 个 / 已响应 {{ porResult.answered_total }} 个</span>
             <span>证据 {{ porResult.proof_size_bytes }} 字节</span>
             <span>合并份额 {{ porResult.aggregated_shares }}</span>
           </div>
           <el-table :data="porResult.shares || []" size="small" class="mt-2">
             <el-table-column prop="node_id" label="节点" width="100" />
-            <el-table-column label="问到 / 答到" width="140" align="center">
+            <el-table-column label="已挑战 / 已响应" width="140" align="center">
               <template #default="{ row }">
                 <span class="mono">{{ row.asked }} / {{ row.answered }}</span>
               </template>
             </el-table-column>
             <el-table-column label="状态">
               <template #default="{ row }">
-                <span v-if="row.unreachable" class="text-danger">连不上</span>
+                <span v-if="row.unreachable" class="text-danger">不可达</span>
                 <span v-else-if="row.error" class="text-danger">{{ row.error }}</span>
                 <span v-else class="text-ok">已答</span>
               </template>

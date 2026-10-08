@@ -7,9 +7,9 @@
 
 /** 演示账号（口令统一 vds12345），登录页一键填充用。 */
 export const DEMO_ACCOUNTS = [
-  { username: 'admin', display: '管理员', hint: '能看审计与用户管理，但解不开别人的文件' },
-  { username: 'zhangsan', display: '张三', hint: '普通用户；上传自己的文件，能验证别人的、但解不开' },
-  { username: 'wangwu', display: '王五', hint: '另一个普通用户（演示“验证不受限、解密受限”）' },
+  { username: 'admin', display: '管理员', hint: '可查看审计流水与用户管理；无他人文件的解密权限' },
+  { username: 'zhangsan', display: '张三', hint: '普通用户；可上传自有文件，对所有文件具备验证权限、仅对自己所持文件具备解密权限' },
+  { username: 'wangwu', display: '王五', hint: '另一普通用户（用于展示「验证不受限、解密受限」语义）' },
 ]
 
 export const DEMO_PASSWORD = 'vds12345'
@@ -48,6 +48,6 @@ export const SPLIT_MODES = [
 
 /** prefer 的两个取值（与后端 /api/plan 一致）。 */
 export const PLAN_PREFERS = [
-  { value: 'fewest_blocks', label: '块数最少（上传最快）' },
-  { value: 'finer_updates', label: '块更小（改块粒度更细）' },
+  { value: 'fewest_blocks', label: '块数最少' },
+  { value: 'finer_updates', label: '单块更小' },
 ]

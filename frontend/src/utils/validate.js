@@ -57,13 +57,13 @@ export function parseIndexRange(text, maxCount = MAX_QUERY_INDICES, noun = '下�
       const m = p.match(/^(\d+)\s*-\s*(\d+)$/)
       const a = Number(m[1])
       const b = Number(m[2])
-      if (a > b) throw new Error(`区间写反了：${p}`)
+      if (a > b) throw new Error(`区间下界大于上界：${p}`)
       // ★★ 先判规模、再展开（安全审计 I6）：以前是“先 for 展开、之后才校验”，
       //   于是填一个 0-99999999 就能把页面卡死（内存与 CPU 双吃）。
       //   现在**没等展开**就把它挡回去，而且把上限说清楚。
       if (b - a + 1 > maxCount) {
         throw new Error(
-          `区间太大了：${p} 要展开成 ${b - a + 1} 个${noun}，一次最多 ${maxCount} 个（可分几次填）`,
+          `区间超出单次上限：${p} 将展开为 ${b - a + 1} 个${noun}，单次上限 ${maxCount} 个`,
         )
       }
       for (let i = a; i <= b; i++) out.add(i)
@@ -71,7 +71,7 @@ export function parseIndexRange(text, maxCount = MAX_QUERY_INDICES, noun = '下�
         throw new Error(`一次最多 ${maxCount} 个${noun}（可分几次填），现在已经 ${out.size} 个`)
       }
     } else {
-      throw new Error(`${noun}写法不对：${p}`)
+      throw new Error(`格式不合法：${p}（应为非负整数或 \`a-b\` 区间）`)
     }
   }
   return [...out].sort((a, b) => a - b)
@@ -103,8 +103,8 @@ export function parseBlockRange(text, maxBlocks = null) {
     const over = blocks.filter((b) => b >= maxBlocks)
     if (over.length) {
       throw new Error(
-        `这份文件只有 ${maxBlocks} 块（第 0 到第 ${maxBlocks - 1} 块），` +
-          `你填了 ${over.join(', ')}`,
+        `该文件共 ${maxBlocks} 块（下标 0 至 ${maxBlocks - 1}），超出部分：` +
+          `${over.join(', ')}`,
       )
     }
   }

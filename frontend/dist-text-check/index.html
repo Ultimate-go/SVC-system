@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VDS · 可验证分布式存储与可控共享</title>
+    <meta
+      name="description"
+      content="基于增量聚合向量承诺的可验证分布式存储与可控共享系统"
+    />
+    <meta name="theme-color" content="#070b14" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // ★ 抢在首次绘制之前把主题定下来 —— 否则选浅色的用户会先看到一帧深色再跳过去（FOUC）。
+      //   与 stores/theme.js 读的是同一批 key，改一处要改两处。
+      try {
+        var t = localStorage.getItem('vds_theme') || 'dark'
+        var el = document.documentElement
+        el.setAttribute('data-theme', t)
+        if (t === 'dark') el.classList.add('dark')
+        if (localStorage.getItem('vds_density') === 'compact') el.classList.add('compact')
+        if (localStorage.getItem('vds_motion') === 'off') el.classList.add('no-motion')
+      } catch (e) {
+        /* 隐私模式下 localStorage 可能抛错 —— 保持上面的深色默认值即可。 */
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-B4WDq3rM.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-hePW80VL.js">
+    <link rel="modulepreload" crossorigin href="/assets/runtime-core.esm-bundler-D8DVY3xR.js">
+    <link rel="modulepreload" crossorigin href="/assets/client-ByU4aThH.js">
+    <link rel="modulepreload" crossorigin href="/assets/pinia-CuQNLwxt.js">
+    <link rel="modulepreload" crossorigin href="/assets/format-8_EJenII.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-DD8MnKWA.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

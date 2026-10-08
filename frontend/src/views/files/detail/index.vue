@@ -298,11 +298,9 @@ async function doZero() {
   const len = zeroTarget.value?.plain_len
   try {
     await ElMessageBox.confirm(
-      `把第 ${idx} 块的内容换成等长的全 0${len ? `（${len} 字节）` : ''}。\n\n` +
-        '这一块仍然在：块号与它占的位置都不变、仍占节点存储、总块数也不变，' +
-        '事后完整性照样能验证通过。\n' +
-        '只有你自己（所有者）解密时看得到那一串 0；块密钥会换成新的，' +
-        '长度保持不变。\n\n原来的内容不可恢复，版本号 +1。',
+      `第 ${idx} 块内容将替换为等长全 0 字节${len ? `（${len} 字节）` : ''}。\n\n` +
+        '块号、位置与总块数不变，完整性校验仍可通过。\n' +
+        '块密钥将重新封装，长度保持不变。\n\n原内容不可恢复，版本号 +1。',
       '清零这一块',
       { type: 'warning', confirmButtonText: '清零', cancelButtonText: '取消' },
     )
@@ -349,7 +347,7 @@ async function doAppend() {
 async function doTruncate() {
   try {
     await ElMessageBox.confirm(
-      `确定删除末尾 ${dropBlocks.value} 块吗？这是真的删数据、不可撤销。`,
+      `确认删除末尾 ${dropBlocks.value} 块。该操作不可撤销。`,
       '二次确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -621,13 +619,11 @@ onMounted(load)
       <div class="panel mb-3">
         <h4 class="sec-title">演示：服务器交回旧版数据</h4>
         <p class="note">
-          服务器<b>可能不老实</b>：它手里有旧副本，改块之后仍可能把<b>改之前那一版</b>交回给你。
-          这个开关把它变成看得见的一幕 —— 打开后，服务器<b>真的</b>开始对这块交回旧密文。
+          该开关用于演示存储方返回存量旧版本密文的情形：启用后，指定块的读取将返回改块前的密文。
         </p>
         <p class="note">
-          演示顺序：<b>①</b> 打开 → <b>②</b> 到下面「改一块」改这一块 → <b>③</b> 解密。
-          你会看到浏览器本地验证<b>不通过</b>（算出的分量对不上当前基准）——
-          这就是“服务器不可信”被抓住的样子。关掉开关即可恢复。
+          演示步骤：<b>①</b> 启用开关；<b>②</b> 修改该块；<b>③</b> 执行解密。
+          此时浏览器本地验证将不通过：重算分量与当前基准不一致。停用开关即恢复。
         </p>
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
           <span class="text-2">第</span>
@@ -694,15 +690,13 @@ onMounted(load)
               >
                 <div style="font-size: 12px">
                   <p v-if="oldInfo.verdict === 'stale'" class="text-danger">
-                    服务器交回来的是<b>你改块前那一版</b>的内容（{{ fmtWhen(oldInfo.staleFrom?.ts) }} ·
+                    服务端返回的内容为改块前版本（{{ fmtWhen(oldInfo.staleFrom?.ts) }} ·
                     由「{{ oldInfo.staleFrom?.source || '本地记录' }}」记下，
                     第 {{ oldInfo.staleFrom?.version ?? '—' }} 版）。
-                    这是<b>回滚</b> —— 服务器手里还留着旧副本，改完之后仍然把旧的那份交回来，
-                    而不是“数据被改坏了”。内容已放进下面的输入框，但<b>它是旧的</b>。
+                    该情形属于<b>版本回滚</b>，非数据损坏。内容已填入下方输入框，标记为旧版本。
                     <br />
                     <span class="text-3">
-                      （因此浏览器本地验证也不通过 —— 旧密文算不出当前的 δ。
-                      两者说的是同一件事，不是一个问题报了两次。）
+                      本地验证不通过源于旧密文与当前基准不符，与回滚判定为同一原因。
                     </span>
                   </p>
                   <p v-if="oldInfo.verdict === 'verify-failed'" class="text-danger">
@@ -712,7 +706,7 @@ onMounted(load)
                     但请<b>不要</b>当作可信内容使用。
                   </p>
                   <p v-else-if="oldInfo.verdict === 'mismatch'">
-                    你上次见证的是
+                    本地记录的内容摘要为
                     <span class="mono">{{ oldInfo.anchor.sha256.slice(0, 16) }}…</span>
                     （{{ fmtWhen(oldInfo.anchor.ts) }} 由「{{ oldInfo.anchor.source }}」记下），
                     这次拿到的是 <span class="mono">{{ oldInfo.sha256.slice(0, 16) }}…</span>。
@@ -720,10 +714,8 @@ onMounted(load)
                     新拿到的内容已放进下面的输入框，请自己判断。
                   </p>
                   <p v-else-if="oldInfo.verdict === 'no-anchor'">
-                    本地没有这块的哈希记录（文件是在别的浏览器传的？）。不过<b>这次的
-                    密文已经通过浏览器本地的证据验证</b>（分量自己算、对本地 δ 校验），
-                    所以“交付的字节没被换”是确定的；只是“它是不是你当初写的那一份”
-                    无法判断。从这次起，改块会顺手把这块锚下来，以后就能判了。
+                    本地未记录该块哈希（可能由其他设备写入）。<b>当前密文已通过本地证据验证</b>，
+                    交付字节未被替换，但无法判定其与初始写入版本是否一致。后续改块将记录该块锚点。
                   </p>
                   <p v-else>
                     本地锚：{{ fmtWhen(oldInfo.anchor.ts) }} · 由「{{ oldInfo.anchor.source }}」记下
@@ -755,16 +747,14 @@ onMounted(load)
             </div>
             <p class="text-3" style="font-size: 12px">
                 ★ 「取回当前内容」有<b>两条独立依据</b>：① <b>密码学</b> ——
-                密文与证据都在浏览器里验（分量自己从密文算、对本地 δ 跑
-                <span class="mono">add_back</span> 链），服务端伪造不了；
-                ② <b>本地锚</b> —— 你自己写这块时留下的明文哈希，存在本地，
-                服务器看不到也改不掉，所以“换成别的内容再换回来”这种回滚也能被抓出来。
-                它管不了的只有一件事：<b>别的设备</b>上的记录（锚各存各的）。
+                密文与证据在浏览器本地校验，服务端无法伪造；
+                ② <b>本地锚</b> —— 账户写入该块时留存的明文哈希，记录于本地，服务端不可读写，
+                可检出回滚至旧版本的情形。覆盖范围限于当前设备记录，跨设备记录不互通。
             </p>
             <p class="text-3" style="font-size: 12px">
               「清零」把上面这个块号的内容换成<strong>等长的全 0 字节</strong>：它走的是改块
               （<span class="mono">op = mod</span>）而不是删除，所以块仍在、下标不变、总块数不变，
-              完整性照样验证通过 —— 只有你自己解密时看得到那一串 0。
+              完整性校验仍可通过；全 0 内容仅在解封后可见。
               想把某块从向量里真的去掉，只能删<strong>末尾</strong>那一段（见「截断」）。
             </p>
           </el-tab-pane>
@@ -800,7 +790,7 @@ onMounted(load)
         <h4 class="sec-title">解密预览（浏览器本地解密 + 本地验证）</h4>
         <p class="note">
           这条路上服务端<b>只交材料</b>（密文 / IV / 块密钥密文 / 证据 / 公开参数），
-          解封与解密都在你的浏览器里 —— <b>私钥从不发给后端</b>。
+          解封与解密均在浏览器本地执行，<b>私钥不上送至服务端</b>。
           下面那条「验证结论」是浏览器拿<b>本地保存的 δ</b> 自己跑
           <span class="mono">add_back</span> 链算出来的，
           不是后端那句 <span class="mono">ok: true</span>。
@@ -825,8 +815,8 @@ onMounted(load)
           <div style="font-size: 12px">
             <p>
               素数：{{ decryptResult.primeCheck.message }}。
-              证据里的分量由浏览器从密文<b>自己重算</b>，与服务端声称的
-              {{ decryptResult.elementAgrees ? '一致' : '不一致（已按自己算的判）' }}。
+              分量由浏览器依据密文重算，与服务端返回值比对：
+              {{ decryptResult.elementAgrees ? '一致' : '不一致（以本地计算值为准）' }}。
             </p>
             <p>
               δ：n = {{ decryptResult.delta.n }} · 指纹
@@ -835,27 +825,26 @@ onMounted(load)
             <p>
               <b>δ 钉扎</b>：
               <template v-if="decryptResult.deltaVerdict === 'match'">
-                ✅ 本地钉住的 δ 与服务端给的是<b>同一份</b> —— 验证跑的是<b>你本地那一份</b>。
+                本地 δ 与服务端 δ 一致。
               </template>
               <template v-else-if="decryptResult.deltaVerdict === 'mismatch'">
-                ⚠️ 本地钉住的 δ 与服务端给的<b>不是同一份</b> —— 验证仍用<b>你本地那一份</b>跑，
-                结论「{{ decryptResult.verify.ok ? '通过（内容与你见证的版本自洽）' : '不通过' }}」；
+                本地 δ 与服务端 δ 不一致。
+                本地验证结论：{{ decryptResult.verify.ok ? '通过' : '不通过' }}；
                 拿服务端那份 δ 再验一次的结果是「{{
                   decryptResult.remoteVerify && decryptResult.remoteVerify.ok ? '通过' : '不通过'
                 }}」。
               </template>
               <template v-else>
-                ℹ️ 本地<b>还没钉过</b>这份文件的 δ —— 这一次用的仍是服务端给的那一份。
+                本地尚未记录该文件的 δ。本次验证使用服务端返回的 δ。
                 <template v-if="decryptResult.justAnchored">
-                  本次验证通过，已把当前版本钉在本地；<b>从下一次起</b>就是拿你本地这一份在验了。
+                  本次验证通过，当前版本已记录于本地；后续验证将使用本地记录。
                 </template>
               </template>
             </p>
             <p v-if="decryptResult.deltaVerdict === 'mismatch'" class="text-danger">
-              ⚠ 这个组合值得注意：<b>你本地那份 δ 与服务端那份不是同一版</b>。
-              可能是「文件确实被改过（比如你自己改过这一块，δ 本来就该变）」，
-              也可能是「服务端换了 δ 想洗白内容」。哪一种，看上面两条结论：
-              本地 δ 验得过 ⇒ 内容与你见证的那一版自洽；两条都验不过 ⇒ 按告警处理。
+              本地 δ 与服务端 δ 版本不一致。
+              可能由文件修改或服务端返回不同版本的 δ 导致。
+              本地 δ 验证通过表示内容与本地记录一致；两项均未通过时按告警处理。
             </p>
           </div>
         </el-alert>

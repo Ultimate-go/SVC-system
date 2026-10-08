@@ -109,7 +109,7 @@ export function verifyFailDetail(d) {
   if (d.ok) return d.verify?.message || ''
   if (d.verify && !d.verify.ok) return d.verify.message
   // 没有环节名可报（旧数据）：绝不搬「验证通过」来当副标题。
-  return '没有环节名 —— 重新取一次证据再看。'
+  return '未提供失败环节名，请重新取证后查看'
 }
 
 /** 十六进制的密文片段（后端给的是 hex 字符串）。 */
@@ -262,10 +262,10 @@ export function decodeBlockHex(hex) {
  */
 export function nodeSelfCheck(row) {
   if (!row) return { ok: false, label: '—', tone: 'muted' }
-  if (row.unreachable) return { ok: false, label: '连不上', tone: 'danger' }
+  if (row.unreachable) return { ok: false, label: '不可达', tone: 'danger' }
   if (row.fresh) return { ok: false, label: '未初始化', tone: 'muted' }
-  if (row.proved === true) return { ok: true, label: '视图合法', tone: 'ok' }
-  if (row.proved === false) return { ok: false, label: '视图不合法', tone: 'danger' }
+  if (row.proved === true) return { ok: true, label: '视图校验通过', tone: 'ok' }
+  if (row.proved === false) return { ok: false, label: '视图校验未通过', tone: 'danger' }
   return { ok: false, label: '未验证', tone: 'warn' }
 }
 

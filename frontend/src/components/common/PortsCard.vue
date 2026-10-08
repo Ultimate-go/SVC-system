@@ -238,7 +238,7 @@ async function askRestart(changedFrontend = null) {
     )
   }
   lines.push(
-    '节点、后端、前端会全部停掉再起一遍，大约十几秒。期间页面连不上，' +
+    '节点、后端、前端将全部重启，预计耗时十几秒。期间页面不可达，' +
       '恢复后需要重新登录一次（后端重启会换掉签名密钥）。',
     '数据、账号、文件、块全都不动 —— 端口与"哪台存了哪些块"无关。',
   )
@@ -246,7 +246,7 @@ async function askRestart(changedFrontend = null) {
     await ElMessageBox.confirm(lines.join('\n'), '立刻重启', {
       type: 'warning',
       confirmButtonText: '现在重启',
-      cancelButtonText: '待会儿自己点',
+      cancelButtonText: '稍后手动执行',
     })
   } catch {
     return
