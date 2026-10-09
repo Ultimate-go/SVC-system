@@ -16,6 +16,8 @@ dist/
 .eggs/
 pip-wheel-metadata/
 
+# Node（前端）—— 依赖目录永不进仓：几万个文件，且与平台相关
+node_modules/
 
 vds.db
 vds.db-wal

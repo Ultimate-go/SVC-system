@@ -22,7 +22,7 @@
  */
 
 import { defineStore } from 'pinia'
-import { unwrapPrivateKey, wrapPrivateKey } from '../utils/crypto/keywrap.js'
+import { unwrapPrivateKey, unwrapPrivateKeyAsync, wrapPrivateKey } from '../utils/crypto/keywrap.js'
 
 /**
  * 私钥标量。**模块级**，刻意不是 Pinia state。
@@ -91,6 +91,23 @@ function armExpiry(store) {
   if (typeof _expiryTimer?.unref === 'function') _expiryTimer.unref()
 }
 
+/** 解封成功后统一落地（同步 / 异步两条路共用，免得两份状态代码漂移）。 */
+function applyUnlocked(store, sk, username) {
+  _sk = sk
+  store.unlocked = true
+  store.username = username
+  store.unlockedAt = Date.now()
+  store.error = ''
+  // 给它一个寿命（安全审计 I9）
+  armExpiry(store)
+}
+
+/** 解封失败统一收尾（口令不对 / 密文被改，都是同一句话）。 */
+function applyUnlockFailure(store, e) {
+  store.error = e?.message || '解封私钥失败'
+  store.locked()
+}
+
 export const useCryptoStore = defineStore('crypto', {
   state: () => ({
     /** 浏览器里现在有没有私钥。 */
@@ -123,18 +140,36 @@ export const useCryptoStore = defineStore('crypto', {
      */
     unlock(password, blob, username = '') {
       try {
-        _sk = unwrapPrivateKey(password, blob)
+        applyUnlocked(this, unwrapPrivateKey(password, blob), username)
       } catch (e) {
-        this.error = e?.message || '解封私钥失败'
-        this.locked()
+        applyUnlockFailure(this, e)
         throw e
       }
-      this.unlocked = true
-      this.username = username
-      this.unlockedAt = Date.now()
-      this.error = ''
-      // 给它一个寿命（安全审计 I9）
-      armExpiry(this)
+      return true
+    },
+
+    /**
+     * 同上，但**分片异步**：解封过程中主线程会定期让出，界面不冻。
+     *
+     * ★ 登录走这条路（见 `stores/auth.js`）。为什么非异步不可：
+     *   PBKDF2 的 20 万轮是纯 JS 同步计算，一口气算完要 2~3 秒；
+     *   那几秒里页面**一帧都画不出来** —— 登录页的等待动画会当场僵住
+     *   （实测：一次 2784ms 的长任务，正好等于整段解封）。
+     *   计算量与结果都与 `unlock` **一模一样**，只是被切成 10ms 一片。
+     *
+     * @param {string} password 登录口令
+     * @param {object} blob 私钥密文（登录响应里的 `key_blob`）
+     * @param {string} username 归属（换账号时用来判断要不要锁掉旧的）
+     * @param {(fraction: number) => void} [onProgress] 派生 KEK 的真实完成度（0→1）
+     */
+    async unlockAsync(password, blob, username = '', onProgress = null) {
+      try {
+        const sk = await unwrapPrivateKeyAsync(password, blob, { onProgress })
+        applyUnlocked(this, sk, username)
+      } catch (e) {
+        applyUnlockFailure(this, e)
+        throw e
+      }
       return true
     },
 

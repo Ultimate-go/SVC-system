@@ -37,8 +37,16 @@ export const useAuthStore = defineStore('auth', {
       if (user) localStorage.setItem(USER_KEY, JSON.stringify(user))
       else localStorage.removeItem(USER_KEY)
     },
-    /** 登录。返回 user（含 timings，供总览页展示登录耗时）。 */
-    async login(username, password) {
+    /**
+     * 登录。返回 user（含 timings，供总览页展示登录耗时）。
+     *
+     * @param {string} username
+     * @param {string} password
+     * @param {{onUnlockProgress?: (fraction: number) => void}} [options]
+     *        `onUnlockProgress` 是**解封私钥的真实进度**（0→1，耗时几乎全在
+     *        派生 KEK 上）。登录页拿它画进度条 —— 真进度，不是装饰性的假动画。
+     */
+    async login(username, password, options = {}) {
       const { data } = await api.post('/api/auth/login', { username, password }, { skipAuthRedirect: true })
       this.setToken(data.token)
       this.setUser(data.user)
@@ -47,11 +55,15 @@ export const useAuthStore = defineStore('auth', {
       //   口令就在手上（用户刚输过），所以不必让他再输一次；
       //   解出来只活在当前页面内存里（见 stores/crypto.js 的三条纪律）。
       //   解不开**不是**登录失败 —— 令牌已经拿到了，这里只影响“能不能解密”。
+      //
+      //   ★ 走**异步**那条（`unlockAsync`）：这一步是 20 万轮 PBKDF2-HMAC-SM3
+      //     （纯 JS，2~3 秒）。同步算会把主线程占满 —— 登录页的等待动画
+      //     会当场冻住。计算量与结果都没变，只是切成 10ms 一片、中途让出。
       const crypto = useCryptoStore()
       crypto.lockIfOther(username)
       if (data.key_blob) {
         try {
-          crypto.unlock(password, data.key_blob, username)
+          await crypto.unlockAsync(password, data.key_blob, username, options.onUnlockProgress)
         } catch (e) {
           crypto.locked()
           crypto.error = e?.message || '解封私钥失败'

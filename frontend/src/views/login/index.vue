@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
@@ -20,19 +20,79 @@ let revealTimer
 let descriptionTimer
 let formTimer
 
+/* ---------------------------------------------------------------------------
+   登录等待动画
+   ---------------------------------------------------------------------------
+   登录的耗时**不在这个页面**，而在两段：
+     ① 服务端校验口令、取回被封装的私钥（约 1~2 秒，多久不可知）；
+     ② 浏览器里跑 20 万轮 PBKDF2-HMAC-SM3 解封私钥（约 2~3 秒，进度可算）。
+   所以等待态也分两段演：网段用一条来回扫的光带（不确定进度），
+   解封段用一条按**真实进度**从 0 长到 1 的光条 —— 百分比是真的，
+   不是编个数字糊弄人（进度由 stores/auth.js → onUnlockProgress 报上来）。
+   文案每 850ms 换一句，顺序与真实步骤对应。
+--------------------------------------------------------------------------- */
+const NET_TIPS = [
+  '正在向服务端校验账号口令…',
+  '正在取回被封装的私钥…',
+  '正在核对密钥对归属…',
+]
+const KDF_TIP = '正在用口令派生 KEK…'
+//: 上面那句的完整版本（面板宽度放不下，挂在 title 里）
+const KDF_TIP_FULL = '正在用口令派生 KEK（PBKDF2-HMAC-SM3 · 20 万轮）…'
+const UNWRAP_TIP = '正在解封私钥，建立加密会话…'
+/** net（请求中）→ kdf（派生 KEK）→ unwrap（收尾）。 */
+const busyPhase = ref('net')
+const kdfPercent = ref(0)
+const netTipIndex = ref(0)
+let tipTimer
+
+const busyTip = computed(() => {
+  if (busyPhase.value === 'unwrap') return UNWRAP_TIP
+  if (busyPhase.value === 'kdf') return KDF_TIP
+  return NET_TIPS[netTipIndex.value % NET_TIPS.length]
+})
+
+/** 悬停时看到的那句 —— 面板宽度放不下算法参数，但丢掉又可惜。 */
+const busyTipFull = computed(() => (busyPhase.value === 'kdf' ? KDF_TIP_FULL : busyTip.value))
+
+/** 解封进度回调（真实进度）。到 1 就是 KEK 派生完了，换成收尾文案。 */
+function onUnlockProgress(fraction) {
+  const p = Math.max(0, Math.min(1, Number(fraction) || 0))
+  kdfPercent.value = p
+  busyPhase.value = p >= 1 ? 'unwrap' : 'kdf'
+}
+
+function stopTips() {
+  if (tipTimer !== undefined) {
+    window.clearInterval(tipTimer)
+    tipTimer = undefined
+  }
+}
+
 async function submit() {
   if (!form.username || !form.password) {
     ElMessage.warning('请输入账号与密码')
     return
   }
   loading.value = true
+  busyPhase.value = 'net'
+  kdfPercent.value = 0
+  netTipIndex.value = 0
+  stopTips()
+  // 关掉动效的人不轮播文案：换行本身也是一种闪动。
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    tipTimer = window.setInterval(() => {
+      netTipIndex.value = (netTipIndex.value + 1) % NET_TIPS.length
+    }, 850)
+  }
   try {
-    await auth.login(form.username, form.password)
+    await auth.login(form.username, form.password, { onUnlockProgress })
     const redirect = route.query.redirect || '/'
     router.replace(String(redirect))
   } catch {
     // 错误已由 axios 拦截器原样弹出（401/403/409 的中文理由）。
   } finally {
+    stopTips()
     loading.value = false
   }
 }
@@ -62,6 +122,7 @@ onUnmounted(() => {
   window.clearTimeout(revealTimer)
   window.clearTimeout(descriptionTimer)
   window.clearTimeout(formTimer)
+  stopTips()
 })
 
 const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYPTOGRAPHIC', 'DECENTRALIZED']
@@ -142,6 +203,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
             v-model="form.username"
             placeholder="请输入账号"
             size="large"
+            :disabled="loading"
             autocomplete="username"
             @keyup.enter="submit"
           >
@@ -155,17 +217,39 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
             placeholder="请输入密码"
             size="large"
             show-password
+            :disabled="loading"
             autocomplete="current-password"
             @keyup.enter="submit"
           >
             <template #prefix><Icon name="lock" :size="15" /></template>
           </el-input>
           <el-button type="primary" size="large" :loading="loading" class="submit" @click="submit">
-            <span>登录</span>
+            <span>{{ loading ? '正在登录' : '登录' }}</span>
             <span class="submit-arrow" aria-hidden="true">↗</span>
           </el-button>
         </div>
-        <p class="panel-footer mono"><span>●</span> END-TO-END VERIFICATION ENABLED</p>
+
+        <!-- 等待态：转圈 + 一行会换的提示 + 一条（解封阶段是真实进度的）光条 -->
+        <transition name="busy">
+          <div v-if="loading" class="login-busy" role="status" aria-live="polite">
+            <span class="busy-ring" aria-hidden="true" />
+            <div class="busy-main">
+              <span :key="busyTip" class="busy-tip mono" :title="busyTipFull">{{ busyTip }}</span>
+              <span
+                class="busy-track"
+                :class="busyPhase === 'net' ? 'is-flow' : 'is-bar'"
+                aria-hidden="true"
+              >
+                <i :style="busyPhase === 'net' ? undefined : { transform: `scaleX(${kdfPercent})` }" />
+              </span>
+            </div>
+            <span class="busy-percent mono">{{ busyPhase === 'net' ? '···' : `${Math.round(kdfPercent * 100)}%` }}</span>
+          </div>
+        </transition>
+
+        <!-- 页脚在等待时**只变不可见、不移除** —— 它占的高度就是等待条的落点，
+             抽掉它面板会回缩，等待条就会压到按钮上（踩过）。 -->
+        <p class="panel-footer mono" :class="{ 'is-away': loading }"><span>●</span> END-TO-END VERIFICATION ENABLED</p>
       </section>
     </main>
 
@@ -238,7 +322,37 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .field-label { margin-top: 5px; color: #7894ac; font-size: 9px; }
 .submit { width: 100%; height: 44px; margin-top: 9px; border: 0; letter-spacing: .08em; }
 .submit-arrow { margin-left: 12px; font-size: 17px; }
+
+/* ---------- 登录等待态（参考“点进比赛”那种：转圈 + 一行会换的提示）---------- */
+/* 绝对定位在面板底部、与 panel-footer 同一个位置 —— 这样等待态出现/消失时面板不会跳。 */
+.login-busy {
+  position: absolute; left: 32px; right: 32px; bottom: 14px;
+  display: flex; align-items: center; gap: 10px; padding: 9px 11px;
+  border: 1px solid rgba(67, 228, 191, .2); border-radius: 6px;
+  background: linear-gradient(90deg, rgba(41, 215, 255, .08), rgba(67, 228, 191, .045));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.busy-ring {
+  position: relative; flex: 0 0 auto; width: 15px; height: 15px; border-radius: 50%;
+  background: conic-gradient(from 0deg, rgba(67, 228, 191, 0) 0 18%, rgba(41, 215, 255, .6) 62%, #43e4bf 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.6px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.6px));
+  animation: busy-spin .85s linear infinite;
+}
+.busy-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.busy-tip { display: block; overflow: hidden; color: #d3e8f6; font-size: 11px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; animation: busy-in .32s cubic-bezier(.2, .8, .2, 1) both; }
+.busy-track { position: relative; display: block; height: 2px; overflow: hidden; border-radius: 2px; background: rgba(143, 188, 220, .16); }
+.busy-track i { position: absolute; inset: 0; display: block; }
+/* 网段：不知道还要等多久 ⇒ 一条来回扫的光带（不确定进度） */
+.busy-track.is-flow i { width: 44%; transform: translateX(-110%); background: linear-gradient(90deg, transparent, #29d7ff, #43e4bf, transparent); animation: busy-flow 1.35s cubic-bezier(.55, .08, .45, .92) infinite; }
+/* 解封段：这就是派生 KEK 的**真实**进度（0→1），不是装饰性动画 */
+.busy-track.is-bar i { transform: scaleX(0); transform-origin: left center; background: linear-gradient(90deg, #29d7ff, #43e4bf); box-shadow: 0 0 8px rgba(67, 228, 191, .55); }
+.busy-percent { flex: 0 0 auto; min-width: 32px; color: #6f8ba0; font-size: 10px; text-align: right; }
+.busy-enter-active, .busy-leave-active { transition: opacity .22s ease, transform .22s ease; }
+.busy-enter-from, .busy-leave-to { opacity: 0; transform: translateY(-5px); }
 .panel-footer { margin: 24px 0 0; color: rgba(139, 166, 187, .55); font-size: 9px; letter-spacing: .1em; }
+/* 等待时留着位置、只隐掉（见模板里的注释） */
+.panel-footer.is-away { visibility: hidden; }
 .panel-footer span { color: #43e4bf; margin-right: 6px; }
 .system-footer { position: absolute; z-index: 1; right: 30px; bottom: 22px; color: rgba(133, 163, 187, .5); font-size: 9px; letter-spacing: .12em; }
 .system-footer span { color: #43dcbf; }
@@ -248,6 +362,10 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 @keyframes blink { 50% { opacity: 0; } }
 @keyframes cursor-fade { to { opacity: 0; } }
 @keyframes progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+/* 100% 必须是静止态（关动效时动画会停在最后一帧）：扫到头就停到轨道外面 */
+@keyframes busy-flow { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
+@keyframes busy-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes glow-drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(2%, -2%) scale(1.06); } }
 @keyframes word-rise { 0% { transform: translateY(105vh); opacity: 0; } 10%, 90% { opacity: 1; } 100% { transform: translateY(-10vh); opacity: 0; } }
 
@@ -264,6 +382,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   .project-intro p, .project-intro ul { font-size: 12px; }
   .project-intro ul { align-items: center; }
   .login-panel { justify-self: center; max-width: 440px; padding: 29px 24px 23px; }
+  .login-busy { left: 24px; right: 24px; bottom: 10px; }
   .system-footer { right: 0; bottom: 16px; width: 100%; text-align: center; font-size: 8px; }
 }
 
@@ -272,10 +391,12 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   .brand-title { font-size: 34px; letter-spacing: .04em; }
   .terminal-line { font-size: 9px; gap: 8px; }
   .login-panel { padding-inline: 20px; }
+  .login-busy { left: 20px; right: 20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bg-glow, .bg-word, .brand-character, .cursor, .progress-track span { animation: none; }
+  .bg-glow, .bg-word, .brand-character, .cursor, .progress-track span,
+  .busy-ring, .busy-tip, .busy-track.is-flow i { animation: none; }
   .brand-character { opacity: 1; transform: none; }
   .login-panel, .brand-stage, .project-intro { transition: none; }
   .brand-stage { position: relative; top: auto; left: auto; width: auto; max-width: none; transform: none; }

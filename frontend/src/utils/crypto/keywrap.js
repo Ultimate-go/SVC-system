@@ -25,7 +25,7 @@ import {
   hexToBytes,
   utf8,
 } from './bytes.js'
-import { pbkdf2Sm3 } from './pbkdf2.js'
+import { pbkdf2Sm3, pbkdf2Sm3Async } from './pbkdf2.js'
 import { ecdhShared, kdf, pointFromBytes } from './sm2.js'
 import { sm4Ctr } from './sm4.js'
 
@@ -207,6 +207,50 @@ export function unwrapPrivateKey(password, blob) {
   }
 
   const kek = pbkdf2Sm3(password, salt, iters, 32)
+  const expectTag = kdf(kek, concat(INFO_UK_TAG, salt, iv, body), TAG_BYTES)
+  if (!bytesEq(expectTag, tag)) {
+    throw new KeyWrapIntegrityError('口令不对，或者私钥密文被改过')
+  }
+  const sm4Key = kdf(kek, INFO_UK_ENC, SM4_KEY_BYTES)
+  const raw = sm4Ctr(body, sm4Key, iv)
+  const sk = bytesToBigInt(raw)
+  if (sk < 1n || sk >= SM2_N) throw new KeyWrapFormatError('解出来的私钥标量越界，密文可能损坏')
+  return sk
+}
+
+/**
+ * `unwrapPrivateKey` 的**分片异步**版本：结果完全一样，只是中途会让出主线程。
+ *
+ * ★ 存在的理由：解私钥这一下要跑 20 万轮 PBKDF2-HMAC-SM3（纯 JS，2~3 秒）。
+ *   同步版会把主线程占满 —— 登录页那句“正在解封…”的动画会当场冻住。
+ *   这里把同一套计算切成 10ms 一片，界面照常刷新（计算量与结果都没变）。
+ *
+ *   `onProgress` 收到的 0→1 就是**派生 KEK 的完成度** —— 解封耗时几乎全在这
+ *   一步（剩下的 SM4 解密与标签比对只有毫秒级），所以它可以当作整段的进度。
+ *
+ * @param {string} password 登录口令
+ * @param {object} blob 私钥密文（`{kind, salt, iters, iv, body, tag}`）
+ * @param {{onProgress?: (fraction: number) => void}} [options]
+ * @returns {Promise<bigint>} 私钥标量
+ * @throws {KeyWrapIntegrityError} 口令不对，或者密文被改过（与同步版同一句话）
+ */
+export async function unwrapPrivateKeyAsync(password, blob, options = {}) {
+  expectObj(blob, '用户私钥密文', KIND_USER_KEY)
+  const salt = field(blob, 'salt')
+  const iv = field(blob, 'iv', SM4_IV_BYTES)
+  const body = field(blob, 'body')
+  const tag = field(blob, 'tag', TAG_BYTES)
+
+  const iters = blob.iters
+  if (!Number.isInteger(iters) || iters < 1000) {
+    throw new KeyWrapFormatError(`字段 iters 不合法：${JSON.stringify(iters)}`)
+  }
+  if (iters > 2_000_000) {
+    // ★ 与后端的 PBKDF2_ITERATIONS_MAX 对齐：不夹住就是一条免费的 DoS。
+    throw new KeyWrapFormatError(`迭代数太高（${iters}）—— 这份密钥密文可能被改过`)
+  }
+
+  const kek = await pbkdf2Sm3Async(password, salt, iters, 32, options)
   const expectTag = kdf(kek, concat(INFO_UK_TAG, salt, iv, body), TAG_BYTES)
   if (!bytesEq(expectTag, tag)) {
     throw new KeyWrapIntegrityError('口令不对，或者私钥密文被改过')
