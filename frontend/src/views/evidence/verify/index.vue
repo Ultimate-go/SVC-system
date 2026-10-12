@@ -26,7 +26,7 @@ import { useBasketStore } from '../../../stores/basket'
 import { usePoolStore } from '../../../stores/pool'
 import { useThemeStore } from '../../../stores/theme'
 import { systemApi } from '../../../api/system'
-import { fmtBytes, span } from '../../../utils/format'
+import { fmtBytes, span, humanList, humanIdx } from '../../../utils/format'
 import { MAX_QUERY_INDICES } from '../../../utils/constants'
 // ★ 界面上要的是"第几块"（parseBlockRange）；全局下标只是**高级**里的逃生口
 import { parseBlockRange, parseIndexRange } from '../../../utils/validate'
@@ -35,6 +35,7 @@ import DetailToggle from '../../../components/common/DetailToggle.vue'
 import VerifyResult from '../../../components/security/VerifyResult.vue'
 import BlockFingerprints from '../../../components/security/BlockFingerprints.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
+import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 
 const pool = usePoolStore()
 const theme = useThemeStore()
@@ -64,7 +65,8 @@ const result = ref(null)
  * 还是要知道内部坐标的，但不能把它摆在主路径上。
  */
 const verifyFileId = ref(null)
-const verifyBlocks = ref('0')
+// ★ 默认填 1（人读从 1 起）：界面上不出现“第 0 块”这种写法。
+const verifyBlocks = ref('1')
 const advancedMode = ref(false)
 
 // ---------------------------------------------------------------------------
@@ -565,6 +567,70 @@ const basketHolderCount = computed(
 )
 
 const regIndex = ref('')
+
+/* ---------------------------------------------------------------------------
+   验证过程弹框（★ 2026-10-12 用户要的）
+   ---------------------------------------------------------------------------
+   验证的卖点不是“服务端说 OK”，而是**一个公开检验**自己能跑通。
+   所以把这几步摆出来，并且强调每一步“为什么是关键”。
+   `key` 与后端 `with stage("…")` 的名字对齐；对不上就不显示耗时，不编数字。
+--------------------------------------------------------------------------- */
+const VERIFY_STEPS = [
+  {
+    name: '定下标集',
+    en: 'SELECT',
+    desc: '只验你指定的这些块（人看是第几块）。一份证据只对它盖住的下标有效 —— 没盖住的块，说它“验证通过”不算数。',
+  },
+  {
+    key: '探测各节点（report）',
+    name: '探测节点',
+    en: 'PROBE',
+    desc: '问一遗集群：这些块现在分别存在哪几台。节点会如实报自己存了什么，这句话后面要拿验证来对它。',
+  },
+  {
+    key: '取回密文',
+    name: '取回密文',
+    en: 'FETCH',
+    desc: '把这几块的密文拿回来 —— 拿回来的是密文，让协调者交明文它也给不出来。',
+  },
+  {
+    key: '取回分量与凭证',
+    name: '重算分量',
+    en: 'DIGEST',
+    desc: '浏览器拿密文自己重算每一块的公开分量（SM3），不看服务端报的那份。',
+  },
+  {
+    key: '聚合凭证',
+    name: '聚合成一份证据',
+    en: 'AGGREGATE',
+    desc: '把这几块的分量聚成一份证据 π_I：两个群元素 ≤ 256 字节 —— 覆盖 4 块还是 4 千块，都是这个大小。',
+  },
+  {
+    key: '承诺验证（VerRetrieve）',
+    name: '公开检验一次',
+    en: 'VERIFY',
+    desc: '拿 δ 与 π_I 做一次公开检验。它不需要明文、不需要密钥，也不需要相信任何一方 —— 谁拿这几样东西都能自己重跑。',
+  },
+  {
+    name: '结论',
+    en: 'VERDICT',
+    desc: '通过 = 这些块还在、且与你上传那一版一致；不通过 = 有块被换/被删，或者交回来的密文对不上当前基准。',
+  },
+]
+
+const processOpen = ref(false)
+const lastVerify = ref(null)
+const lastVerifyLabel = ref('')
+
+const verifyFacts = computed(() => {
+  const d = lastVerify.value
+  if (!d) return []
+  const out = []
+  if (lastVerifyLabel.value) out.push({ k: '范围', v: lastVerifyLabel.value })
+  if (d.delta_n !== undefined && d.delta_n !== null) out.push({ k: 'δ_n', v: String(d.delta_n) })
+  if (d.delta_fp) out.push({ k: 'δ 指纹', v: String(d.delta_fp) })
+  return out
+})
 const regResult = ref(null)
 const regRunning = ref(false)
 
@@ -611,6 +677,12 @@ async function runQuery() {
       ? await evidenceApi.query(indices, allowPartial.value)
       : await evidenceApi.queryFiles([[picked.owner, picked.file_key]], blocks)
     result.value = data
+    // ★ 验证刚跑完时把过程弹出来：结论谁都会给，"凭什么说这个结论"才是这套系统的东西。
+    lastVerify.value = data
+    lastVerifyLabel.value = advancedMode.value
+      ? `全局下标 ${span(indices)}`
+      : `${picked.file_key} 第 ${span(blocks)} 块`
+    processOpen.value = true
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
     pool.syncDelta({ fp: data?.delta_fp, n: data?.delta_n })
@@ -682,11 +754,13 @@ const resultFiles = computed(() => {
 
 
 async function runRegistry() {
-  const i = Number(regIndex.value)
-  if (!Number.isInteger(i) || i < 0) {
-    ElMessage.warning('请输入非负整数下标')
+  // ★ 界面上填的是**1 起**的槽位号（与全项目其它地方口径一致）；内部减 1 再查。
+  const shown = Number(regIndex.value)
+  if (!Number.isInteger(shown) || shown < 1) {
+    ElMessage.warning('请输入槽位号（从 1 开始）')
     return
   }
+  const i = shown - 1
   regRunning.value = true
   regResult.value = null
   try {
@@ -765,7 +839,7 @@ onMounted(loadFiles)
           </el-select>
           <el-input
             v-model="verifyBlocks"
-            placeholder="第几块，如 0-3, 8"
+            placeholder="第几块，如 1-4, 9"
             style="width: 200px"
             @keyup.enter="runQuery"
           />
@@ -773,7 +847,7 @@ onMounted(loadFiles)
         <el-input
           v-else
           v-model="indicesInput"
-          placeholder="全局下标，如 0-3, 8"
+          placeholder="全局编号，如 1-4, 9"
           style="width: 260px"
           @keyup.enter="runQuery"
         />
@@ -803,7 +877,7 @@ onMounted(loadFiles)
           <span class="cur-total mono">合计 {{ result.indices?.length || 0 }} 块</span>
         </div>
         <div v-if="result.missing?.length" class="missing">
-          <el-alert type="warning" :closable="false" :title="`这份结论没覆盖：${result.missing.join(', ')}`" />
+          <el-alert type="warning" :closable="false" :title="`这份结论没覆盖：${humanList(result.missing).join(', ')}`" />
         </div>
         <div v-if="result.proof" class="mono text-2 mt-2" style="font-size: 12px">
           证据 {{ result.proof.size_bytes }} 字节（与打开多少块无关）
@@ -831,7 +905,12 @@ onMounted(loadFiles)
             <span class="mono text-3">holder: {{ result.holders?.[r.global_index] }}</span>
           </div>
         </div>
-        <StageTimeline v-if="result.timings" :timings="result.timings" class="mt-2" />
+        <StageTimeline
+          v-if="result.timings"
+          :timings="result.timings"
+          :state="result.verify?.ok === false ? 'fail' : 'ok'"
+          class="mt-2"
+        />
       </div>
 
       <details class="note-collapse">
@@ -1092,13 +1171,13 @@ onMounted(loadFiles)
         <span class="step-tag">内部坐标</span>
       </div>
       <div class="query-form">
-        <el-input v-model="regIndex" placeholder="槽位号，如 3" style="width: 160px" />
+        <el-input v-model="regIndex" placeholder="槽位号（从 1 开始）" style="width: 160px" />
         <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
       </div>
       <div v-if="regResult" class="mt-3">
         <template v-if="!regResult.error">
           <div class="mono text-1" style="font-size: 13px">
-            槽位 {{ regResult.global_index }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ regResult.block_idx }} 块
+            槽位 {{ humanIdx(regResult.global_index) }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ humanIdx(regResult.block_idx) }} 块
           </div>
           <div class="text-2 mono" style="font-size: 12px">
             holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
@@ -1115,6 +1194,16 @@ onMounted(loadFiles)
         </p>
       </details>
     </div>
+
+    <!-- 验证过程：逐步讲清“这个结论是怎么得到的”（耗时对齐真实阶段名）。 -->
+    <ProcessDialog
+      v-model="processOpen"
+      title="这次验证走了哪几步"
+      subtitle="结论谁都会给；这里的每一步都是能自己跑一遍的公开检验。"
+      :steps="VERIFY_STEPS"
+      :timings="lastVerify?.timings"
+      :facts="verifyFacts"
+    />
   </div>
 </template>
 

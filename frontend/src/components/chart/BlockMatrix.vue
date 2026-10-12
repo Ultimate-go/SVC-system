@@ -117,7 +117,9 @@ const blockNoOf = computed(() => {
 
 function rowLabel(gi) {
   const b = blockNoOf.value.get(Number(gi))
-  return b === undefined ? String(gi) : `第 ${b} 块`
+  // ★ 界面上按 **1 起** 编号（见 utils/format.js 的坐标口径）；算不出块号时
+  //   退回全局编号，同样 +1 —— 不再把内部下标原样摆出来。
+  return b === undefined ? String(Number(gi) + 1) : `第 ${b + 1} 块`
 }
 
 function cellState(gi, nid) {

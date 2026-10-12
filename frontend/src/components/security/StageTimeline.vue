@@ -2,8 +2,13 @@
 /**
  * 阶段耗时条 —— 数据源是响应里的 timings。
  *
- * 把后端的 { total_ms, stages: [{stage, ms, count}] } 画成一条横向堆叠条，
- * 每段宽度按「各段之和」的比例定，不按 total（total 会略大，差额是埋点没覆盖的零碎）。
+ * ★ 2026-10-12 改版（用户要求）：
+ *   ① 不再画「按比例堆叠的多色条」，改成**一道从左到右填满的条**
+ *      （与登录页“正在派生口令”同一个观感）；动画只走一次、**停在满格**，
+ *      不做循环的假进度；
+ *   ② 每一步**单独一行**显示它自己的耗时（原来全挤在一条 legend 里），
+ *      颜色仍用原先那套 tone，一眼能看出“时间花在哪一步”；
+ *   ③ `state` 为 `fail` 时那道条用告警色 —— 验证不通过时不能长得跟通过一样。
  *
  * ★ timings 不编百分比：这里只画后端真实返回的毫秒数。
  */
@@ -12,9 +17,21 @@ import { buildPerf, formatMs } from '../../utils/timing'
 
 const props = defineProps({
   timings: { type: Object, default: null },
+  /** 结论态：''（中性）/ 'ok' / 'fail' —— 只影响那道填满条的颜色。 */
+  state: { type: String, default: '' },
 })
 
 const perf = computed(() => buildPerf(props.timings))
+
+/** 填满动画的时长：按真实总耗时缩一下，但夹在 0.5~1.6 秒之间（太快看不见、太慢碍事）。 */
+const animMs = computed(() => {
+  const t = Number(perf.value.total_ms) || 0
+  return Math.max(500, Math.min(1600, Math.round(t * 0.6)))
+})
+
+const fillTone = computed(() =>
+  props.state === 'fail' ? 'danger' : props.state === 'ok' ? 'ok' : 'accent',
+)
 
 const toneCss = {
   accent: 'var(--accent)',
@@ -27,68 +44,100 @@ const toneCss = {
 </script>
 
 <template>
-  <div class="stage-timeline" v-if="perf.stages.length">
-    <div class="bar">
-      <div
-        v-for="(s, i) in perf.stages"
-        :key="i"
-        class="seg"
-        :style="{ width: s.pct + '%', background: toneCss[s.tone] }"
-        :title="`${s.stage}：${formatMs(s.ms)}${s.count > 1 ? ' ×' + s.count : ''}`"
-      />
+  <div class="stage-fill" v-if="perf.stages.length">
+    <div class="fill-track" :class="`is-${fillTone}`">
+      <span class="fill" :style="{ animationDuration: animMs + 'ms' }" />
     </div>
-    <div class="legend">
-      <span class="total mono">合计 {{ formatMs(perf.total_ms) }}</span>
-      <span
-        v-for="(s, i) in perf.stages"
-        :key="i"
-        class="item"
-        :style="{ color: toneCss[s.tone] }"
-      >
-        <span class="chip" :style="{ background: toneCss[s.tone] }" />
-        {{ s.stage }} {{ formatMs(s.ms) }}<template v-if="s.count > 1"> ×{{ s.count }}</template>
-      </span>
-    </div>
+    <div class="fill-total mono">合计 {{ formatMs(perf.total_ms) }}</div>
+
+    <!-- 每一步单独一行：阶段名 + 它自己的耗时（不再挤成一长条） -->
+    <ol class="stage-rows">
+      <li v-for="(s, i) in perf.stages" :key="i" class="row">
+        <span class="dot" :style="{ background: toneCss[s.tone] }" />
+        <span class="name">{{ s.stage }}</span>
+        <span v-if="s.count > 1" class="count mono">×{{ s.count }}</span>
+        <span class="ms mono">{{ formatMs(s.ms) }}</span>
+      </li>
+    </ol>
   </div>
 </template>
 
 <style scoped>
-.stage-timeline {
+.stage-fill {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
-.bar {
-  display: flex;
-  height: 10px;
-  border-radius: 5px;
+/* ---------- 一道从左到右填满的条（动画结束停在满格） ---------- */
+.fill-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
   overflow: hidden;
   background: var(--bg-raised);
 }
-.seg {
+.fill {
+  display: block;
   height: 100%;
-  min-width: 2px;
-  transition: width 0.25s ease;
+  transform-origin: left center;
+  animation-name: fill-grow;
+  animation-timing-function: cubic-bezier(.22, .8, .28, 1);
+  animation-fill-mode: both;
 }
-.legend {
+.fill-track.is-accent .fill { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.fill-track.is-ok .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 70%, var(--accent)), var(--ok)); }
+.fill-track.is-danger .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--danger) 65%, var(--warn)), var(--danger)); }
+.fill-track::after {
+  /* 一道扫光只说明“正在长”，随填充一起停住 */
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .28), transparent);
+  width: 35%;
+  transform: translateX(-120%);
+  animation: fill-sheen 1.05s ease-out both;
+  pointer-events: none;
+}
+@keyframes fill-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes fill-sheen {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fill { animation: none; transform: scaleX(1); }
+  .fill-track::after { display: none; }
+}
+.fill-total {
+  color: var(--text-1);
+  font-size: 12px;
+}
+/* ---------- 每一步单独一行 ---------- */
+.stage-rows {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
+  flex-direction: column;
+  gap: 4px;
+}
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-2);
 }
-.total {
-  color: var(--text-1);
-}
-.item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.chip {
-  width: 8px;
-  height: 8px;
+.dot {
+  width: 7px;
+  height: 7px;
   border-radius: 2px;
-  display: inline-block;
+  flex: none;
+  align-self: center;
 }
+.row .name { color: var(--text-2); }
+.row .count { color: var(--text-3); }
+.row .ms { margin-left: auto; color: var(--text-1); white-space: nowrap; }
 </style>

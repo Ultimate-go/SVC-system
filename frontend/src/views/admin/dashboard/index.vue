@@ -1,21 +1,22 @@
 <script setup>
 /**
- * 总览页。普通用户访问 / 时重定向到 /files。
- * 管理员看到：公开参数、全局摘要 δ、规模、集群健康、密钥模型、待补推横幅、自检。
+ * 总览页（★ 2026-10-12 起对全体用户开放：普通用户与管理员都进这一页）。
+ * 展示：公开参数、全局摘要 δ、规模、集群健康、密钥模型、待补推横幅、自检。
+ *
+ * ★ 自检按钮也对所有人可用（后端 ``POST /api/admin/check`` 已改为
+ *   ``current_user``）：它只读，失败原因会原样显示。
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { usePermission } from '../../../composables/usePermission'
 import { systemApi } from '../../../api/system'
 import { devicesApi } from '../../../api/devices'
-import { hexFp } from '../../../utils/format'
+import { fmtAgo, hexFp } from '../../../utils/format'
 import StatCard from '../../../components/common/StatCard.vue'
 import RingGauge from '../../../components/chart/RingGauge.vue'
 import ProcessingFlow from '../../../components/chart/ProcessingFlow.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
-const { isAdmin } = usePermission()
 const router = useRouter()
 
 const loading = ref(true)
@@ -54,6 +55,44 @@ const FAIL_LOCATE = [
 
 const checkSteps = ref([])
 const passedCount = computed(() => checkSteps.value.filter((s) => s.state === 'pass').length)
+
+/* ---------------------------------------------------------------------------
+   上次自检的结论（存在**本机浏览器**里）
+   ---------------------------------------------------------------------------
+   后端没有“自检历史”接口，审计流水又只有管理员看得到 —— 普通用户想知道
+   “上一次查是什么时候、结果如何”，只能靠本机记一笔。所以文案就写
+   “本机上次自检”，不假装它是服务端记录。清理浏览器数据就会没，不影响自检本身。
+--------------------------------------------------------------------------- */
+const LAST_CHECK_KEY = 'vds_last_check_v1'
+
+function readLastCheck() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LAST_CHECK_KEY) || 'null')
+    return o && typeof o.at === 'number' ? o : null
+  } catch {
+    return null
+  }
+}
+
+const lastCheck = ref(readLastCheck())
+
+function saveLastCheck(record) {
+  lastCheck.value = record
+  try {
+    localStorage.setItem(LAST_CHECK_KEY, JSON.stringify(record))
+  } catch {
+    /* 隐私模式写不进去：不影响自检结论本身 */
+  }
+}
+
+/* 逐文件摘要默认只铺开头几条：文件多了这一块会没完没了地长。 */
+const FILE_PREVIEW = 4
+const showAllFiles = ref(false)
+const deltaFiles = computed(() => delta.value.files || [])
+const visibleFiles = computed(() =>
+  showAllFiles.value ? deltaFiles.value : deltaFiles.value.slice(0, FILE_PREVIEW),
+)
+const hiddenFileCount = computed(() => Math.max(0, deltaFiles.value.length - FILE_PREVIEW))
 
 // 逐项扫描节奏：每项约 1 秒，10 项合计约 10.5 秒，让过程从容、不显仓促。
 const SCAN_MS = 950
@@ -130,6 +169,13 @@ async function runCheck() {
   const r = await real
   if (r.ok) {
     checkResult.value = r.data
+    saveLastCheck({
+      at: Date.now(),
+      ok: true,
+      passed: CHECK_ITEMS.length,
+      total: CHECK_ITEMS.length,
+      message: r.data?.message || '全部通过',
+    })
   } else {
     const failKey = locateFailKey(r.message)
     const failIdx = failKey
@@ -141,15 +187,18 @@ async function runCheck() {
       else s.state = 'pending'
     })
     checkResult.value = { ok: false, message: r.message }
+    saveLastCheck({
+      at: Date.now(),
+      ok: false,
+      passed: failIdx,
+      total: CHECK_ITEMS.length,
+      message: r.message,
+    })
   }
   checking.value = false
 }
 
 onMounted(() => {
-  if (!isAdmin.value) {
-    router.replace('/files')
-    return
-  }
   load()
 })
 </script>
@@ -191,6 +240,15 @@ onMounted(() => {
         </div>
       </div>
       <ProcessingFlow />
+      <!-- 管线下面是**当前真实规模**（全部取自 /api/system/status，没有编造值）：
+           管线上游画的是流程，这里补一句“这套流程现在跑了多少东西”。 -->
+      <div class="hero-scale">
+        <span class="hero-scale-item"><b class="mono">{{ status.files || 0 }}</b>份文件</span>
+        <span class="hero-scale-item"><b class="mono">{{ status.blocks || 0 }}</b>个块</span>
+        <span class="hero-scale-item"><b class="mono">{{ status.nodes || 0 }}</b>台节点</span>
+        <span class="hero-scale-item"><b class="mono">{{ status.replica_factor || 0 }}</b>份副本</span>
+        <span class="hero-scale-hint mono">LIVE · {{ status.mode }} · {{ status.transport }}</span>
+      </div>
     </section>
 
     <div class="section-heading">
@@ -237,19 +295,19 @@ onMounted(() => {
               <!-- ★ 架构变了：摘要是**逐文件**的，没有单一的全局 U / C。
                    以前这里显示 delta.U / delta.C —— 那两个字段在新架构里
                    根本不存在，于是永远显示 "—"。现在如实给条数 + 逐条列表。 -->
-              <div class="delta-item"><span class="k">向量</span><span class="v mono">{{ (delta.files || []).length }}</span><span class="hint">每份文件一条</span></div>
+              <div class="delta-item"><span class="k">向量</span><span class="v mono">{{ deltaFiles.length }}</span><span class="hint">每份文件一条</span></div>
               <div class="delta-item">
                 <span class="k">δ 指纹</span>
                 <span
                   class="v mono"
-                  :title="(delta.files || []).length === 1 ? ('U = ' + delta.files[0].U + '\nC = ' + delta.files[0].C) : ''"
-                >{{ (delta.files || []).length === 1 ? hexFp(delta.files[0].delta_fp, 16) : '每份各不相同' }}</span>
+                  :title="deltaFiles.length === 1 ? ('U = ' + deltaFiles[0].U + '\nC = ' + deltaFiles[0].C) : ''"
+                >{{ deltaFiles.length === 1 ? hexFp(deltaFiles[0].delta_fp, 16) : '每份各不相同' }}</span>
                 <span class="hint">一份文件一个值</span>
               </div>
             </div>
           </div>
           <div
-            v-for="f in (delta.files || [])"
+            v-for="f in visibleFiles"
             :key="`${f.owner}/${f.file_key}`"
             class="panel-subtitle mono"
             style="white-space: normal; margin-top: 6px"
@@ -258,6 +316,9 @@ onMounted(() => {
             {{ f.owner }} / {{ f.file_key }} · n={{ f.n }} · offset={{ f.offset }} ·
             {{ hexFp(f.delta_fp, 16) }}
           </div>
+          <button v-if="hiddenFileCount" type="button" class="more-toggle" @click="showAllFiles = !showAllFiles">
+            {{ showAllFiles ? '收起' : `展开其余 ${hiddenFileCount} 条` }}
+          </button>
         </div>
       </section>
 
@@ -306,7 +367,15 @@ onMounted(() => {
             <span class="live-mark" :class="{ 'is-scan': checking }"><i />{{ checking ? 'SCANNING' : 'ON DEMAND' }}</span>
           </div>
 
-          <el-button :loading="checking" @click="runCheck"><Icon name="refresh" :size="14" style="margin-right: 6px" />启动自检</el-button>
+          <div class="diag-actions">
+            <el-button :loading="checking" @click="runCheck"><Icon name="refresh" :size="14" style="margin-right: 6px" />启动自检</el-button>
+            <p v-if="lastCheck" class="last-check mono">
+              本机上次自检 · {{ fmtAgo(lastCheck.at) }} ·
+              <span :class="lastCheck.ok ? 'text-ok' : 'text-danger'">{{ lastCheck.ok
+                ? `全部通过 ${lastCheck.passed}/${lastCheck.total}`
+                : `未通过（${lastCheck.passed}/${lastCheck.total}）：${lastCheck.message}` }}</span>
+            </p>
+          </div>
 
           <!-- 逐项扫描：状态标识 + 扫描动效 -->
           <div v-if="checkSteps.length" class="check-list">
@@ -345,7 +414,12 @@ onMounted(() => {
               title="提示"
               :description="note"
             />
-            <StageTimeline v-if="checkResult.timings" :timings="checkResult.timings" class="mt-2" />
+            <StageTimeline
+              v-if="checkResult.timings"
+              :timings="checkResult.timings"
+              :state="checkResult.ok ? 'ok' : 'fail'"
+              class="mt-2"
+            />
           </div>
         </div>
       </section>
@@ -382,6 +456,17 @@ onMounted(() => {
 .health-pill small { color: var(--text-3); font-size: 9px; margin-left: 3px; }
 .health-dot, .live-mark i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 12%, transparent); }
 .health-pill.is-warn .health-dot { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 12%, transparent); }
+/* 管线下面那行“当前规模”：数字取自 /api/system/status，实时刷新。 */
+.hero-scale { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 26px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line); position: relative; z-index: 1; }
+.hero-scale-item { color: var(--text-2); font-size: 12px; }
+.hero-scale-item b { color: var(--text-1); font-size: 17px; font-weight: 500; margin-right: 4px; }
+.hero-scale-hint { margin-left: auto; color: var(--text-3); font-size: 9px; letter-spacing: .1em; }
+/* 逐文件摘要的展开/收起 */
+.more-toggle { align-self: flex-start; margin-top: 10px; padding: 3px 0; color: var(--accent); font: inherit; font-size: 12px; background: none; border: 0; cursor: pointer; }
+.more-toggle:hover { text-decoration: underline; }
+/* 自检按钮与“上次自检”一行 */
+.diag-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.last-check { margin: 0; color: var(--text-3); font-size: 11px; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 18px 1px 10px; }
 .section-heading-spaced { margin-top: 27px; }
 .section-heading h2 { color: var(--text-1); font-size: 16px; font-weight: 600; margin: 5px 0 0; }
@@ -392,7 +477,10 @@ onMounted(() => {
 .compact-section--full { grid-column: 1 / -1; }
 .compact-section .section-heading { margin-top: 0; min-height: 43px; }
 .compact-section > .panel { flex: 1 1 auto; min-height: 214px; box-sizing: border-box; }
-.commitment-panel, .health-panel { height: 214px; }
+/* 逐文件摘要会随文件数变长（默认只铺 4 条、可展开），所以它只保底高度、
+   不设死高度；右边的运行状态卡则是恒定的几行，保持定高两边才对齐。 */
+.commitment-panel { height: auto; min-height: 214px; }
+.health-panel { height: 214px; }
 /* 整行的面板自适应高度，向下延伸不再受固定高度限制 */
 .compact-section--full > .panel { min-height: 0; height: auto; }
 .commitment-panel .delta-row { min-height: 112px; }
@@ -613,6 +701,12 @@ onMounted(() => {
 @media (max-width: 900px) {
   .compact-sections { grid-template-columns: 1fr; }
   .compact-section > .panel, .commitment-panel, .health-panel, .key-panel, .diagnostics-panel { height: auto; min-height: 0; }
+}
+/* 大屏（≥ 1500px）：卡片不被拉得过宽，一行别拉出一百多字的长句。 */
+@media (min-width: 1500px) {
+  .dashboard { max-width: 1560px; margin-left: auto; margin-right: auto; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(216px, 1fr)); }
+  .compact-sections { gap: 22px 20px; }
 }
 @media (max-width: 560px) {
   .overview-head { flex-direction: column; }

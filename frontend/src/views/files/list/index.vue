@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 文件与块。
+ * 上传文件。
  *
  * - 上传卡：选文件 + file_key + 切法三档（自动/按块大小/按块数）+ 存到哪几台。
  * - 上传前先问 /api/plan（两档口径一起问），把候选切法摆成一张表；ok:false 显著提示。
@@ -31,6 +31,7 @@ import { autoSegmentBytes, ladderOptsFrom } from '../../../utils/split'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import LockTag from '../../../components/security/LockTag.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
+import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
@@ -59,6 +60,194 @@ const askingPlan = ref(false)
 const uploading = ref(false)
 const uploadElapsed = ref(0)
 const uploadTimings = ref(null)
+
+/* ---------------------------------------------------------------------------
+   上传过程弹框（★ 2026-10-12 用户要的：过程要看得见、还要讲得清）
+   ---------------------------------------------------------------------------
+   `key` 与后端 `with stage("…")` 的名字对齐（见 core/timing.py）：对得上的
+   步骤会显示**真实毫秒**，对不上的就不显示 —— 宁可不显示，不编数字。
+   ★ 只讲“这一步在做什么、为什么可信”，**不摆任何中间值**（U/C、分量、密钥材料）。
+--------------------------------------------------------------------------- */
+const UPLOAD_STEPS = [
+  {
+    key: '切块（split_segments）',
+    name: '切块',
+    en: 'CHUNK',
+    desc: '明文按段大小切开，每块独立处理；块号从这一刻起固定（人看是第 1 块起）。',
+  },
+  {
+    key: '生成密钥与 IV',
+    name: '生成块密钥',
+    en: 'KEYGEN',
+    desc: '每一块一把随机块密钥（SM4），块与块不共用 —— 改一块不会牵连别的块。',
+  },
+  {
+    key: '逐块加密（SM4）',
+    name: '逐块加密',
+    en: 'ENCRYPT',
+    desc: 'SM4 把每块密文化。协调者（服务端）从这一步之后也看不到明文，拿到的只是密文。',
+  },
+  {
+    key: '封装块密钥（ECIES）',
+    name: '封装块密钥',
+    en: 'WRAP',
+    desc: '每把块密钥用「你自己的」SM2 公钥封一次再进库 —— 所以除了你（以及拿到你私钥的人），谁都解不开它。',
+  },
+  {
+    key: '算向量分量（SM3）',
+    name: '算分量',
+    en: 'DIGEST',
+    desc: '每块密文过一遍 SM3，得到它的公开分量 —— 这一块的指纹，由密文唯一决定，服务端改不了。',
+  },
+  {
+    key: '承诺（push_update）',
+    name: '形成承诺',
+    en: 'COMMIT',
+    desc: '分量按块身份映射到素数并聚合，得到 δ = (U, C)：两个群元素，不管文件多大都是这么点。',
+  },
+  {
+    key: '分发到节点',
+    name: '分散存放',
+    en: 'REPLICATE',
+    desc: '密文按副本铺到各节点。节点手里只有密文与块登记，没有能开它的钥匙。',
+  },
+  {
+    key: '落库（新块与块登记）',
+    name: '写入块账目',
+    en: 'PERSIST',
+    desc: '每一块的位置、分量、IV、明文长度、以及封装好的块密钥各记一行 —— 以后改块、解密、取证都从这份账目出发。',
+  },
+  {
+    key: '落库（上传文件登记）',
+    name: '登记入库',
+    en: 'PERSIST',
+    desc: '文件与块登记写进库。从此任何一次验证都能只用 δ 与块编号独立复算，不用问服务端“是不是真的”。',
+  },
+]
+
+const processOpen = ref(false)
+const lastUpload = ref(null)
+/** 这件事还在进行中（请求没回来）—— 弹框停在最后一步等它。 */
+const processPending = ref(false)
+/** 本次要演的那串步骤（把预估耗时与真实中间量填进去）。 */
+const uploadSteps = ref([])
+
+/* ---------------------------------------------------------------------------
+   过程动画的节奏校准（★ 用户 2026-10-12：动画要跟着实际过程走）
+   ---------------------------------------------------------------------------
+   动画与请求**同时开始**，所以此刻拿不到这次的真实耗时 —— 用**上一次**的
+   真实值当预估（同一系统、同一批节点，各阶段比例很稳），每步至少 0.5 秒。
+   请求回来后，把真实耗时与真实中间量填进同一个框里（不重开、不再演第二遍）。
+--------------------------------------------------------------------------- */
+const CALIB_KEY = 'vds_up_calib_v1'
+
+function readCalib() {
+  try {
+    return JSON.parse(localStorage.getItem(CALIB_KEY) || '{}') || {}
+  } catch {
+    return {}
+  }
+}
+
+function buildUploadSteps() {
+  const calib = readCalib()
+  return UPLOAD_STEPS.map((s) => ({ ...s, estMs: Number(calib[s.key]) || 0, facts: [] }))
+}
+
+function saveCalib(timings) {
+  const m = {}
+  for (const st of timings?.stages || []) m[st.stage] = st.ms
+  try {
+    localStorage.setItem(CALIB_KEY, JSON.stringify(m))
+  } catch {
+    /* 隐私模式：不影响上传本身 */
+  }
+}
+
+/** 大十进制分量 → 十六进制前 16 位（给人看的中间量，不参与任何计算）。 */
+function decHead16(dec) {
+  try {
+    return `0x${BigInt(String(dec)).toString(16).padStart(16, '0').slice(0, 16)}…`
+  } catch {
+    return '—'
+  }
+}
+
+/**
+ * 上传回来之后，把每一步的**真实中间量**填进去。
+ *
+ * ★ 全部来自刚拿到的响应、文件详情与系统状态，一个数字都不编：
+ *   段大小/段数/总字节、每块密文长度与它落在哪几台、第一两块的 SM3 分量、
+ *   δ 指纹与 C/U 的头几位、入库后的文件号与版本与位置段。
+ *   （显示的都是**公开量**：分量是密文的 SM3，密钥与明文一概不出现。）
+ */
+function enrichUploadSteps(data, detail, status) {
+  // ★ 上传响应里文件字段就在**顶层**（实测：`data.file` 是 undefined，
+  //   于是中间量一直填不上）；两份都兼容一下。
+  const file = data?.file || data?.uploaded || data || {}
+  const layout = detail?.layout || []
+  const mine = (status?.delta?.files || []).find(
+    (f) => f.owner === file.owner && f.file_key === file.file_key,
+  )
+  const facts = {
+    '切块（split_segments）': [
+      { k: '段大小', v: `${file.segment_bytes} B` },
+      { k: '段数', v: `${file.block_count} 块` },
+      { k: '总字节', v: fmtBytes(file.total_bytes) },
+    ],
+    '生成密钥与 IV': [
+      { k: '套数', v: `${file.block_count} 套（每块 1 把 SM4 密钥 + 1 个 128 位 IV）` },
+      { k: '去向', v: '协调者只留“用你公钥封好的”那份密文，不留明文密钥' },
+    ],
+    '逐块加密（SM4）': [
+      { k: '每块密文', v: `${layout[0]?.plain_len ?? file.segment_bytes} B（与明文等长）` },
+      { k: '第 1 块落在', v: (layout[0]?.replicas || []).join(' · ') || '—' },
+    ],
+    '封装块密钥（ECIES）': [
+      { k: '封装次数', v: `${file.block_count} 次（每块各用你的公钥封一次）` },
+      { k: '产物', v: 'blocks.key_ct（只能由你的私钥解开，服务端解不开）' },
+    ],
+    '算向量分量（SM3）': layout.slice(0, 2).map((b, i) => ({
+      k: `第 ${i + 1} 块分量`,
+      v: `SM3(密文) = ${decHead16(b.element)}`,
+    })),
+    '承诺（push_update）': [
+      { k: 'δ 指纹', v: file.delta_fp || '—' },
+      ...(mine ? [{ k: 'C 头 16 位', v: decHead16(mine.C) }] : []),
+      ...(mine ? [{ k: 'U 头 16 位', v: decHead16(mine.U) }] : []),
+    ],
+    '分发到节点': layout.slice(0, 3).map((b, i) => ({
+      k: `第 ${i + 1} 块`,
+      v: (b.replicas || []).join(' · ') || '—',
+    })),
+    '落库（新块与块登记）': [
+      { k: '写入行数', v: `${file.block_count} 行块账目` },
+      { k: '每行内容', v: '位置 / 分量 / IV / 明文长度 / 块密钥密文' },
+    ],
+    '落库（上传文件登记）': [
+      { k: '文件', v: `#${file.id} ${file.owner}/${file.file_key}` },
+      { k: '版本', v: `v${file.version}` },
+      {
+        k: '位置段',
+        v: file.indices?.length
+          ? `第 ${file.indices[0] + 1} 起，共 ${file.indices.length} 块`
+          : '—',
+      },
+    ],
+  }
+  uploadSteps.value = uploadSteps.value.map((s) => ({ ...s, facts: facts[s.key] || [] }))
+}
+
+const uploadFacts = computed(() => {
+  const f = lastUpload.value?.file
+  if (!f) return []
+  return [
+    { k: '文件', v: `${f.owner} / ${f.file_key}` },
+    { k: '大小', v: fmtBytes(f.total_bytes) },
+    { k: '块数', v: String(f.block_count) },
+    { k: '段大小', v: `${f.segment_bytes} B` },
+  ]
+})
 //: 行级「入池」的忙碌状态与它的分步耗时（与上传那条共用同一个时间线组件）。
 const poolBusy = ref(false)
 const poolTimings = ref(null)
@@ -388,17 +577,40 @@ async function doUpload() {
   uploadTimings.value = null
   uploadElapsed.value = 0
   elapsedTimer = setInterval(() => (uploadElapsed.value += 100), 100)
+  // ★ 过程弹框**现在**就开、动画跟着请求一起走（而不是传完再演一遍）。
+  lastUpload.value = null
+  uploadSteps.value = buildUploadSteps()
+  processPending.value = true
+  processOpen.value = true
   try {
     const { data } = await filesApi.upload(buildFormData())
     uploadTimings.value = data.timings
+    saveCalib(data.timings)
+    lastUpload.value = data
+    // 真实中间量：文件详情（分量/长度/副本）+ 系统状态（C / U）。
+    // 拿不到就不填 —— 宁可少几行，不编数字。
+    const fid = (data?.file || data || {}).id
+    try {
+      const [{ data: det }, { data: st }] = await Promise.all([
+        filesApi.detail(fid, true),
+        systemApi.status(),
+      ])
+      enrichUploadSteps(data, det, st)
+    } catch (e) {
+      // 中间量拿不到也不影响上传本身，但**不静默**：控制台留一句，方便查。
+      console.warn('[上传过程] 中间量没填上：', e?.message || e)
+    }
+    processPending.value = false
     ElMessage.success('上传完成')
     resetUpload()
     await load()
   } catch {
-    // 错误已由拦截器弹出（含 503 写推失败、413 超限等）
+    // 出错就别把过程框留在屏幕上（错误已由拦截器原样弹出：503 写推失败、413 超限等）
+    processOpen.value = false
   } finally {
     clearInterval(elapsedTimer)
     uploading.value = false
+    processPending.value = false
   }
 }
 
@@ -681,7 +893,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="文件与块" subtitle="所有人可验证；持有者可解密" />
+    <PageHeader title="上传文件" subtitle="所有人可验证；持有者可解密" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>
@@ -882,6 +1094,17 @@ onMounted(load)
         <StageTimeline v-if="poolTimings" :timings="poolTimings" class="mt-3" />
       </div>
     </template>
+
+    <!-- 上传过程：与请求**同时**开演，请求回来再把真实耗时与中间量填进去。 -->
+    <ProcessDialog
+      v-model="processOpen"
+      title="这次上传走了哪几步"
+      subtitle="动画跟着请求一起走：每步至少 0.5 秒，耗时长的步骤也会长一点。"
+      :steps="uploadSteps"
+      :timings="lastUpload?.timings"
+      :facts="uploadFacts"
+      :pending="processPending"
+    />
   </div>
 </template>
 

@@ -451,3 +451,52 @@ class ReplayRow(Base):
     #: 存下来那一刻的全局位置（只供审计/显示）。
     global_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     armed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class BlockHistoryRow(Base):
+    """块的**上一版本体** —— 每块只留一份，新的覆盖旧的。
+
+    ★ 它是什么（与 ``replay_blocks`` 的区别要先说清）：
+
+      * ``replay_blocks`` 是**演示开关**：打开才存，关掉就删，作用是让
+        ``/cipher`` 对那一块交回旧数据；
+      * 这张表是**长期的版本留存**：**改块/清零之前自动**把这一块当时的
+        **整套本体**（密文 + IV + 分量 + 块密钥密文 + 明文长度）抄一份。
+
+    ★ 为什么存的是**本体**而不是哈希：哈希只能证明“你手里这份是不是原来那份”，
+      它**找不回原文**。用户要的是“节点被销毁之后还能把上一版拿回来、重新承诺、
+      再验证通过”——那必须有密文本体。这不是快照：只留**当前 + 上一版**两份。
+
+    ★ 存的东西必须**成套**（少一样就变成另一种错误）：
+      密文对了但 ``key_ct`` 不对 ⇒ 所有者解不开；``element`` 不对 ⇒
+      “声称的分量配不上密文”。所以这一行是**整块**，不是片段。
+
+    ★ 它由协调者保存。算不算破“服务端无私钥”？不算：这里装的是**密文**，
+      没有块密钥就解不开（块密钥仍然只以“用所有者公钥封好的密文”形式存在），
+      所以协调者多了的是一份**它本来就存着的密文**的冗余，不是明文。
+    """
+
+    __tablename__ = "block_history"
+    __table_args__ = (
+        UniqueConstraint("owner", "file_key", "block_idx", name="uq_block_history_pos"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    block_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 这份本体属于哪一版（文件的 version）。回退时用它写审计（“回退自 v4”）。
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 这一版密文（十六进制）。
+    ciphertext_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    iv_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 那一版的分量（十进制字符串）——回退时要重新承诺，用它才自洽。
+    element: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 块密钥密文（JSON 文本），与 ``blocks.key_ct`` 同形。
+    key_ct: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 那一版的明文长度（回退要连长度一起还回去，否则 total_bytes 会错）。
+    plain_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    global_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 这份本体是什么时候被“换下来”的（人类可读）。
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

@@ -9,7 +9,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { devicesApi } from '../../../api/devices'
-import { nodeSelfCheck, span } from '../../../utils/format'
+import { nodeSelfCheck, span, humanList } from '../../../utils/format'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
@@ -75,7 +75,7 @@ onMounted(load)
           <div class="kv-row"><span class="k">n（对账）</span><span class="mono">{{ node.unreachable ? '—' : node.n }}</span></div>
           <div class="kv-row"><span class="k">持有块数</span><span class="mono">{{ node.held }}</span></div>
           <div class="kv-row"><span class="k">跨度</span><span class="mono">{{ node.span }}</span></div>
-          <div class="kv-row"><span class="k">全部下标</span><span class="mono">{{ (node.indices || []).join(', ') || '—' }}</span></div>
+          <div class="kv-row"><span class="k">全部编号</span><span class="mono">{{ humanList(node.indices).join(', ') || '—' }}</span></div>
           <div class="kv-row"><span class="k">一致性</span><span :class="node.valid ? 'text-ok' : 'text-danger'">{{ node.valid ? '一致' : '不一致' }}</span></div>
         </div>
       </div>

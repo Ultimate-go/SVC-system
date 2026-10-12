@@ -401,6 +401,22 @@ class VectorStore:
         """
         return self.registry.total_blocks()
 
+    @property
+    def indices(self) -> tuple[int, ...]:
+        """当前**在用**的全局下标，升序。
+
+        ★★ 别用 ``range(self.n)`` 代替它 —— 那是这套系统里最容易踩的一处：
+        :attr:`n` 是“**块数**”（各文件块数之和），而全局下标是**位置号**。
+        段一旦被废弃（删文件、截断留下的空洞）就永不回收，
+        于是 ``next_offset`` 会大于 ``n``，位置号里有洞。
+
+        拿 ``range(n)`` 当下标会遇到洞 ⇒ :meth:`replicas_of` 抛
+        ``KeyError``（表现为“算一次重新分配就 500”）。
+        ``_holder`` 就是“哪些位置还在用”这件事本身（``_reload`` 的不变式
+        逐字校验它与登记表一致），所以从它取键最省事也最不容易错。
+        """
+        return tuple(sorted(self._holder))
+
     def holder_of(self, global_index: int) -> str:
         try:
             return self._holder[global_index]
@@ -787,6 +803,117 @@ class VectorStore:
         self._pending = None
         self._absorb_pushed(context)
         return iv_new, len(plaintext)
+
+    def restore_block(
+        self,
+        owner: str,
+        file_key: str,
+        block_idx: int,
+        *,
+        ciphertext: bytes,
+        iv: bytes,
+        plain_len: int,
+        element: int,
+    ) -> tuple[bytes, int]:
+        r"""把某一块换回它**上一版的本体**（密文一并换回），并让全网跟上新的分量。
+
+        与 :meth:`modify` 的唯一区别是：新密文**不是算出来的，是拿回来的**。
+        所以这里**不生成密钥、也不重新封装** —— 复的那一版连同它那把块密钥
+        （``key_ct``，由调用方写回块账目）一起回到原位，所有者用同一把私钥就解得开。
+
+        ★ 为什么要重新承诺：回退后这一块的分量与承诺对不上旧基准（``C`` 里
+          是旧值），不重算的话“数据换回去了、验证却不过”。这里走的就是
+          :func:`push_update` 那条**增量更新**路 —— 只动``K`` 上的分量，
+          其余块一个字不碰（与改块同构）。
+
+        .. important::
+
+           调用方必须保证 ``element == vector_element(ciphertext)``（本方法会校）。
+           这两个值来自同一个历史行，但校验一次很便宜，而放过一次就会得到
+           “承诺说 A、密文说 B”的分裂状态 —— 那是所有故障里最难归因的一种。
+
+        :returns: ``(新 IV, 明文长度)``，与 :meth:`modify` 同形。
+        :raises KeyError: 文件不存在
+        :raises IndexError: 块号越界
+        :raises ValueError: 空块、超单块上限，或本体与分量对不上
+        """
+        key = (owner, file_key)
+        rec = self.files.get(key)
+        if rec is None:
+            raise KeyError(f"文件 {owner}/{file_key} 不存在（先上传再回退）")
+        n_blocks = len(rec.indices)
+        if not 0 <= block_idx < n_blocks:
+            raise IndexError(
+                f"块号 {block_idx} 越界：{owner}/{file_key} 只有 {n_blocks} 块"
+            )
+        if not ciphertext:
+            raise ValueError("空块没有意义")
+        if len(ciphertext) > rec.segment_bytes:
+            raise ValueError(
+                f"留存的本体有 {len(ciphertext)} 字节，超过单块上限 {rec.segment_bytes}"
+            )
+        with stage("分量校验（SM3）"):
+            v_new = int(element)
+            if vector_element(ciphertext) != v_new:
+                raise ValueError(
+                    "留存的本体与它记的分量对不上 —— 拒绝用一份自相矛盾的历史回退"
+                )
+
+        gidx = rec.indices[block_idx]
+        iv_new = bytes(iv)
+        delta_old = self.delta_of(owner, file_key)
+        op_delta = UpdateDelta(op="mod", K=(block_idx,), F_new=(v_new,))
+        with stage("承诺（push_update）"):
+            pushed = push_update(
+                self.session,
+                delta_old,
+                _full_holder(self.session, delta_old, self._vals_of(key)),
+                op_delta,
+                {block_idx: self.values[gidx]},
+            )
+        holders = self.replicas_of(gidx)
+
+        def _patch_record() -> None:
+            rec.ivs[block_idx] = iv_new
+            rec.plain_lengths[block_idx] = int(plain_len)
+            rec.total_bytes = sum(rec.plain_lengths)
+
+        context = {
+            "kind": "mod",
+            "file_id": key,
+            "delta_new": pushed.delta,
+            "per_index": {gidx: tuple(holders)},
+            "K": (gidx,),
+            "elements": (v_new,),
+            "on_success": _patch_record,
+            "restore": {
+                "kind": "iv",
+                "block_idx": int(block_idx),
+                "iv": iv_new.hex(),
+                "plain_len": int(plain_len),
+            },
+        }
+
+        try:
+            with stage("分发到节点"):
+                self.transport.apply_update(
+                    delta_new=pushed.delta,
+                    op_delta=op_delta,
+                    witness=pushed.witness,
+                    blobs={nid: {gidx: ciphertext} for nid in holders},
+                )
+        except TransportError as exc:
+            # 与 modify / append 同一处理：一台没跟上，全网就不一致；
+            # 而回退更不能“重来一次”（重来还是同一份旧密文，但已经跟上的
+            # 节点会因为它与当前值相同而拒绝重复应用）。所以现场留住、只补推。
+            self._pending = (
+                {"error": exc, **context} if getattr(exc, "payloads", None) else None
+            )
+            raise
+
+        self._pending = None
+        self._absorb_pushed(context)
+        return iv_new, int(plain_len)
 
     def append(
         self,
@@ -1269,7 +1396,7 @@ class VectorStore:
         return K, doomed
 
     def rename_owner(self, owner: str, new_owner: str) -> int:
-        """把 ``owner`` 名下所有文件与块改挂到 ``new_owner``（删号专用）。
+        """把 ``owner`` 名下所有上传文件改挂到 ``new_owner``（删号专用）。
 
         只动"这是谁的东西"：**一个下标都不动，一个代数运算都不做** ——
         所以向量、承诺、节点手里的份额、摘要 ``δ`` 全都原样有效，

@@ -207,6 +207,22 @@ export const usePoolStore = defineStore('pool', {
       this._persist()
     },
 
+    /**
+     * 直选（划选用）：把某张卡**明着**置为选中 / 未选中。
+     *
+     * ★ 拖动划选不能用 `toggle`：指针可以在同一张卡上反复进出
+     *   （鼠标抖一下、卡片自己重排），`toggle` 会跟着来回翻，
+     *   松手时选中的是“偶数次经过”而不是“划过的”。
+     *   所以拖动时决定一次方向（选中 or 取消），之后只往那个方向置。
+     */
+    setSelected(id, on) {
+      const i = this.selectedIds.indexOf(id)
+      if (on && i < 0) this.selectedIds.push(id)
+      else if (!on && i >= 0) this.selectedIds.splice(i, 1)
+      else return
+      this._persist()
+    },
+
     clearSelection() {
       this.selectedIds = []
       this._persist()

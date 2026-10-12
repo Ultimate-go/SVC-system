@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator, model
 
 __all__ = [
     "LoginIn",
+    "RegisterIn",
     "UserCreateIn",
     "UserPatchIn",
     "QueryIn",
@@ -101,6 +102,20 @@ class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
     server_key: bool = False
+
+
+class RegisterIn(BaseModel):
+    """普通用户**自助**注册（公开通道）。
+
+    ★ 这里**没有** ``role`` 字段 —— 自助注册永远只产生 ``user``，
+       管理员只能由已有管理员在 ``/api/admin/users`` 创建。
+       即便前端伪造 ``role`` 字段，后端也只认写死的 ``"user"``，
+       让"注册即管理员"这条路天然不存在。
+    """
+
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=256)
+    display_name: str = Field(default="", max_length=64)
 
 
 class UserCreateIn(BaseModel):
@@ -282,6 +297,19 @@ class ReplayIn(BaseModel):
 
     block_idx: int = Field(ge=0, le=MAX_INDICES)
     on: bool = True
+
+
+class RestoreIn(BaseModel):
+    r"""**回退到上一版**：把若干块换成它们上一版的本体，并重新承诺。
+
+    :param block_indices: 要回退哪几块（**这份文件里的第几块**，0 起算）。
+        缺省/``None`` = 所有**留过上一版**的块。
+
+    ★ 回退**产生新的版本号**（只增不减），不是把版本号改回去 ——
+      所以它同样进审计、同样能再回退（"当前"与"上一版"会一起往后滚）。
+    """
+
+    block_indices: list[int] | None = Field(default=None, max_length=MAX_INDICES)
 
 
 class DisaggIn(BaseModel):

@@ -63,15 +63,42 @@ export function fmtBytes(n) {
   return `${(v / 1024 / 1024).toFixed(2)} MB`
 }
 
-export function fmtIndices(indices) {
-  if (!indices || !indices.length) return '—'
-  return indices.join(', ')
+/* ---------------------------------------------------------------------------
+   坐标口径（2026-10-12 定，全项目统一）：
+     · **机器读的** —— API 参数、数据库、sessionStorage、后端内部：一律 **0 起**；
+     · **人读的**   —— 界面显示、输入框、报错文案：一律 **1 起**。
+   所以显示时 +1、解析输入时 -1；这两个方向的换算只发生在本文件与
+   `utils/validate.js` 里，别的地方不要再自己 `+1`（否则会出现两套口径）。
+--------------------------------------------------------------------------- */
+
+/** 内部下标（0 起）→ 给人看的编号（1 起）。 */
+export function humanIdx(i) {
+  return Number(i) + 1
 }
 
-/** 把下标集合压成紧凑区间描述，如 0-3, 8, 16-19（与后端 span() 一致）。 */
+/** 内部下标数组 → 给人看的编号数组。 */
+export function humanList(arr) {
+  return (arr || []).map(humanIdx)
+}
+
+/** 内部下标 → 「第 N 块」。 */
+export function humanBlock(i) {
+  return `第 ${humanIdx(i)} 块`
+}
+
+/** 下标集合 → 给人看的编号串（如 `1, 2, 5`）。 */
+export function fmtIndices(indices) {
+  if (!indices || !indices.length) return '—'
+  return humanList(indices).join(', ')
+}
+
+/**
+ * 把下标集合压成紧凑区间描述，**输出的是给人看的编号（1 起）**。
+ * 例：内部 `[0,1,2,4]` → `1-3, 5`。
+ */
 export function span(indices) {
   if (!indices || !indices.length) return '—'
-  const idx = [...indices].sort((a, b) => a - b)
+  const idx = humanList(indices).sort((a, b) => a - b)
   const parts = []
   let lo = idx[0]
   let prev = idx[0]

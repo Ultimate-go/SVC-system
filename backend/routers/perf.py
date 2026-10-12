@@ -9,16 +9,16 @@
 * 延迟随时间的变化序列（趋势图数据源）；
 * 当前规模（块数 / 文件数 / 节点数）。
 
-★ 只读、不写审计。**权限口径与界面保持一致**（安全审计 I5）：
-  侧栏把它放在「管理」组里（``adminOnly``），而路由与后端以前都没拦 ——
-  于是普通用户手输 ``/perf`` 就能进去，是典型的“只隐藏不设防”。
-  现在三层一致：**都要管理员**。
+★ 只读、不写审计。**权限口径与界面保持一致**：侧栏（核心组）、路由与后端
+  三层一起决定“谁能看”。
 
   .. note::
 
-     **收紧的理由是“一致”，不是“数据敏感”。** 这份画像不涉及任何业务数据
-     （不泄漏谁的文件、也不含明文），真要放开的话应该去改侧栏、
-     而不是只补一半留个夹生饭。
+     **2026-10-12 起对全体用户开放**（原先仅管理员）。放开是安全的：
+     这份画像只含延迟 / 吞吐 / 规模，不涉及任何业务数据
+     （不泄漏谁的文件、也不含明文）。当时收紧的理由是“三层一致”而非
+     “数据敏感”，所以放开也必须三层一起放 —— 只改一处就会退回
+     “只隐藏不设防”。
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from .. import metrics
-from ..deps import get_manager, require_admin
+from ..deps import current_user, get_manager
 from ..manager import StoreManager
 from ..models import UserRow
 
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/api/perf", tags=["perf"])
 
 @router.get("/summary")
 def summary(
-    _: UserRow = Depends(require_admin),
+    _: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
 ):
     """返回性能画像：延迟分位数、吞吐、趋势序列、当前规模。"""

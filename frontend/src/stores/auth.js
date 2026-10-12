@@ -80,6 +80,27 @@ export const useAuthStore = defineStore('auth', {
       this.setUser(data)
       return data
     },
+    /**
+     * 自助注册普通用户。
+     *
+     * 调 ``/api/auth/register``（后端强制 role=user，绝不会拿到管理员）。
+     * 成功后**自动登录**：这样私钥会在浏览器本地用注册口令解封出来，
+     * 进个人中心就能直接看到自己的 SM2 私钥（无需再单独登录一次）。
+     *
+     * @param {string} username
+     * @param {string} password
+     * @param {string} [displayName]
+     */
+    async register(username, password, displayName = '', options = {}) {
+      await api.post('/api/auth/register', { username, password, display_name: displayName })
+      // 注册成功 → 直接拿同一套口令登录，顺便把私钥解到本机内存。
+      try {
+        await this.login(username, password, options)
+      } catch {
+        // 注册本身已成功（账号已落库）。登录若失败也不影响账号创建，
+        // 让登录页提示“注册成功，请手动登录”即可。
+      }
+    },
     async logout() {
       const { data } = await api.post('/api/auth/logout')
       this.setToken('')

@@ -38,7 +38,7 @@ class PlanIn(BaseModel):
     ``prefer`` 只有两个取值，对应两种真实需求：
 
     * ``fewest_blocks``（默认）：块数最少 —— 上传与验证都最快，也最省全局位置；
-    * ``finer_updates``：块更小 —— **改一块**的粒度更细（代价是块多、更慢）。
+    * ``finer_updates``：块更小 —— **分块更新**的粒度更细（代价是块多、更慢）。
     """
 
     size: int = Field(gt=0, le=1 << 40, description="文件字节数（明文）")

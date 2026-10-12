@@ -594,12 +594,18 @@ def set_audit_remark(
 
 @router.post("/check")
 def run_check(
-    admin: UserRow = Depends(require_admin),
+    actor: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
     """跑一遍 ``store.check()`` —— 登记表一致、每台服务器视图合法、
     声称与实存一致、**增量摘要 == 一次性承诺**。
+
+    ★ 2026-10-12 起对**任何登录用户**开放（原先仅管理员）：总览页已对全体
+    用户开放，而页面上的「启动自检」调的就是这里。它只读、不改数据；代价随
+    库的规模增长（要对每个文件做一次一次性承诺），因此它是一个**偏重**的只读
+    接口 —— 将来若要防滥用，应在这里加频率限制，而不是把它收回去。
+    ``actor`` 记的是发起者本人（谁按的按钮就记谁）。
 
     ``ok=True`` 之外还可能带 ``notes``：那是**提示**，不是错误。
     目前只有一种 —— 缩容保存之后、重启之前，被摘掉的机器还会留着旧副本
@@ -609,9 +615,9 @@ def run_check(
         with collect() as sw:
             notes = mgr.check()
     except Exception as exc:  # noqa: BLE001 - 自检失败要把原因原样给出
-        audit(db, admin.username, "check", ok=False, detail=str(exc))
+        audit(db, actor.username, "check", ok=False, detail=str(exc))
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"自检失败：{exc}") from exc
-    audit(db, admin.username, "check", ok=True, detail="；".join(notes))
+    audit(db, actor.username, "check", ok=True, detail="；".join(notes))
     metrics.record("check", sw.total_ms(), sw.rows())
     return {
         "ok": True,

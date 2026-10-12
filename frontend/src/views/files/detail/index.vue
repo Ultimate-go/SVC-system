@@ -1,6 +1,15 @@
 <script setup>
 /**
- * 文件详情。
+ * 文件详情 / 更新文件（★ 2026-10-12 拆页面：同一个组件两种形态，靠路由 meta 区分）。
+ *
+ *   · files-detail        → 「文件详情」：只读 —— 摘要与参数 / 封装过程 /
+ *                            块分布矩阵 / 块明细；
+ *   · files-update-detail → 「更新文件」：在上面的基础上多出改块 / 清零 /
+ *                            追加 / 截断 / 回滚演示 / 解密验证。
+ *
+ * ★ 为什么复用同一个组件而不是拷一份：这些能力读的是**同一份状态**
+ *   （file / layout / δ 本地锚），拆成两个文件就会各拉一次详情、各维护一份锚 ——
+ *   迟早分叉。用一个形态开关，改动只有一份代码。
  *
  * - 文件元信息 + 版本 + delta_n / delta_fp。
  * - 块分布矩阵（layout[].replicas 标主/副本）。
@@ -19,7 +28,10 @@ import { useThemeStore } from '../../../stores/theme'
 import {
   span,
   fmtBytes,
+  fmtTime,
   hexFp,
+  humanIdx,
+  humanList,
   decodeBlockHex,
   hasBadBytes,
   estimateCipherPackBytes,
@@ -44,6 +56,19 @@ const auth = useAuthStore()
 const theme = useThemeStore()
 
 const id = computed(() => route.params.id)
+
+/** 更新形态（改块 / 追加 / 截断 / 回滚演示 / 解密验证）开关，见文件头的说明。 */
+const showOps = computed(() => route.meta?.ops === true)
+/** 返回按钮的去处：从哪进来就回哪去。 */
+const backTo = computed(() => (showOps.value ? '/files/update' : '/files'))
+const pageTitle = computed(() =>
+  file.value
+    ? `${file.value.owner} / ${file.value.file_key}`
+    : showOps.value
+      ? '更新文件'
+      : '文件详情',
+)
+
 const loading = ref(false)
 const error = ref('')
 const file = ref(null)
@@ -83,6 +108,26 @@ const activeOp = ref('modify')
 const modifyForm = reactive({ blockIdx: 0, text: '' })
 const appendText = ref('')
 const dropBlocks = ref(1)
+
+/* ---------------------------------------------------------------------------
+   块号的「输入框口径」（★ 2026-10-12，全项目统一）
+   ---------------------------------------------------------------------------
+   内部（API / δ / 锚）一律 **0 起**；界面上给人看的、给人填的一律 **1 起**。
+   所以输入框要一个代理：读到界面上是 `idx + 1`，写回内部是 `值 - 1`。
+   换算只在这一层做，下面所有业务代码继续用 0 起的 modifyForm.blockIdx。
+--------------------------------------------------------------------------- */
+const blockNoInput = computed({
+  get: () => humanIdx(modifyForm.blockIdx),
+  set: (v) => {
+    modifyForm.blockIdx = Math.max(0, Number(v) - 1)
+  },
+})
+const replayNoInput = computed({
+  get: () => humanIdx(replayIdx.value),
+  set: (v) => {
+    replayIdx.value = Math.max(0, Number(v) - 1)
+  },
+})
 
 const writeRunning = ref(false)
 const writeTimings = ref(null)
@@ -250,10 +295,68 @@ async function load() {
     file.value = f
     nodes.value = n
     if (f.layout?.length) modifyForm.blockIdx = f.layout[0].block_idx
+    // 回退面板要用它 —— 只在「更新文件」形态下拉（详情页不显示这块）。
+    await loadHistory()
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   回退到上一版（★ 2026-10-12 条目 6）
+   ---------------------------------------------------------------------------
+   改块/清零**之前**，后端会自动把那一块当时的整套本体留一份（每块只留一份 =
+   当前 + 上一版）。这里只做两件事：把“哪几块能回退”列出来，以及按一下回退。
+   ★ 界面上不重复后端的话术：没有留存时就说“还没留过上一版”，不假装能回退。
+--------------------------------------------------------------------------- */
+const history = ref([])
+const historyLoading = ref(false)
+const restoring = ref(false)
+const restoreResult = ref(null)
+
+async function loadHistory() {
+  if (!showOps.value) {
+    history.value = []
+    return
+  }
+  historyLoading.value = true
+  try {
+    const { data } = await filesApi.history(id.value)
+    history.value = data?.blocks || []
+  } catch {
+    // 拿不到历史不影响别的操作 —— 不当成整页错误
+    history.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function doRestore() {
+  const blocks = history.value.map((h) => humanIdx(h.block_idx))
+  try {
+    await ElMessageBox.confirm(
+      `把第 ${blocks.join('、')} 块换回它们上一版的本体，并重新计算承诺。\n\n` +
+        '回退会产生新的版本号（不是把版本号改回去），并记一条审计。\n' +
+        '当前这一版会被留成新的“上一版”，所以回退本身也可以再回退。',
+      '回退到上一版',
+      { type: 'warning', confirmButtonText: '回退', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  restoring.value = true
+  restoreResult.value = null
+  try {
+    const { data } = await filesApi.restore(id.value, null)
+    restoreResult.value = data
+    ElMessage.success(`已回退 ${data.count} 块，现在是第 ${data.version} 版（已重新承诺）`)
+    await load()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '回退失败')
+  } finally {
+    restoring.value = false
   }
 }
 
@@ -272,7 +375,7 @@ async function doModify() {
     //   让下一次解密变成"重新见证"，而不是默默把新 δ 收下。
     dropDeltaAnchor(id.value)
     oldInfo.value = null
-    ElMessage.success(`已改第 ${idx} 块，现在是第 ${data.version} 版（本地锚已更新）`)
+    ElMessage.success(`已改第 ${humanIdx(idx)} 块，现在是第 ${data.version} 版（本地锚已更新）`)
     await load()
   } catch {
   } finally {
@@ -298,7 +401,7 @@ async function doZero() {
   const len = zeroTarget.value?.plain_len
   try {
     await ElMessageBox.confirm(
-      `第 ${idx} 块内容将替换为等长全 0 字节${len ? `（${len} 字节）` : ''}。\n\n` +
+      `第 ${humanIdx(idx)} 块内容将替换为等长全 0 字节${len ? `（${len} 字节）` : ''}。\n\n` +
         '块号、位置与总块数不变，完整性校验仍可通过。\n' +
         '块密钥将重新封装，长度保持不变。\n\n原内容不可恢复，版本号 +1。',
       '清零这一块',
@@ -318,7 +421,7 @@ async function doZero() {
     dropDeltaAnchor(id.value)
     oldInfo.value = null
     ElMessage.success(
-      `已清零第 ${idx} 块（${data.zeroed?.bytes ?? '?'} 字节全 0，长度不变），现在是第 ${data.version} 版`,
+      `已清零第 ${humanIdx(idx)} 块（${data.zeroed?.bytes ?? '?'} 字节全 0，长度不变），现在是第 ${data.version} 版`,
     )
     await load()
   } catch {
@@ -477,7 +580,7 @@ async function doDecrypt() {
       if (rep.length) {
         ElMessage.error({
           message:
-            `服务器交回了第 ${rep.join('、')} 块的「旧版本」（改块前那一版）—— ` +
+            `服务器交回了第 ${humanList(rep).join('、')} 块的「旧版本」（改块前那一版）—— ` +
             '本地验证因此不通过。这是「回滚」，不是数据被改坏。',
           duration: 10000,
           showClose: true,
@@ -506,16 +609,32 @@ const replayArmed = ref(null) // null = 没打开；数字 = 已对这块打开
 const replayBusy = ref(false)
 
 async function toggleReplay() {
+  const on = replayArmed.value === null
+  // ★ 打开前问一次（与清零 / 截断同一手法）：这是**故意让验证不通过**的开关，
+  //   而且是发生在服务端的真改动（它真的会把旧版本交回）。
+  if (on) {
+    try {
+      await ElMessageBox.confirm(
+        `接下来服务器会对第 ${humanIdx(replayIdx.value)} 块交回「现在这一版」的旧密文。\n\n` +
+          '服务端先存下这一块当前的内容，之后你改块、再解密时，它会把旧的交回来 —— ' +
+          '于是浏览器自算的分量与当前基准对不上，验证不通过。\n\n' +
+          '这是演示「服务器不可信」，不是把数据弄坏了；点「关闭」即可恢复。',
+        '打开回滚演示',
+        { type: 'warning', confirmButtonText: '打开演示', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
   replayBusy.value = true
   try {
-    const on = replayArmed.value === null
     await filesApi.replay(id.value, replayIdx.value, on)
     replayArmed.value = on ? replayIdx.value : null
     ElMessage({
       type: on ? 'warning' : 'success',
       duration: 6000,
       message: on
-        ? `已让服务器从这一刻起对第 ${replayIdx.value} 块交回「现在这一版」。现在去改这块，然后解密。`
+        ? `已让服务器从这一刻起对第 ${humanIdx(replayIdx.value)} 块交回「现在这一版」。现在去改这块，然后解密。`
         : '已恢复：服务器重新交回当前版本。',
     })
   } catch (e) {
@@ -530,8 +649,11 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader :title="file ? `${file.owner} / ${file.file_key}` : '文件详情'">
-      <el-button @click="router.push('/files')">返回</el-button>
+    <PageHeader :title="pageTitle">
+      <el-tag v-if="showOps" type="warning" size="small" effect="plain" style="margin-right: 10px">
+        更新模式 · 会改写内容
+      </el-tag>
+      <el-button @click="router.push(backTo)">返回</el-button>
     </PageHeader>
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
@@ -541,7 +663,7 @@ onMounted(load)
           <div class="meta-item"><span class="k">大小</span><span class="mono">{{ fmtBytes(file.total_bytes) }}</span></div>
           <div class="meta-item"><span class="k">块数</span><span class="mono">{{ file.block_count }}</span></div>
           <div class="meta-item"><span class="k">版本</span><span class="mono">{{ file.version }}</span></div>
-          <div v-if="detailed" class="meta-item"><span class="k">位置（内部坐标）</span><span class="mono">{{ span(file.indices) }}</span></div>
+          <div v-if="detailed" class="meta-item"><span class="k">位置（全局编号）</span><span class="mono">{{ span(file.indices) }}</span></div>
           <div class="meta-item"><span class="k">δ_n</span><span class="mono">{{ file.delta_n }}</span></div>
           <div class="meta-item"><span class="k">δ 指纹</span><span class="mono">{{ file.delta_fp }}</span></div>
           <div class="meta-item"><LockTag :can-decrypt="file.can_decrypt" /></div>
@@ -552,13 +674,57 @@ onMounted(load)
         </div>
       </div>
 
+      <!-- 摘要与参数：这份文件对外的「公开事实」，抄下来拿去核对就行。 -->
       <div class="panel mb-3">
+        <h4 class="sec-title">摘要与参数</h4>
+        <div class="kv-grid">
+          <div class="kv"><span class="k">文件</span><span class="v mono">{{ file.owner }} / {{ file.file_key }}</span></div>
+          <div class="kv"><span class="k">大小</span><span class="v mono">{{ fmtBytes(file.total_bytes) }}</span></div>
+          <div class="kv"><span class="k">块数 n</span><span class="v mono">{{ file.block_count }}</span></div>
+          <div class="kv"><span class="k">段大小</span><span class="v mono">{{ file.segment_bytes }} B</span></div>
+          <div class="kv"><span class="k">版本</span><span class="v mono">v{{ file.version }}</span></div>
+          <div class="kv"><span class="k">创建时间</span><span class="v mono">{{ fmtTime(file.created_at) }}</span></div>
+          <div class="kv"><span class="k">当前全局块数 δ_n</span><span class="v mono">{{ file.delta_n }}</span></div>
+          <div class="kv">
+            <span class="k">位置段（全局编号）</span>
+            <span class="v mono">{{ span(file.indices) }}</span>
+          </div>
+          <div class="kv kv-full"><span class="k">δ 指纹</span><span class="v mono">{{ file.delta_fp }}</span></div>
+          <div class="kv kv-full">
+            <span class="k">上传时摘要（SHA-256）</span><span class="v mono">{{ file.content_digest }}</span>
+          </div>
+        </div>
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            δ_n 是「全系统」当前的块数，不是这一份文件的 —— 证据 π_I 与它绑定，
+            所以任何一次上传都会让手里的旧证据失效（判「我那枚证据还有效吗」要看 δ 指纹）。
+            上传时摘要是入库那一刻整份明文的指纹，改块之后不再更新（协调者手里没有完整明文，算不出新的），
+            「这份文件现在第几版」要看版本号。
+          </p>
+        </details>
+      </div>
+
+      <!-- 封装过程：这份文件从明文到证据实际走了哪几步（数字都是真的，不是示意图）。 -->
+      <div class="panel mb-3">
+        <h4 class="sec-title">封装过程</h4>
+        <ol class="steps">
+          <li><b>切开</b><span>明文按段大小切成 {{ file.block_count }} 块（每块 ≤ {{ file.segment_bytes }} B）。</span></li>
+          <li><b>逐块加密</b><span>每块一把随机块密钥（SM4）；块密钥再用所有者的 SM2 公钥封装，只有所有者解得开。</span></li>
+          <li><b>算分量</b><span>每一块的公开分量 = SM3(整块密文)：它就是这一块对外的指纹，由密文唯一决定。</span></li>
+          <li><b>形成承诺</b><span>分量按块身份映射到素数，聚合成 δ = (U, C) 两个群元素 —— 与文件大小无关，恒 ≤ 256 B。</span></li>
+          <li><b>分散存放</b><span>{{ file.block_count }} 块按副本铺到各节点<span v-if="!showOps">（见下方块分布矩阵）</span>。</span></li>
+          <li><b>按需取证</b><span>要证明某几块还在，就对指定块集取一份证据 π_I；验证只用 δ、π_I 与块编号，不需要明文。</span></li>
+        </ol>
+      </div>
+
+      <div v-if="!showOps" class="panel mb-3">
         <h4 class="sec-title">块分布矩阵</h4>
         <BlockMatrix :nodes="nodes" :layout="file.layout" />
       </div>
 
       <!-- 块明细：每一块的**公开分量**就是它的指纹。 -->
-      <div class="panel mb-3">
+      <div v-if="!showOps" class="panel mb-3">
         <div class="sec-head">
           <h4 class="sec-title" style="margin-bottom: 0">块明细（每块的公开分量）</h4>
           <DetailToggle />
@@ -570,14 +736,20 @@ onMounted(load)
           @toggle="blockPreviewOpen = !blockPreviewOpen"
         />
         <el-table :data="blockRows" size="small" border max-height="360">
-          <el-table-column prop="block_idx" label="块号" width="70" align="center" />
+          <!-- ★ 块号显示的是 1 起（内部 0 起）：换算只在 utils/format.js 里做。 -->
+          <el-table-column label="块号" width="70" align="center">
+            <template #default="{ row }"><span class="mono">{{ humanIdx(row.block_idx) }}</span></template>
+          </el-table-column>
           <!-- ★ 这一列是**存储槽位**（密文在节点上放哪），不是密码学坐标：
                改造后“第 i 块配哪个素数”由**块身份**派生（H(身份‖块号)），
                与槽位号毫无关系。所以它只在「详细」下露出，当调试信息用，
                标题里也明说是内部坐标 —— 别让人以为它是“全局下标”。 -->
-          <el-table-column v-if="detailed" label="存储槽位（内部）" width="150" align="center">
+          <el-table-column v-if="detailed" label="存储槽位（内部编号）" width="150" align="center">
             <template #default="{ row }">
-              <span class="mono" title="密文在存储节点上的槽位编号，与素数无关">{{ row.global_index }}</span>
+              <span
+                class="mono"
+                :title="`密文在存储节点上的槽位编号（内部值 ${row.global_index}，调试用），与素数无关`"
+              >{{ humanIdx(row.global_index) }}</span>
             </template>
           </el-table-column>
           <el-table-column v-if="detailed" label="分量指纹（十六进制 · 悬浮看完整）" min-width="240">
@@ -611,15 +783,84 @@ onMounted(load)
         </details>
       </div>
 
-      <!-- 回滚演示：让服务器交回旧版本（演示“服务器不可信”） -->
-      <div class="panel mb-3">
-        <h4 class="sec-title">演示：服务器交回旧版数据</h4>
+      <!-- 版本回退（★ 条目 6）：把留过上一版的块换回去，并重新承诺。
+           ★ 只出现在「更新文件」形态、而且只有所有者看得到：它换回的是旧密文
+             与旧块密钥（回退后就又生效了），与改块是同一级别的权限。 -->
+      <div v-if="showOps && isMine" class="panel mb-3">
+        <div class="sec-head">
+          <h4 class="sec-title" style="margin-bottom: 0">回退到上一版</h4>
+          <el-tag v-if="history.length" type="success" size="small" effect="plain">
+            本文件有 {{ history.length }} 块可回退
+          </el-tag>
+          <el-tag v-else type="info" size="small" effect="plain">还没有留过上一版</el-tag>
+        </div>
+
+        <p class="text-2" style="font-size: 13px; margin-top: 4px">
+          每次改块 / 清零之前，这一块当时的整套本体（密文、IV、分量、块密钥密文、长度）
+          会被自动留一份 —— 留的是本体，不是哈希。节点丢了、或者当前这一版对不上时，
+          把上一版换回去、重算分量、重新承诺，验证就又能过。
+        </p>
+
+        <el-alert
+          v-if="!history.length"
+          type="info"
+          :closable="false"
+          class="mb-2"
+          title="现在没有可回退的版本"
+          description="改块或清零一次之后，被换下来的那一版才会成为“上一版”。每块只留一份（当前 + 上一版）。"
+        />
+
+        <div v-else v-loading="historyLoading" class="rev-list">
+          <div v-for="h in history" :key="h.block_idx" class="rev-item mono">
+            <span class="rev-idx">第 {{ humanIdx(h.block_idx) }} 块</span>
+            <span class="rev-ver">留的是第 {{ h.version }} 版</span>
+            <span class="rev-size">{{ h.bytes }} B</span>
+            <span class="text-3">{{ h.source }} · {{ fmtTime(h.created_at) }}</span>
+          </div>
+        </div>
+
+        <div v-if="history.length" class="rev-actions">
+          <el-button type="warning" :loading="restoring" @click="doRestore">
+            回退这 {{ history.length }} 块到上一版
+          </el-button>
+          <span class="text-3" style="font-size: 12px">回退会重新承诺，版本号 +1（只增不减），并记审计</span>
+        </div>
+
+        <el-alert
+          v-if="restoreResult"
+          type="success"
+          :closable="false"
+          class="mt-2"
+          :title="`已回退 ${restoreResult.count} 块 → 现在是第 ${restoreResult.version} 版，承诺已重算（详情已刷新）`"
+        >
+          <StageTimeline v-if="restoreResult.timings" :timings="restoreResult.timings" class="mt-2" />
+        </el-alert>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            这件事解决的是一个很具体的情形：某一版的数据在节点上取不到了（或对不上当前基准），
+            但你要的其实不是“揪出谁坏”，而是把文件恢复可用 —— 那就把上一版换回去、重新承诺。
+            回退不是“撤销历史”：版本号只增不减，动作进审计，而且被换下来的那一版会留成新的上一版，
+            所以来回回退都行。
+          </p>
+        </details>
+      </div>
+
+      <!-- 回滚演示：让服务器交回旧版本（演示“服务器不可信”）。
+           ★ 只出现在「更新文件」形态，而且**只有所有者**看得到：非所有者既改不了块，
+             也就没有“服务器交回旧版”这一幕可演。 -->
+      <div v-if="showOps && isMine" class="panel mb-3">
+        <div class="sec-head">
+          <h4 class="sec-title" style="margin-bottom: 0">演示：服务器交回旧版数据</h4>
+          <el-tag type="warning" size="small" effect="plain">演示功能 · 会让验证不通过</el-tag>
+        </div>
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
           <span class="text-2">第</span>
           <el-input-number
-            v-model="replayIdx"
-            :min="0"
-            :max="(file?.block_count ?? 1) - 1"
+            v-model="replayNoInput"
+            :min="1"
+            :max="Math.max(1, file?.block_count ?? 1)"
             size="small"
           />
           <span class="text-2">块</span>
@@ -629,11 +870,11 @@ onMounted(load)
             :loading="replayBusy"
             @click="toggleReplay"
           >
-            {{ replayArmed === null ? '打开（存下当前这一版）' : `关闭（当前已打开：第 ${replayArmed} 块）` }}
+            {{ replayArmed === null ? '打开（存下当前这一版）' : `关闭（当前已打开：第 ${humanIdx(replayArmed)} 块）` }}
           </el-button>
         </div>
         <p v-if="decryptResult?.replayedBlocks?.length" class="note text-danger" style="margin-bottom: 0">
-          ★ 这次服务器交回了<b>第 {{ decryptResult.replayedBlocks.join('、') }} 块</b>的<b>旧版本</b>（改块之前那一版）——
+          ★ 这次服务器交回了<b>第 {{ humanList(decryptResult.replayedBlocks).join('、') }} 块</b>的<b>旧版本</b>（改块之前那一版）——
           所以上面的本地验证不通过。这是<b>回滚</b>，不是“内容被改坏”。
         </p>
 
@@ -646,17 +887,25 @@ onMounted(load)
         </details>
       </div>
 
-      <div class="panel mb-3">
+      <div v-if="showOps" class="panel mb-3">
         <h4 class="sec-title">写操作（只有所有者能改）</h4>
-        <el-tabs v-model="activeOp">
-          <el-tab-pane label="改一块" name="modify">
+        <el-alert
+          v-if="!isMine"
+          type="info"
+          :closable="false"
+          class="mb-2"
+          title="这份文件不是你的 —— 可以看，但改不动"
+          description="块密钥是拿文件所有者的公钥封的：其他人（以及管理员）都解不开，也就改不了。这不是权限设置，是密码学上的打不开。"
+        />
+        <el-tabs v-else v-model="activeOp">
+          <el-tab-pane label="分块更新" name="modify">
             <div class="write-form">
               <div>
                 <span class="text-2">第几块：</span>
                 <el-input-number
-                  v-model="modifyForm.blockIdx"
-                  :min="0"
-                  :max="Math.max(0, (file.block_count || 1) - 1)"
+                  v-model="blockNoInput"
+                  :min="1"
+                  :max="Math.max(1, file.block_count || 1)"
                   @change="oldInfo = null"
                 />
                 <el-button :disabled="!isMine" :loading="oldLoading" @click="fetchOldContent">
@@ -676,13 +925,13 @@ onMounted(load)
                 :type="oldInfo.verdict === 'match' ? 'success' : oldInfo.verdict === 'no-anchor' ? 'info' : 'error'"
                 :closable="false"
                 :title="oldInfo.verdict === 'match'
-                  ? `与本地记录一致：第 ${oldInfo.blockIdx} 块 · ${oldInfo.bytes} B · SHA-256 ${oldInfo.sha256.slice(0, 16)}…（浏览器本地验证通过，${oldInfo.ms} ms）`
+                  ? `与本地记录一致：第 ${humanIdx(oldInfo.blockIdx)} 块 · ${oldInfo.bytes} B · SHA-256 ${oldInfo.sha256.slice(0, 16)}…（浏览器本地验证通过，${oldInfo.ms} ms）`
                   : oldInfo.verdict === 'stale'
-                    ? `服务器交回了「改块前」的旧数据 —— 第 ${oldInfo.blockIdx} 块`
+                    ? `服务器交回了「改块前」的旧数据 —— 第 ${humanIdx(oldInfo.blockIdx)} 块`
                     : oldInfo.verdict === 'mismatch'
-                      ? `与本地记录不一致 —— 服务器返回的内容变了（第 ${oldInfo.blockIdx} 块）`
+                      ? `与本地记录不一致 —— 服务器返回的内容变了（第 ${humanIdx(oldInfo.blockIdx)} 块）`
                       : oldInfo.verdict === 'verify-failed'
-                        ? `浏览器本地验证未通过 —— 这一块不可信（第 ${oldInfo.blockIdx} 块）`
+                        ? `浏览器本地验证未通过 —— 这一块不可信（第 ${humanIdx(oldInfo.blockIdx)} 块）`
                         : '没读过这块：本地没记录，无法判断服务器有没有换过它'"
               >
                 <div style="font-size: 12px">
@@ -783,10 +1032,19 @@ onMounted(load)
         <StageTimeline v-if="writeTimings" :timings="writeTimings" class="mt-3" />
       </div>
 
-      <div class="panel">
+      <div v-if="showOps" class="panel">
         <h4 class="sec-title">解密预览（浏览器本地解密 + 本地验证）</h4>
+        <el-alert
+          v-if="!file.can_decrypt"
+          type="info"
+          :closable="false"
+          class="mb-2"
+          title="这份文件不是你的 —— 本地也没有能开它的钥匙"
+          description="块密钥由所有者的公钥封装，所以这里解不开（不是权限问题，是密码学上打不开）。"
+        />
         <el-button
           type="primary"
+          :disabled="!file.can_decrypt"
           :loading="decrypting"
           :title="`会把整份密文取回来（约 ${fmtBytes(
             estimateCipherPackBytes(file.total_bytes, file.layout?.length),
@@ -927,5 +1185,79 @@ onMounted(load)
 }
 .decrypt-text {
   max-width: 720px;
+}
+/* 摘要与参数：两列表格，长值（δ 指纹 / 摘要）整行铺开。 */
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px 24px;
+}
+.kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+  min-width: 0;
+}
+.kv-full { grid-column: 1 / -1; }
+.kv .k {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.kv .v {
+  color: var(--text-1);
+  word-break: break-all;
+}
+/* 封装过程：一步一行，序号在左边。 */
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.steps li {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.steps li b {
+  color: var(--text-1);
+  font-weight: 500;
+  margin-right: 8px;
+}
+/* 回退面板：一行一块 */
+.rev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 720px;
+  margin-top: 4px;
+}
+.rev-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  font-size: 12px;
+}
+.rev-idx {
+  color: var(--text-1);
+}
+.rev-ver {
+  color: var(--accent);
+}
+.rev-size {
+  color: var(--text-2);
+}
+.rev-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
 }
 </style>

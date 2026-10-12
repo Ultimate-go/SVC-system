@@ -31,6 +31,39 @@ const changeTimings = ref(null)
 
 const user = computed(() => auth.user)
 
+/* ---------------------------------------------------------------------------
+   SM2 密钥对展示
+   ---------------------------------------------------------------------------
+   私钥（`crypt.key`）是登录时在**本机内存**里用口令解出来的标量，
+   后端从不持有明文（见 stores/crypto.js 的三条纪律）。所以这里展示的私钥
+   只来自浏览器内存 —— 没解锁就看不到，刷新/退出后也消失。
+   公钥在库里存的是 65 字节未压缩点（0x04 ‖ x ‖ y）的十六进制（130 字符）。
+--------------------------------------------------------------------------- */
+const skBig = computed(() => crypt.key)
+const skHex = computed(() =>
+  skBig.value != null ? skBig.value.toString(16).padStart(64, '0') : '',
+)
+const skDecimal = computed(() => (skBig.value != null ? skBig.value.toString() : ''))
+
+const pubHex = computed(() => user.value?.pub_key || '')
+const pubX = computed(() => (pubHex.value.length >= 130 ? pubHex.value.slice(2, 66) : ''))
+const pubY = computed(() => (pubHex.value.length >= 130 ? pubHex.value.slice(66, 130) : ''))
+
+/** 私钥默认隐藏，点「查看」才显示（避免误植屏）。 */
+const revealSk = ref(false)
+
+function copyText(text, label = '已复制') {
+  if (!text) return
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => ElMessage.success(label),
+      () => ElMessage.warning('复制失败，请手动选择文本复制'),
+    )
+  } else {
+    ElMessage.warning('当前环境不支持自动复制，请手动选择文本复制')
+  }
+}
+
 async function refresh() {
   loading.value = true
   try {
@@ -144,6 +177,48 @@ onMounted(() => {
       />
     </div>
 
+    <div class="panel mb-3" v-if="user">
+      <h4 class="sec-title">SM2 密钥对</h4>
+      <el-alert
+        type="info"
+        :closable="false"
+        class="mb-3"
+        title="私钥只存在于本浏览器内存"
+        description="登录时用你的口令在本地解封，从不上传服务器。刷新页面或退出登录后即从内存清除，需重新登录才能再次查看。"
+      />
+      <div class="kv">
+        <div class="kv-row">
+          <span class="k">公钥（完整）</span>
+          <span class="mono key-cell">
+            <span v-if="pubHex">{{ pubHex }}</span><span v-else>—</span>
+            <el-button v-if="pubHex" size="small" text type="primary" @click="copyText(pubHex, '公钥已复制')">复制</el-button>
+          </span>
+        </div>
+        <div class="kv-row"><span class="k">公钥 Qx</span><span class="mono key-cell">{{ pubX || '—' }}</span></div>
+        <div class="kv-row"><span class="k">公钥 Qy</span><span class="mono key-cell">{{ pubY || '—' }}</span></div>
+
+        <template v-if="crypt.unlocked && skHex">
+          <div class="kv-row">
+            <span class="k">私钥 d（SM2）</span>
+            <span class="mono key-cell">
+              <el-button size="small" :type="revealSk ? 'info' : 'primary'" @click="revealSk = !revealSk">
+                {{ revealSk ? '隐藏' : '查看' }}
+              </el-button>
+              <span v-if="revealSk" class="sk-value">{{ skHex }}</span>
+              <el-button v-if="revealSk" size="small" text type="primary" @click="copyText(skHex, '私钥已复制')">复制</el-button>
+            </span>
+          </div>
+          <div class="kv-row" v-if="revealSk">
+            <span class="k">私钥（十进制）</span><span class="mono key-cell sk-decimal">{{ skDecimal }}</span>
+          </div>
+        </template>
+        <div class="kv-row" v-else>
+          <span class="k">私钥 d（SM2）</span>
+          <span>—（未解锁；请重新登录以在本地解封后查看）</span>
+        </div>
+      </div>
+    </div>
+
     <div class="panel">
       <h4 class="sec-title">改自己的口令</h4>
       <el-form label-width="90px" class="pwd-form" @submit.prevent>
@@ -191,6 +266,20 @@ onMounted(() => {
   color: var(--text-3);
   width: 90px;
   flex-shrink: 0;
+}
+.key-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  word-break: break-all;
+}
+.sk-value {
+  color: #43e4bf;
+  word-break: break-all;
+}
+.sk-decimal {
+  word-break: break-all;
 }
 .pwd-form {
   max-width: 420px;

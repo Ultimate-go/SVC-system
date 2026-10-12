@@ -51,10 +51,11 @@ function srcOf(gi) {
  */
 function labelOf(gi) {
   const r = refMap.value[gi]
+  // ★ 界面上按 **1 起** 编号（见 utils/format.js 的坐标口径）
   if (r && r.block_idx !== undefined && r.block_idx !== null) {
-    return `第 ${r.block_idx} 块`
+    return `第 ${r.block_idx + 1} 块`
   }
-  return String(gi)
+  return String(Number(gi) + 1)
 }
 
 /** 部分结果时，缺的那几块要说出来 —— 不然"少了几个下标"要靠人自己数。 */

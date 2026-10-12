@@ -61,4 +61,22 @@ export const filesApi = {
    */
   replay: (id, blockIdx, on) =>
     api.post(`/api/files/${id}/replay`, { block_idx: blockIdx, on }),
+
+  /**
+   * 这份文件**哪些块留了上一版**（回退功能的入口）。
+   *
+   * ★ 只回元数据（第几块 / 原来是第几版 / 多大 / 什么时候被换下来的），
+   *   **不回密文** —— 回退在后端做，界面用不到那份本体。
+   */
+  history: (id) => api.get(`/api/files/${id}/history`),
+
+  /**
+   * **回退到上一版**（★ 2026-10-12）：把留过上一版的块换回旧本体，并重新承诺。
+   *
+   * :param blockIndices: 要回退哪几块（0 起）；``null`` = 所有留过上一版的块。
+   *
+   * ★ 回退产生**新版本号**（只增不减）并进审计 —— 不是把版本号改回去。
+   */
+  restore: (id, blockIndices = null) =>
+    api.post(`/api/files/${id}/restore`, { block_indices: blockIndices }),
 }

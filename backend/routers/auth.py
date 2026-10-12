@@ -14,8 +14,8 @@ from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager, get_settings
 from ..manager import NotFound, StoreManager
 from ..models import UserRow
-from ..schemas import LoginIn
-from ..security import create_token, verify_password
+from ..schemas import LoginIn, RegisterIn
+from ..security import create_token, hash_password, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -164,6 +164,48 @@ def login(
         #   本机约 0.1 秒）。单独报出来，免得被当成"后端登录慢"。
         "timings": sw.payload(),
     }
+
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(
+    body: RegisterIn,
+    db: Session = Depends(get_db),
+    mgr: StoreManager = Depends(get_manager),
+):
+    """普通用户**自助**注册。
+
+    ★ role 在此**强制**为 ``"user"``：自助通道只产生普通用户，
+       管理员只能由已有管理员在 ``/api/admin/users`` 创建。
+       这与 :class:`~backend.schemas.RegisterIn` 没有 ``role`` 字段是同一道防线
+       （前端即便伪造 ``role`` 也会被这里写死的值覆盖）。
+
+    ★ 注册时就把 SM2 密钥对生成好、用注册口令把私钥封好入库
+       （``mgr.ensure_user_key``）：用户一登录就能拿到 ``key_blob``
+       并在**浏览器本地**解封，无需再单独"创建密钥"。
+    """
+    exists = db.execute(
+        select(UserRow).where(UserRow.username == body.username)
+    ).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"用户 {body.username} 已存在")
+
+    user = UserRow(
+        username=body.username,
+        pwd_hash=hash_password(body.password),
+        # ★ 写死普通用户：自助注册绝不允许拿到 admin。
+        role="user",
+        display_name=body.display_name or body.username,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    with collect() as sw:
+        mgr.ensure_user_key(user.username, body.password)
+    db.refresh(user)
+    metrics.record("register", sw.total_ms(), sw.rows())
+
+    return user_public(user)
 
 
 @router.post("/logout")

@@ -50,8 +50,12 @@ const growing = computed(() => want.value > running.value)
 const lostCount = computed(() => plan.value?.lost?.length || 0)
 const orphanCount = computed(() => plan.value?.orphan?.length || 0)
 
+/**
+ * 把一串**下标**压成给人看的编号列表（1 起，见 utils/format.js 的坐标口径）。
+ * ★ 只用于下标数组 —— 别拿它去拼字符串列表，否则会给字符串也加 1。
+ */
 function fmtList(arr, max = 12) {
-  const a = arr || []
+  const a = (arr || []).map((x) => Number(x) + 1)
   const head = a.slice(0, max).join('、')
   return a.length > max ? `${head} …（共 ${a.length} 项）` : head
 }

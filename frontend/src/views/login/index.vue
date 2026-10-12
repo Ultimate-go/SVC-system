@@ -10,8 +10,10 @@ const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
 
-const form = reactive({ username: '', password: '' })
+const form = reactive({ username: '', password: '', displayName: '', confirm: '' })
 const loading = ref(false)
+// 同一块面板两种形态：登录 / 注册。注册成功后服务端会直接发会话，那就顺手进系统。
+const mode = ref('login')
 const introDone = ref(false)
 const showDescription = ref(false)
 const showForm = ref(false)
@@ -93,6 +95,38 @@ async function submit() {
     // 错误已由 axios 拦截器原样弹出（401/403/409 的中文理由）。
   } finally {
     stopTips()
+    loading.value = false
+  }
+}
+
+function switchMode(next) {
+  mode.value = next
+  // 切形态时清掉确认框：别把上一个形态里敲的字带过去（两次输入不一致会很莫名）。
+  form.confirm = ''
+}
+
+async function submitRegister() {
+  if (!form.username || !form.password) {
+    ElMessage.warning('请输入账号与密码')
+    return
+  }
+  if (form.password !== form.confirm) {
+    ElMessage.warning('两次输入的密码不一致')
+    return
+  }
+  loading.value = true
+  try {
+    await auth.register(form.username, form.password, form.displayName, { onUnlockProgress })
+    if (auth.isLoggedIn) {
+      ElMessage.success('注册成功，已自动登录')
+      router.replace(String(route.query.redirect || '/'))
+    } else {
+      ElMessage.success('注册成功，请用新账号登录')
+      switchMode('login')
+    }
+  } catch {
+    // 错误已由 axios 拦截器原样弹出（比如 409 账号已存在）。
+  } finally {
     loading.value = false
   }
 }
@@ -181,11 +215,11 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
         <div class="panel-heading">
           <div class="status-dot" />
           <div>
-            <p class="eyebrow mono">SECURE LOGIN / 01</p>
-            <h2>登录系统</h2>
+            <p class="eyebrow mono">{{ mode === 'register' ? 'NEW ACCOUNT / 02' : 'SECURE LOGIN / 01' }}</p>
+            <h2>{{ mode === 'register' ? '注册账号' : '登录系统' }}</h2>
           </div>
         </div>
-        <p class="card-sub">请输入账号和密码</p>
+        <p class="card-sub">{{ mode === 'register' ? '请设置账号与密码（注册成功后自动登录）' : '请输入账号和密码' }}</p>
 
         <el-alert
           v-if="route.query.expired === '1'"
@@ -196,7 +230,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           description="后端重启会换掉签名密钥，重登一次就好。"
         />
 
-        <div class="form">
+        <div v-if="mode === 'login'" class="form">
           <label class="field-label mono" for="login-username">账号</label>
           <el-input
             id="login-username"
@@ -227,6 +261,72 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
             <span>{{ loading ? '正在登录' : '登录' }}</span>
             <span class="submit-arrow" aria-hidden="true">↗</span>
           </el-button>
+          <p class="switch-line mono">
+            <span>还没有账号？</span>
+            <button type="button" class="link-like" :disabled="loading" @click="switchMode('register')">立即注册</button>
+          </p>
+        </div>
+
+        <div v-else class="form">
+          <label class="field-label mono" for="reg-username">账号</label>
+          <el-input
+            id="reg-username"
+            v-model="form.username"
+            placeholder="字母、数字、. _ - 组合"
+            size="large"
+            :disabled="loading"
+            autocomplete="username"
+            @keyup.enter="submitRegister"
+          >
+            <template #prefix><Icon name="user" :size="15" /></template>
+          </el-input>
+          <label class="field-label mono" for="reg-display">显示名（可选）</label>
+          <el-input
+            id="reg-display"
+            v-model="form.displayName"
+            placeholder="留空则默认与账号相同"
+            size="large"
+            :disabled="loading"
+            @keyup.enter="submitRegister"
+          >
+            <template #prefix><Icon name="user" :size="15" /></template>
+          </el-input>
+          <label class="field-label mono" for="reg-password">密码</label>
+          <el-input
+            id="reg-password"
+            v-model="form.password"
+            type="password"
+            placeholder="请输入密码"
+            size="large"
+            show-password
+            :disabled="loading"
+            autocomplete="new-password"
+            @keyup.enter="submitRegister"
+          >
+            <template #prefix><Icon name="lock" :size="15" /></template>
+          </el-input>
+          <label class="field-label mono" for="reg-confirm">确认密码</label>
+          <el-input
+            id="reg-confirm"
+            v-model="form.confirm"
+            type="password"
+            placeholder="请再次输入密码"
+            size="large"
+            show-password
+            :disabled="loading"
+            autocomplete="new-password"
+            @keyup.enter="submitRegister"
+          >
+            <template #prefix><Icon name="lock" :size="15" /></template>
+          </el-input>
+          <el-button type="primary" size="large" :loading="loading" class="submit" @click="submitRegister">
+            <span>{{ loading ? '正在注册' : '注册并登录' }}</span>
+            <span class="submit-arrow" aria-hidden="true">↗</span>
+          </el-button>
+          <p class="switch-line mono">
+            <span>已有账号？</span>
+            <button type="button" class="link-like" :disabled="loading" @click="switchMode('login')">返回登录</button>
+          </p>
         </div>
 
         <!-- 等待态：转圈 + 一行会换的提示 + 一条（解封阶段是真实进度的）光条 -->
@@ -322,6 +422,11 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .field-label { margin-top: 5px; color: #7894ac; font-size: 9px; }
 .submit { width: 100%; height: 44px; margin-top: 9px; border: 0; letter-spacing: .08em; }
 .submit-arrow { margin-left: 12px; font-size: 17px; }
+/* 登录 / 注册 两种形态之间的那条切换线（按钮长得像链接） */
+.switch-line { margin: 12px 0 0; text-align: center; color: #8ca4bb; font-size: 12px; letter-spacing: .04em; }
+.link-like { padding: 0 2px; color: #43dcbf; font: inherit; letter-spacing: .04em; background: none; border: 0; cursor: pointer; }
+.link-like:hover { text-decoration: underline; }
+.link-like:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }
 
 /* ---------- 登录等待态（参考“点进比赛”那种：转圈 + 一行会换的提示）---------- */
 /* 绝对定位在面板底部、与 panel-footer 同一个位置 —— 这样等待态出现/消失时面板不会跳。 */

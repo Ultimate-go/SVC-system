@@ -2,8 +2,8 @@
 /**
  * 侧栏菜单。
  *
- * ★ 前端不做安全判断：菜单隐藏只是「看不见」，真正的权限在 meta + 后端。
- *   普通用户看不到管理员菜单项（requiresAdmin）。
+ * ★ 前端不做安全判断：菜单隐藏只是「看不见」，真正的权限在后端。
+ *   普通用户看不到管理员菜单项（`adminOnly`；对应后端的 `require_admin`）。
  */
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -32,25 +32,31 @@ function toggle() {
  * 菜单顺序：**核心在上、管理在下**（日常干活的那几页先够得着，
  * 管理类页面进去的频次低）。
  * ★ 数组顺序就是界面顺序 —— 这里换位不需要动 routes.js。
+ *
+ * 权限口径（2026-10-12 调整）：总览与性能**对全体用户开放**，
+ * 因此从「管理」组移入「核心」组；管理组只剩用户管理与审计流水。
  */
 const groups = [
   {
     label: '核心',
     items: [
-      { path: '/files', name: 'files', icon: 'file', label: '文件与块' },
+      { path: '/', name: 'dashboard', icon: 'dashboard', label: '总览', exact: true },
+      { path: '/files', name: 'files', icon: 'file', label: '上传文件' },
+      // ★ 2026-10-12：「更新文件」紧跟在「上传文件」后面（同一件事的下一半 ——
+      //   先传进来，之后要改就进这一页），与「完整性验证」并列。
+      { path: '/files/update', name: 'files-update', icon: 'refresh', label: '更新文件' },
       { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },
       { path: '/evidence/pool', name: 'pool', icon: 'list', label: '证据池' },
       { path: '/devices', name: 'devices', icon: 'server', label: '设备' },
+      { path: '/perf', name: 'perf', icon: 'chart', label: '性能' },
     ],
   },
   {
     label: '管理',
     adminOnly: true,
     items: [
-      { path: '/', name: 'dashboard', icon: 'dashboard', label: '总览', exact: true },
       { path: '/users', name: 'users', icon: 'users', label: '用户管理' },
       { path: '/audit', name: 'audit', icon: 'activity', label: '审计流水' },
-      { path: '/perf', name: 'perf', icon: 'chart', label: '性能' },
     ],
   },
 ]
@@ -58,7 +64,8 @@ const groups = [
 function isActive(item) {
   if (item.exact) return route.path === '/'
   if (item.name === 'devices') return route.path.startsWith('/devices')
-  if (item.name === 'files') return route.path.startsWith('/files')
+  if (item.name === 'files') return route.path.startsWith('/files') && !route.path.startsWith('/files/update')
+  if (item.name === 'files-update') return route.path.startsWith('/files/update')
   if (item.name === 'users') return route.path.startsWith('/users')
   return route.name === item.name
 }
