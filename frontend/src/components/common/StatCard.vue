@@ -1,7 +1,7 @@
 <script setup>
 /**
- * 指标卡：顶部 2px 的 accent→accent-2 线性条，下面大字数值 + 小字单位，
- * 再下面一行 12px 说明（数据来源）。
+ * 指标卡：顶部为 2px 的 accent 到 accent-2 线性条，下方为大字数值与小字单位，
+ * 再下方一行 12px 说明（数据来源）。
  */
 defineProps({
   label: { type: String, required: true },
@@ -9,6 +9,7 @@ defineProps({
   unit: { type: String, default: '' },
   hint: { type: String, default: '' },
   mono: { type: Boolean, default: true },
+  hintTop: { type: Boolean, default: false },
 })
 </script>
 
@@ -16,10 +17,11 @@ defineProps({
   <div class="stat-card">
     <div class="bar" />
     <div class="label">{{ label }}</div>
+    <div class="hint hint-top" v-if="hintTop && hint">{{ hint }}</div>
     <div class="value" :class="{ mono }">
       {{ value }}<span class="unit" v-if="unit">{{ unit }}</span>
     </div>
-    <div class="hint" v-if="hint">{{ hint }}</div>
+    <div class="hint" v-if="!hintTop && hint">{{ hint }}</div>
   </div>
 </template>
 
@@ -42,7 +44,7 @@ defineProps({
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 .label {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .value {
@@ -59,7 +61,12 @@ defineProps({
   margin-left: 4px;
 }
 .hint {
-  font-size: 12px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.hint-top {
+  margin: 3px 0 5px;
+  font-size: 13px;
   color: var(--text-3);
 }
 </style>

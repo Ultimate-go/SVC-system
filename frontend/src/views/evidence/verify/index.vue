@@ -801,7 +801,7 @@ onMounted(loadFiles)
       <div v-if="loadError" class="file-error">{{ loadError }}</div>
 
       <template v-else-if="allFiles.length">
-        <div class="pull-summary mono text-2" style="font-size: 12px">
+        <div class="pull-summary mono text-2" style="font-size: 13px">
           已拉取 {{ allFiles.length }} 份文件 · 共 {{ totalBlocks }} 块 · {{ owners.length }} 位所有者
         </div>
         <div class="pull-files">
@@ -810,13 +810,13 @@ onMounted(loadFiles)
           </span>
           <span v-if="pullRest" class="pull-chip mono text-3">还有 {{ pullRest }} 份…</span>
         </div>
-        <p class="text-3" style="font-size: 12px; margin: 8px 0 0">
+        <p class="text-3" style="font-size: 13px; margin: 8px 0 0">
           下面「按指标筛选文件」用的就是这份清单 —— 筛选全在前端，不会再请求后端。
         </p>
       </template>
 
-      <div v-else-if="filesLoading" class="text-3" style="font-size: 12px">正在拉取…</div>
-      <div v-else class="text-3" style="font-size: 12px">列表为空。</div>
+      <div v-else-if="filesLoading" class="text-3" style="font-size: 13px">正在拉取…</div>
+      <div v-else class="text-3" style="font-size: 13px">列表为空。</div>
     </div>
 
     <!-- ============================================================= -->
@@ -879,13 +879,13 @@ onMounted(loadFiles)
         <div v-if="result.missing?.length" class="missing">
           <el-alert type="warning" :closable="false" :title="`这份结论没覆盖：${humanList(result.missing).join(', ')}`" />
         </div>
-        <div v-if="result.proof" class="mono text-2 mt-2" style="font-size: 12px">
+        <div v-if="result.proof" class="mono text-2 mt-2" style="font-size: 13px">
           证据 {{ result.proof.size_bytes }} 字节（与打开多少块无关）
         </div>
         <!-- 逐块分量：详细模式铺出来，简略模式只说"点详细可看"。 -->
         <div v-if="result.values?.length" class="fp-block">
           <div class="fp-head">
-            <span class="text-2" style="font-size: 12px">
+            <span class="text-2" style="font-size: 13px">
               这一份覆盖 {{ result.indices?.length || 0 }} 块
             </span>
             <DetailToggle />
@@ -1011,7 +1011,7 @@ onMounted(loadFiles)
 
       <template v-if="allFiles.length">
         <div class="match-head">
-          <span class="text-2" style="font-size: 12px">
+          <span class="text-2" style="font-size: 13px">
             共 {{ allFiles.length }} 份，筛出 {{ filtered.length }} 份（{{ filteredBlocks }} 块），
             已勾选 {{ pickedIds.length }} 份（{{ pickedBlocks }} 块）
           </span>
@@ -1063,7 +1063,7 @@ onMounted(loadFiles)
       <div class="sec-head">
         <h4 class="sec-title">集合</h4>
         <span class="step-tag">统一验证</span>
-        <span class="mono text-2" style="font-size: 12px">
+        <span class="mono text-2" style="font-size: 13px">
           {{ basket.size }} 块 · {{ basket.fileCount }} 份文件
         </span>
         <el-button v-if="basket.size" link size="small" @click="basketDetailed = !basketDetailed">
@@ -1179,7 +1179,7 @@ onMounted(loadFiles)
           <div class="mono text-1" style="font-size: 13px">
             槽位 {{ humanIdx(regResult.global_index) }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ humanIdx(regResult.block_idx) }} 块
           </div>
-          <div class="text-2 mono" style="font-size: 12px">
+          <div class="text-2 mono" style="font-size: 13px">
             holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
           </div>
         </template>
@@ -1220,7 +1220,7 @@ onMounted(loadFiles)
   flex-wrap: wrap;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-top: 8px;
 }
@@ -1244,7 +1244,7 @@ onMounted(loadFiles)
   padding: 2px 9px;
   border: 1px solid rgba(127, 127, 127, 0.28);
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.7;
   white-space: nowrap;
   overflow: hidden;
@@ -1268,7 +1268,7 @@ onMounted(loadFiles)
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
 }
 .missing {
   margin-top: 10px;
@@ -1284,7 +1284,7 @@ onMounted(loadFiles)
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
-  font-size: 12px;
+  font-size: 13px;
 }
 .cur-lbl {
   color: var(--accent);
@@ -1352,7 +1352,7 @@ onMounted(loadFiles)
   flex: none;
   width: 68px;
   text-align: right;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -1389,12 +1389,12 @@ onMounted(loadFiles)
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
   padding: 2px 0;
 }
 .tag-ok {
   color: var(--accent);
-  font-size: 12px;
+  font-size: 13px;
 }
 /* 集合的极简视图：一行下标芯片，主界面只给这么多 */
 .basket-mini {
@@ -1403,7 +1403,7 @@ onMounted(loadFiles)
   flex-wrap: wrap;
 }
 .chip {
-  font-size: 12px;
+  font-size: 13px;
   padding: 1px 7px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1424,7 +1424,7 @@ onMounted(loadFiles)
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
 }
 .grp-list {
   display: flex;
@@ -1436,7 +1436,7 @@ onMounted(loadFiles)
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1444,7 +1444,7 @@ onMounted(loadFiles)
 /* 主流程步骤徽标：快速验证 / 选块入集合 / 统一验证 / 内部坐标 */
 .step-tag {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1;
   padding: 3px 8px;
   border-radius: 999px;

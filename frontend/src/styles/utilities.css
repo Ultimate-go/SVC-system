@@ -79,7 +79,7 @@ html.compact .panel {
    用在 <details class="note-collapse"><summary>说明</summary>…</details>。 */
 .note-collapse {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
 }
 .note-collapse > summary {

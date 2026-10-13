@@ -184,7 +184,7 @@ onMounted(load)
             </el-button>
             <el-button link type="danger" @click="removeUser(row)">删除</el-button>
           </template>
-          <span v-else class="text-3" style="font-size: 12px">（自己）</span>
+          <span v-else class="text-3" style="font-size: 13px">（自己）</span>
         </template>
       </el-table-column>
       <template #empty>
@@ -193,7 +193,7 @@ onMounted(load)
     </el-table>
 
     <div class="foot">
-      <span class="text-2" style="font-size: 12px">
+      <span class="text-2" style="font-size: 13px">
         共 {{ total }} 位用户 · {{ adminCount }} 位管理员
       </span>
       <el-pagination
@@ -245,7 +245,7 @@ onMounted(load)
 }
 .banner-en {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.18em;
   color: var(--text-3);
 }

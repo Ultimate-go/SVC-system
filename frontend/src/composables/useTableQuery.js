@@ -5,7 +5,7 @@ import { ref, reactive, computed } from 'vue'
  *
  * 后端 GET /api/admin/users 没有任何过滤/分页参数，返回全量。
  * 「查询」在前端做（关键词 + 下拉过滤），分页也在前端做（默认每页 10 条）。
- * 不要假装后端支持查询参数。
+ * 后端不支持查询参数，不得按支持处理。
  */
 export function useTableQuery(fetchFn, { pageSize = 10, filterFn = null } = {}) {
   const loading = ref(false)

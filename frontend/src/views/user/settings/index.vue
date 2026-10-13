@@ -83,7 +83,7 @@ const isDark = computed(() => theme.theme === 'dark')
   font-weight: 500;
 }
 .desc {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-top: 2px;
 }

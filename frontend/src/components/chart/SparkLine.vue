@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 内联 SVG 折线 —— polyline，用于趋势。
+ * 内联 SVG 折线，基于 polyline，用于趋势显示。
  * props: points(number[]), width, height, tone。
  */
 import { computed } from 'vue'

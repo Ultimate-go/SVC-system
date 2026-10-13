@@ -1,12 +1,10 @@
 <script setup>
 /**
- * 「简略 / 详细」开关 —— 控制要不要把**每一块的指纹**铺出来。
+ * 「简略 / 详细」开关：控制是否逐块显示指纹。
  *
- * 它不是一个页面的局部状态，而是**界面偏好**：跟着主题/密度那一套走
- * （`stores/theme.js` → localStorage）。在一页里切到"详细"，翻到另一页
- * 也该还是详细 —— 否则每换一个页面都要重新点一遍。
- *
- * 默认给「详细」：这一版就是想把密码学细节摆出来看。
+ * 该状态属于界面偏好，与主题、密度一致，存于 `stores/theme.js` → localStorage。
+ * 在同一页切到「详细」后，切换到其它页面应保持「详细」。
+ * 默认值为「详细」。
  */
 import { computed } from 'vue'
 import { useThemeStore } from '../../stores/theme'
@@ -17,7 +15,7 @@ const mode = computed(() => theme.detailMode)
 
 <template>
   <div class="detail-toggle">
-    <span class="tip text-3">{{ mode === 'detail' ? '正在显示每块的指纹（悬浮看完整值）' : '已折叠指纹，只显示块号、长度与所在节点' }}</span>
+    <span class="tip text-3">{{ mode === 'detail' ? '显示每块指纹（悬浮查看完整值）' : '指纹已折叠，仅显示块号、长度与持有节点' }}</span>
     <el-radio-group :model-value="mode" size="small" @change="(v) => theme.setDetail(v)">
       <el-radio-button value="brief">简略</el-radio-button>
       <el-radio-button value="detail">详细</el-radio-button>
@@ -32,7 +30,7 @@ const mode = computed(() => theme.detailMode)
   gap: 10px;
 }
 .tip {
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
 }
 </style>

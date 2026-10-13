@@ -199,13 +199,14 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
         <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
         <h2>基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h2>
         <p>
-          文件交给别人保管，凭什么放心？
-          <br />答案不是“请相信我们”，而是一份谁都能自己验证的密码学证据。
+          <h3>密码基石，构筑信任</h3>
+          <br>
         </p>
         <ul>
-          <li><span class="intro-dot" />谁都能验证，只有所有者能解密</li>
-          <li><span class="intro-dot" />不靠承诺，靠可验证</li>
+          <li><span class="intro-dot" />非中心化存储</li>
           <li><span class="intro-dot" />证据恒为两个群元素（≤ 256 字节）</li>
+          <li><span class="intro-dot" />所有人可验证，只有持有者可解密</li>
+          <li><span class="intro-dot" />承诺公开，可聚合可拆分</li>
         </ul>
       </section>
 
@@ -215,7 +216,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
         <div class="panel-heading">
           <div class="status-dot" />
           <div>
-            <p class="eyebrow mono">{{ mode === 'register' ? 'NEW ACCOUNT / 02' : 'SECURE LOGIN / 01' }}</p>
+            <p class="eyebrow mono">{{ mode === 'register' ? 'NEW ACCOUNT ' : 'SECURE LOGIN ' }}</p>
             <h2>{{ mode === 'register' ? '注册账号' : '登录系统' }}</h2>
           </div>
         </div>
@@ -384,23 +385,23 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   mask-image: radial-gradient(ellipse 78% 70% at 50% 50%, #000 25%, transparent 100%);
 }
 .scanline { position: absolute; inset: 0; opacity: .22; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.018) 4px); }
-.bg-word { position: absolute; top: 0; left: var(--left); color: rgba(120, 190, 255, .14); font-size: 11px; letter-spacing: .28em; white-space: nowrap; animation: word-rise 18s linear infinite; animation-delay: var(--delay); }
+.bg-word { position: absolute; top: 0; left: var(--left); color: rgba(120, 190, 255, .14); font-size: 13px; letter-spacing: .28em; white-space: nowrap; animation: word-rise 18s linear infinite; animation-delay: var(--delay); }
 
 .login-shell { position: relative; z-index: 1; width: min(1080px, 100%); min-height: 560px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(330px, .85fr); align-items: center; gap: clamp(48px, 9vw, 120px); padding: 48px 32px; }
 .brand-stage { position: absolute; z-index: 2; top: 50%; left: 50%; width: max-content; max-width: calc(100% - 32px); text-align: center; transform: translate(-50%, -50%); transition: opacity .6s ease, transform .8s cubic-bezier(.2,.8,.2,1); }
 .brand-stage.is-complete { opacity: 0; transform: translate(-50%, calc(-50% - 150px)); pointer-events: none; }
-.terminal-line { display: flex; gap: 12px; margin-bottom: 24px; color: rgba(183, 209, 231, .52); font-size: 11px; letter-spacing: .1em; }
+.terminal-line { display: flex; gap: 12px; margin-bottom: 24px; color: rgba(183, 209, 231, .52); font-size: 13px; letter-spacing: .1em; }
 .prompt { color: #44e4c0; }
 .brand-title { display: flex; align-items: center; min-height: 1.2em; margin: 0; color: #f2f8ff; font-size: clamp(46px, 7vw, 82px); font-weight: 600; letter-spacing: .06em; line-height: 1; text-shadow: 0 0 30px rgba(0, 214, 255, .28); }
 .brand-character { display: inline-block; opacity: 0; transform: translateY(12px); animation: type-in .36s cubic-bezier(.2,.8,.2,1) forwards; animation-delay: calc(var(--char-index) * 105ms); }
 .cursor { width: 3px; height: .92em; margin-left: 9px; background: #42e4c2; box-shadow: 0 0 12px #42e4c2; animation: blink .85s steps(1) infinite; }
 .is-complete .cursor { animation: blink .85s steps(1) infinite, cursor-fade .5s ease 1.1s forwards; }
-.brand-caption { margin: 22px 0 28px; color: rgba(164, 196, 222, .64); font-size: 10px; letter-spacing: .23em; }
+.brand-caption { margin: 22px 0 28px; color: rgba(164, 196, 222, .64); font-size: 13px; letter-spacing: .23em; }
 .progress-track { width: min(310px, 80%); height: 2px; background: rgba(143, 188, 220, .16); overflow: hidden; }
 .progress-track span { display: block; width: 100%; height: 100%; transform-origin: left; background: linear-gradient(90deg, #29d7ff, #4be6bc); animation: progress 1.25s ease forwards; }
 .project-intro { grid-column: 1; max-width: 560px; opacity: 0; transform: translateY(28px); transition: opacity .65s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
 .project-intro.is-visible { opacity: 1; transform: translateY(0); }
-.intro-tag { margin-bottom: 16px; color: #47d9c1; font-size: 10px; letter-spacing: .18em; }
+.intro-tag { margin-bottom: 16px; color: #47d9c1; font-size: 13px; letter-spacing: .18em; }
 .project-intro h2 { margin: 0 0 16px; color: #e6edf7; font-size: clamp(22px, 3vw, 31px); font-weight: 500; line-height: 1.4; }
 .project-intro p { margin: 0 0 19px; color: #9aadc1; font-size: 13px; line-height: 1.8; }
 .project-intro ul { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; color: #cbd8e5; font-size: 13px; }
@@ -414,16 +415,16 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .corner-bottom { bottom: -1px; left: -1px; border-width: 0 0 1px 1px; }
 .panel-heading { display: flex; align-items: center; gap: 13px; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #43e4bf; box-shadow: 0 0 0 4px rgba(67,228,191,.1), 0 0 14px #43e4bf; }
-.eyebrow, .field-label { margin: 0; color: #47d9c1; font-size: 10px; letter-spacing: .16em; }
+.eyebrow, .field-label { margin: 0; color: #47d9c1; font-size: 13px; letter-spacing: .16em; }
 .panel-heading h2 { margin: 6px 0 0; font-size: 25px; font-weight: 500; letter-spacing: .04em; }
 .card-sub { margin: 19px 0 26px; color: #8ca4bb; font-size: 13px; }
 .login-alert { margin-bottom: 18px; }
 .form { display: flex; flex-direction: column; gap: 10px; }
-.field-label { margin-top: 5px; color: #7894ac; font-size: 9px; }
+.field-label { margin-top: 5px; color: #7894ac; font-size: 13px; }
 .submit { width: 100%; height: 44px; margin-top: 9px; border: 0; letter-spacing: .08em; }
 .submit-arrow { margin-left: 12px; font-size: 17px; }
 /* 登录 / 注册 两种形态之间的那条切换线（按钮长得像链接） */
-.switch-line { margin: 12px 0 0; text-align: center; color: #8ca4bb; font-size: 12px; letter-spacing: .04em; }
+.switch-line { margin: 12px 0 0; text-align: center; color: #8ca4bb; font-size: 13px; letter-spacing: .04em; }
 .link-like { padding: 0 2px; color: #43dcbf; font: inherit; letter-spacing: .04em; background: none; border: 0; cursor: pointer; }
 .link-like:hover { text-decoration: underline; }
 .link-like:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }
@@ -445,21 +446,21 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   animation: busy-spin .85s linear infinite;
 }
 .busy-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
-.busy-tip { display: block; overflow: hidden; color: #d3e8f6; font-size: 11px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; animation: busy-in .32s cubic-bezier(.2, .8, .2, 1) both; }
+.busy-tip { display: block; overflow: hidden; color: #d3e8f6; font-size: 13px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; animation: busy-in .32s cubic-bezier(.2, .8, .2, 1) both; }
 .busy-track { position: relative; display: block; height: 2px; overflow: hidden; border-radius: 2px; background: rgba(143, 188, 220, .16); }
 .busy-track i { position: absolute; inset: 0; display: block; }
 /* 网段：不知道还要等多久 ⇒ 一条来回扫的光带（不确定进度） */
 .busy-track.is-flow i { width: 44%; transform: translateX(-110%); background: linear-gradient(90deg, transparent, #29d7ff, #43e4bf, transparent); animation: busy-flow 1.35s cubic-bezier(.55, .08, .45, .92) infinite; }
 /* 解封段：这就是派生 KEK 的**真实**进度（0→1），不是装饰性动画 */
 .busy-track.is-bar i { transform: scaleX(0); transform-origin: left center; background: linear-gradient(90deg, #29d7ff, #43e4bf); box-shadow: 0 0 8px rgba(67, 228, 191, .55); }
-.busy-percent { flex: 0 0 auto; min-width: 32px; color: #6f8ba0; font-size: 10px; text-align: right; }
+.busy-percent { flex: 0 0 auto; min-width: 32px; color: #6f8ba0; font-size: 13px; text-align: right; }
 .busy-enter-active, .busy-leave-active { transition: opacity .22s ease, transform .22s ease; }
 .busy-enter-from, .busy-leave-to { opacity: 0; transform: translateY(-5px); }
-.panel-footer { margin: 24px 0 0; color: rgba(139, 166, 187, .55); font-size: 9px; letter-spacing: .1em; }
+.panel-footer { margin: 24px 0 0; color: rgba(139, 166, 187, .55); font-size: 13px; letter-spacing: .1em; }
 /* 等待时留着位置、只隐掉（见模板里的注释） */
 .panel-footer.is-away { visibility: hidden; }
 .panel-footer span { color: #43e4bf; margin-right: 6px; }
-.system-footer { position: absolute; z-index: 1; right: 30px; bottom: 22px; color: rgba(133, 163, 187, .5); font-size: 9px; letter-spacing: .12em; }
+.system-footer { position: absolute; z-index: 1; right: 30px; bottom: 22px; color: rgba(133, 163, 187, .5); font-size: 13px; letter-spacing: .12em; }
 .system-footer span { color: #43dcbf; }
 .system-footer i { display: inline-block; width: 4px; height: 4px; margin: 0 8px 2px; border-radius: 50%; background: #43e4bf; }
 
@@ -480,21 +481,21 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
   .brand-stage.is-complete { transform: translate(-50%, calc(-50% - 120px)); }
   .terminal-line { justify-content: center; margin-bottom: 20px; }
   .brand-title { justify-content: center; font-size: clamp(37px, 12vw, 58px); }
-  .brand-caption { font-size: 8px; letter-spacing: .14em; }
+  .brand-caption { font-size: 13px; letter-spacing: .14em; }
   .progress-track { margin: 0 auto; }
   .project-intro { grid-column: 1; margin-top: 0; text-align: center; }
   .project-intro h2 { font-size: clamp(20px, 6vw, 27px); }
-  .project-intro p, .project-intro ul { font-size: 12px; }
+  .project-intro p, .project-intro ul { font-size: 13px; }
   .project-intro ul { align-items: center; }
   .login-panel { justify-self: center; max-width: 440px; padding: 29px 24px 23px; }
   .login-busy { left: 24px; right: 24px; bottom: 10px; }
-  .system-footer { right: 0; bottom: 16px; width: 100%; text-align: center; font-size: 8px; }
+  .system-footer { right: 0; bottom: 16px; width: 100%; text-align: center; font-size: 13px; }
 }
 
 @media (max-width: 390px) {
   .login-shell { padding-inline: 16px; }
   .brand-title { font-size: 34px; letter-spacing: .04em; }
-  .terminal-line { font-size: 9px; gap: 8px; }
+  .terminal-line { font-size: 13px; gap: 8px; }
   .login-panel { padding-inline: 20px; }
   .login-busy { left: 20px; right: 20px; }
 }

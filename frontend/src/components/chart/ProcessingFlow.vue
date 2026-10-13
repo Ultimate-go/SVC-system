@@ -18,7 +18,7 @@ const STAGES = [
   <div class="processing" aria-label="数据处理链路">
     <div class="flow-head">
       <div>
-        <span class="flow-kicker mono">LIVE PIPELINE / 06 STAGES</span>
+        <span class="flow-kicker mono">LIVE PIPELINE /  STAGES</span>
         <p class="flow-caption">明文入库至完整性证明的处理链路</p>
       </div>
       <span class="flow-state"><i />数据处理链路</span>
@@ -111,14 +111,14 @@ const STAGES = [
   overflow: hidden;
 }
 .flow-head { position: relative; z-index: 3; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
-.flow-kicker { position: relative; color: var(--text-3); font-size: 10px; letter-spacing: .14em; }
+.flow-kicker { position: relative; color: var(--text-3); font-size: 13px; letter-spacing: .14em; }
 .flow-kicker::after {
   content: ''; position: absolute; left: 0; bottom: -4px; width: 46px; height: 1px;
   background: linear-gradient(90deg, var(--accent), transparent);
   animation: kicker-glow 4.6s ease-in-out infinite;
 }
-.flow-caption { color: var(--text-2); font-size: 12px; margin: 5px 0 0; }
-.flow-state { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 11px; white-space: nowrap; }
+.flow-caption { color: var(--text-2); font-size: 13px; margin: 5px 0 0; }
+.flow-state { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 13px; white-space: nowrap; }
 .flow-state i {
   width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 13%, transparent);
@@ -265,8 +265,8 @@ const STAGES = [
 .spark.s2 { left: 50%; animation: spark-rise var(--cycle) ease-out infinite; animation-delay: calc(var(--i) * var(--step) + .34s); }
 .spark.s3 { left: 72%; animation: spark-rise var(--cycle) ease-out infinite; animation-delay: calc(var(--i) * var(--step) + .62s); }
 
-.stage-topline { display: flex; justify-content: space-between; align-items: center; color: var(--text-3); font-size: 9px; letter-spacing: .08em; }
-.stage-status { color: var(--stage-color); font-size: 8px; opacity: .8; }
+.stage-topline { display: flex; justify-content: space-between; align-items: center; color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
+.stage-status { color: var(--stage-color); font-size: 13px; opacity: .8; }
 .stage-index { color: var(--stage-color); animation: index-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
 .icon-wrap { position: relative; width: 48px; height: 48px; margin: 8px auto 6px; display: grid; place-items: center; color: var(--stage-color); }
 .stage-icon { width: 42px; height: 42px; overflow: visible; position: relative; z-index: 1; animation: icon-lift var(--cycle) cubic-bezier(.34, .01, .2, 1) infinite; animation-delay: calc(var(--i) * var(--step)); }
@@ -276,8 +276,8 @@ const STAGES = [
 /* 图标外的冲击波：点亮的那一刻扩出去一圈 */
 .icon-shock { position: absolute; inset: 3px; border: 1.5px solid currentColor; border-radius: 50%; opacity: 0; animation: icon-shock var(--cycle) cubic-bezier(.2, .7, .3, 1) infinite; animation-delay: calc(var(--i) * var(--step)); }
 .stage-label { color: var(--text-1); font-size: 13px; font-weight: 600; text-align: center; white-space: nowrap; }
-.stage-en { color: var(--stage-color); font-size: 9px; letter-spacing: .12em; text-align: center; margin-top: 3px; animation: en-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
-.stage-detail { color: var(--text-3); font-size: 10px; line-height: 1.4; text-align: center; margin-top: 8px; min-height: 28px; }
+.stage-en { color: var(--stage-color); font-size: 13px; letter-spacing: .12em; text-align: center; margin-top: 3px; animation: en-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
+.stage-detail { color: var(--text-3); font-size: 13px; line-height: 1.5; text-align: center; margin-top: 8px; min-height: 40px; }
 
 /* ③ 块与块之间：轨道 + 流动虚线 + 彗星 + 依次亮起的箭头 */
 .link { position: relative; z-index: 2; flex: 0 0 30px; height: 2px; align-self: center; margin: -28px 2px 0; }

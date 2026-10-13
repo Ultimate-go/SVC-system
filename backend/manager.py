@@ -645,7 +645,7 @@ class StoreManager:
         with self.db.session() as db:
             users = list(db.execute(select(UserRow)).scalars())
         return {
-            "scheme": "SM2-ECIES（封块密钥）+ PBKDF2-HMAC-SM3（封用户私钥）",
+            "scheme": "SM2-ECIES（封装块密钥）+ PBKDF2-HMAC-SM3（封装用户私钥）",
             "users": len(users),
             "user_keys": sum(1 for u in users if u.pub_key and u.sk_wrapped),
             "sessions_with_key": len(self._keys),

@@ -40,6 +40,13 @@ html[data-theme='light'] {
   --el-border-color-extra-light: var(--line);
   --el-border-radius-base: 6px;
   --el-mask-color: rgba(0, 0, 0, 0.5);
+  /* 字号：小字统一抬高。中文界面下 Element Plus 默认的 12px 小字偏小。 */
+  --el-font-size-extra-large: 20px;
+  --el-font-size-large: 18px;
+  --el-font-size-medium: 16px;
+  --el-font-size-base: 14px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 13px;
 }
 
 /* 深色下给 Element Plus 挂 dark 类，让弹层/下拉菜单也变深。 */

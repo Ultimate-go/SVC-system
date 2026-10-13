@@ -245,7 +245,7 @@ async function refreshAll() {
           :description="drill.impact.note"
         />
         <div v-if="drill && drill.impact && drill.impact.files_affected && drill.impact.files_affected.length" class="mt-2">
-          <span class="text-3" style="font-size: 12px">受影响的文件：</span>
+          <span class="text-3" style="font-size: 13px">受影响的文件：</span>
           <el-tag
             v-for="f in drill.impact.files_affected"
             :key="`${f.owner}/${f.file_key}`"
@@ -307,7 +307,7 @@ async function refreshAll() {
           </el-table-column>
           <el-table-column label="数据库" min-width="180">
             <template #default="{ row }">
-              <span v-if="row.db" class="mono text-2" style="font-size: 12px">
+              <span v-if="row.db" class="mono text-2" style="font-size: 13px">
                 {{ row.db.blobs ?? '' }} 块 / {{ row.db.state ?? '' }} 状态
               </span>
               <span v-else class="text-3">—</span>
@@ -386,7 +386,7 @@ async function refreshAll() {
   margin-bottom: 14px;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-bottom: 12px;
 }

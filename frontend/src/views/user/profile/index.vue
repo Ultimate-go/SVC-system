@@ -183,8 +183,8 @@ onMounted(() => {
         type="info"
         :closable="false"
         class="mb-3"
-        title="私钥只存在于本浏览器内存"
-        description="登录时用你的口令在本地解封，从不上传服务器。刷新页面或退出登录后即从内存清除，需重新登录才能再次查看。"
+        title="私钥仅限本次登录使用"
+        description="私钥只保存在当前浏览器中，用您的密码解锁。刷新或退出登录后会自动清除，再次查看需重新登录"
       />
       <div class="kv">
         <div class="kv-row">
@@ -199,7 +199,7 @@ onMounted(() => {
 
         <template v-if="crypt.unlocked && skHex">
           <div class="kv-row">
-            <span class="k">私钥 d（SM2）</span>
+            <span class="k" style="white-space: nowrap; flex-shrink: 0;">私钥 d（SM2）</span>
             <span class="mono key-cell">
               <el-button size="small" :type="revealSk ? 'info' : 'primary'" @click="revealSk = !revealSk">
                 {{ revealSk ? '隐藏' : '查看' }}
@@ -209,7 +209,8 @@ onMounted(() => {
             </span>
           </div>
           <div class="kv-row" v-if="revealSk">
-            <span class="k">私钥（十进制）</span><span class="mono key-cell sk-decimal">{{ skDecimal }}</span>
+            <span class="k" style="white-space: nowrap; flex-shrink: 0;">私钥（十进制）</span>
+            <span class="mono key-cell sk-decimal" style="flex: 1; word-break: break-all;">{{ skDecimal }}</span>
           </div>
         </template>
         <div class="kv-row" v-else>
@@ -220,22 +221,22 @@ onMounted(() => {
     </div>
 
     <div class="panel">
-      <h4 class="sec-title">改自己的口令</h4>
+      <h4 class="sec-title">修改密码</h4>
       <el-form label-width="90px" class="pwd-form" @submit.prevent>
-        <el-form-item label="新口令">
+        <el-form-item label="新密码">
           <el-input v-model="pwdForm.password" type="password" show-password />
         </el-form-item>
-        <el-form-item label="确认口令">
+        <el-form-item label="确认密码">
           <el-input v-model="pwdForm.confirm" type="password" show-password />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :loading="changing" @click="changePassword">改口令</el-button>
+          <el-button type="primary" :loading="changing" @click="changePassword">修改密码</el-button>
         </el-form-item>
       </el-form>
       <StageTimeline v-if="changeTimings" :timings="changeTimings" class="mt-3" />
       <details class="note-collapse">
         <summary>说明</summary>
-        <p class="note">改口令会重新加密保存密钥，需要几百毫秒，属正常现象。</p>
+        <p class="note">修改密码会重新生成和保存密钥</p>
       </details>
     </div>
   </div>
@@ -285,7 +286,7 @@ onMounted(() => {
   max-width: 420px;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
 }
 </style>

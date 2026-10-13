@@ -6,14 +6,13 @@ const MOTION_KEY = 'vds_motion'
 const DETAIL_KEY = 'vds_detail'
 
 /**
- * 主题 / 密度 / 动效 / 哈希详略 —— 全部只存 localStorage，不影响后端任何行为。
+ * 主题 / 密度 / 动效 / 哈希详略。全部只存 localStorage，不影响后端行为。
  * 只是界面偏好。
  *
- * ★ “详略”（`detailMode`）为什么也放这里、而不是各页自己一个 ref：
- *   它管的是"要不要把**每一块的指纹**铺出来"，同一件事在文件详情、
- *   证据池、完整性验证三页都有。放在一页里切完、翻页又变回简略，
- *   是那种"每次都要重点一遍"的割裂感。默认给 **detailed**：
- *   这一版就是想让人看见密码学细节。
+ * `detailMode` 置于此处而非各页自建 ref 的原因：
+ *   它控制是否逐块显示指纹，该设置同时作用于文件详情、证据池、完整性验证三页。
+ *   若按页存放，切换页面后会回到默认值。
+ *   默认值：detailed。
  */
 export const useThemeStore = defineStore('theme', {
   state: () => ({
@@ -49,8 +48,8 @@ export const useThemeStore = defineStore('theme', {
     /**
      * 切"简略 / 详细"。
      *
-     * ★ 不动 DOM（与上面三个不同）：它只控制**渲染什么**，
-     *   各页自己 `v-if` 就行，不需要给根元素挂 class。
+      * 不操作 DOM：与上面三项不同，本项只控制渲染内容，
+      *   由各页自行 `v-if`，无需给根元素挂 class。
      */
     setDetail(v) {
       this.detailMode = v === 'brief' ? 'brief' : 'detail'

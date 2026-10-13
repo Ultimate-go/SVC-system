@@ -96,7 +96,7 @@ async function copy(text) {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 12px;
-  font-size: 12px;
+  font-size: 13px;
   overflow-x: auto;
   color: var(--text-1);
   white-space: pre-wrap;

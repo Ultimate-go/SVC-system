@@ -1,6 +1,6 @@
 <script setup>
 /**
- * CSS 横条 —— 一根横条按比例定宽。不引 ECharts。
+ * CSS 横条：按比例定宽。不引入 ECharts。
  * props: value(当前值), max(最大值), tone(颜色), label(可选左侧标签)。
  */
 const props = defineProps({
@@ -55,7 +55,7 @@ function pct() {
 .meta {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .value {

@@ -1,28 +1,28 @@
 <script setup>
 /**
- * 一个「指纹」显示单元：**界面显示截断值，悬浮出完整值**。
+ * 指纹显示单元：界面显示截断值，悬浮显示完整值。
  *
- * 用法与 `PubKeyFingerprint.vue` 同一套（都是 `title` 原生提示、都走 BigInt），
- * 区别是这个更通用：任何一个十进制的群元素都能用它显示。
+ * 用法与 `PubKeyFingerprint.vue` 一致（均使用原生 `title` 提示与 BigInt），
+ * 本组件更通用：任何十进制的群元素均可显示。
  *
- * ★★ 一条不能反的约定：**显示的短串与提示里的完整串必须是同一个字符串的前缀**
- *   （两处都走 `BigInt(s).toString(16)`）。曾经有过"界面显示十六进制前 8 位、
- *   悬浮给十进制前 24 位"的写法 —— 那两者一眼对不上号，人会以为自己看错了。
- *   所以提示里主串是**完整十六进制**，十进制只作为附加参考。
+ * 不变式：界面显示的短串与提示中的完整串必须是同一字符串的前缀
+ *   （两处均经 `BigInt(s).toString(16)`）。若显示十六进制而提示给十进制，
+ *   两者无法对应，会被误认为显示错误。
+ *   因此提示中的主串为完整十六进制，十进制仅作附加参考。
  *
- * ★ 不碰网络、不读 store：纯展示件，方便在表格/卡片里到处放。
+ * 纯展示组件：不访问网络、不读 store，可在表格与卡片中复用。
  */
 import { computed } from 'vue'
 import { hexFp, hexFull, decHead } from '../../utils/format'
 
 const props = defineProps({
-  //: 十进制字符串（群元素）—— 后端一律按十进制传大整数。
+  //: 十进制字符串（群元素）。后端统一以十进制传大整数。
   value: { type: [String, Number], default: '' },
-  //: 界面上显示多少位十六进制（提示里给的永远是完整值）。
+  //: 界面显示的十六进制位数；提示中始终给出完整值。
   len: { type: Number, default: 16 },
-  //: 提示里是否附上十进制前若干位（老读者习惯用十进制认东西）。
+  //: 提示中是否附上十进制前若干位。
   showDecimal: { type: Boolean, default: true },
-  //: 前缀标签（比如 "π"、"S_I"），不传就不显示。
+  //: 前缀标签（如 "π"、"S_I"）；不传则不显示。
   label: { type: String, default: '' },
 })
 
@@ -47,10 +47,10 @@ const tip = computed(() => {
 
 <style scoped>
 .hash-text {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--accent);
   cursor: help;
-  /* 提示里给完整值，所以短串本身允许被截断显示 */
+  /* 提示中给出完整值，因此短串允许截断显示。 */
   word-break: break-all;
 }
 .hash-text .lbl {

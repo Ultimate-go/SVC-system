@@ -2,8 +2,8 @@ import { ref } from 'vue'
 
 /**
  * 异步动作封装：running / error + run(fn)。
- * 用于按钮点击触发的写操作，把 loading 态与错误统一起来。
- * 错误通常已由 axios 拦截器弹过 ElMessage，这里只记录，不重复弹。
+ * 用于按钮触发的写操作，统一 loading 态与错误处理。
+ * 错误通常已由 axios 拦截器弹出提示，此处只记录，不重复提示。
  */
 export function useAsyncAction() {
   const running = ref(false)

@@ -69,7 +69,7 @@ function missing(gi, i) {
     <div v-for="(gi, i) in shown" :key="gi" class="fp-row">
       <span class="mono idx">{{ labelOf(gi) }}</span>
       <HashText v-if="!missing(gi, i)" :value="values[i]" :len="len" />
-      <span v-else class="text-3" style="font-size: 12px">（这次没取到）</span>
+      <span v-else class="text-3" style="font-size: 13px">（这次没取到）</span>
       <span v-if="srcOf(gi)" class="src text-3">{{ srcOf(gi) }}</span>
     </div>
     <details v-if="truncated" class="note-collapse">
@@ -102,10 +102,10 @@ function missing(gi, i) {
   border-bottom: none;
 }
 .idx {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .src {
-  font-size: 11px;
+  font-size: 13px;
 }
 </style>

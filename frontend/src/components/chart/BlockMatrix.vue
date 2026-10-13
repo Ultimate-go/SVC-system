@@ -194,7 +194,7 @@ function cellState(gi, nid) {
 }
 .matrix {
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 13px;
 }
 .matrix th,
 .matrix td {
@@ -233,7 +233,7 @@ function cellState(gi, nid) {
   display: flex;
   gap: 16px;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .lg {
@@ -243,7 +243,7 @@ function cellState(gi, nid) {
 }
 .truncate-note {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
 }
 </style>

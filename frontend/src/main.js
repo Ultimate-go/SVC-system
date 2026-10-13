@@ -23,13 +23,13 @@ app.use(ElementPlus, { locale: zhCn })
 const theme = useThemeStore(pinia)
 theme.apply()
 
-// 401 兜底：清 token 并跳登录。由 client.js 的拦截器调用。
+// 401 兜底处理：清除 token 并跳转登录。由 client.js 的拦截器调用。
 //
-// ★ 两个细节都是真踩过的：
-//   1. 页面一进来常常**并发**好几个请求，同一瞬间会来好几次 401 ——
-//      只处理第一次，否则会重复跳转，还会把下面那个「为什么掉线」的标记冲掉；
-//   2. ``expired=1`` 是给登录页看的，决定要不要显示「上次的登录状态已失效」。
-//      只有**本来有令牌**才带这个标记：从没登录过的人不该看到任何提示。
+// 两处约束：
+//   1. 页面加载时可能并多个请求，同一时刻会出现多次 401 ——
+//      只处理第一次，否则会重复跳转，并覆盖「会话失效」标记；
+//   2. ``expired=1`` 供登录页判断是否显示「上次的登录状态已失效」。
+//      仅在原本存在令牌时携带该标记。
 let bouncePending = false
 setUnauthorizedHandler(() => {
   const auth = useAuthStore(pinia)

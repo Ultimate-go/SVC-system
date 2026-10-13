@@ -33,7 +33,7 @@ defineProps({
   color: var(--text-2);
 }
 .desc {
-  font-size: 12px;
+  font-size: 13px;
 }
 .action {
   margin-top: 4px;

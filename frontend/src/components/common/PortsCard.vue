@@ -328,7 +328,7 @@ defineExpose({ refresh: load })
   <div class="panel mb-3" v-loading="loading">
     <div class="deploy-head">
       <h4 class="sec-title" style="margin-bottom: 0">端口</h4>
-      <span class="mono text-2" style="font-size: 12px">
+      <span class="mono text-2" style="font-size: 13px">
         现在跑着：后端 {{ running.backend ?? '未知' }} / 前端 {{ running.frontend ?? '未知' }}
         <template v-if="info"> · 配置 {{ info.backend }} / {{ info.frontend }}</template>
       </span>
@@ -475,7 +475,7 @@ defineExpose({ refresh: load })
     </p>
 
     <div class="deploy-foot mt-3">
-      <span class="text-3" style="font-size: 12px">
+      <span class="text-3" style="font-size: 13px">
         端口存在 <span class="mono">{{ info?.source || 'nodes/deploy.json' }}</span>（与台数同一个文件）；
         「重置并启动.cmd」会把端口与台数一起复位成默认值。
       </span>
@@ -517,7 +517,7 @@ defineExpose({ refresh: load })
   display: flex;
   gap: 20px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
   margin-top: 12px;
 }
@@ -532,7 +532,7 @@ defineExpose({ refresh: load })
   flex-wrap: wrap;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-bottom: 12px;
   line-height: 1.7;
@@ -552,7 +552,7 @@ defineExpose({ refresh: load })
   grid-template-columns: 96px 110px 132px 110px;
   align-items: center;
   gap: 10px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ports-head {
   color: var(--text-3);

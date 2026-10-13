@@ -668,7 +668,7 @@ onMounted(load)
           <div class="meta-item"><span class="k">δ 指纹</span><span class="mono">{{ file.delta_fp }}</span></div>
           <div class="meta-item"><LockTag :can-decrypt="file.can_decrypt" /></div>
         </div>
-        <div class="digest text-2" style="font-size: 12px">
+        <div class="digest text-2" style="font-size: 13px">
           上传时摘要（SHA-256）：<span class="mono">{{ hexFp(file.content_digest, 16) }}</span>
           <span class="text-3">（它不随改块更新，协调者手里没有完整明文）</span>
         </div>
@@ -823,7 +823,7 @@ onMounted(load)
           <el-button type="warning" :loading="restoring" @click="doRestore">
             回退这 {{ history.length }} 块到上一版
           </el-button>
-          <span class="text-3" style="font-size: 12px">回退会重新承诺，版本号 +1（只增不减），并记审计</span>
+          <span class="text-3" style="font-size: 13px">回退会重新承诺，版本号 +1（只增不减），并记审计</span>
         </div>
 
         <el-alert
@@ -934,7 +934,7 @@ onMounted(load)
                         ? `浏览器本地验证未通过 —— 这一块不可信（第 ${humanIdx(oldInfo.blockIdx)} 块）`
                         : '没读过这块：本地没记录，无法判断服务器有没有换过它'"
               >
-                <div style="font-size: 12px">
+                <div style="font-size: 13px">
                   <p v-if="oldInfo.verdict === 'stale'" class="text-danger">
                     服务端返回的内容为改块前版本（{{ fmtWhen(oldInfo.staleFrom?.ts) }} ·
                     由「{{ oldInfo.staleFrom?.source || '本地记录' }}」记下，
@@ -982,7 +982,7 @@ onMounted(load)
               <div
                 v-if="oldInfo?.binary"
                 class="mono text-3"
-                style="font-size: 12px; word-break: break-all"
+                style="font-size: 13px; word-break: break-all"
               >
                 {{ oldInfo.hex.slice(0, 160) }}{{ oldInfo.hex.length > 160 ? '…' : '' }}
               </div>
@@ -991,13 +991,13 @@ onMounted(load)
               <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doModify">改块</el-button>
               <el-button :disabled="!isMine" :loading="writeRunning" @click="doZero">清零</el-button>
             </div>
-            <p class="text-3" style="font-size: 12px">
-                ★ 「取回当前内容」有<b>两条独立依据</b>：① <b>密码学</b> ——
+            <p class="text-3" style="font-size: 13px">
+                「取回当前内容」有<b>两条独立依据</b>：① <b>密码学</b> ——
                 密文与证据在浏览器本地校验，服务端无法伪造；
                 ② <b>本地锚</b> —— 账户写入该块时留存的明文哈希，记录于本地，服务端不可读写，
                 可检出回滚至旧版本的情形。覆盖范围限于当前设备记录，跨设备记录不互通。
             </p>
-            <p class="text-3" style="font-size: 12px">
+            <p class="text-3" style="font-size: 13px">
               「清零」把上面这个块号的内容换成<strong>等长的全 0 字节</strong>：它走的是改块
               （<span class="mono">op = mod</span>）而不是删除，所以块仍在、下标不变、总块数不变，
               完整性校验仍可通过；全 0 内容仅在解封后可见。
@@ -1008,7 +1008,7 @@ onMounted(load)
             <div class="write-form">
               <el-input v-model="appendText" type="textarea" :rows="3" placeholder="要追加到末尾的内容" />
               <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doAppend">追加</el-button>
-              <p class="text-3" style="font-size: 12px">
+              <p class="text-3" style="font-size: 13px">
                 追加不回头填上一块的空位，所以追加后的切法和重新上传不完全一样。
               </p>
             </div>
@@ -1022,8 +1022,8 @@ onMounted(load)
               <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">截断</el-button>
               <el-alert type="warning" :closable="false" class="trunc-warn" title="只删这份文件自己的末尾">
                 <template #default>
-                  <p style="font-size: 12px">① 新方案下每份文件各占自己的位置段，所以删的是这份文件自己的末尾，碰不到别的文件 —— 旧设计里“删中间一份要连后面一起删”的束缚已经不在了（那份文件本身没在全局末尾时会报 400）。</p>
-                  <p style="font-size: 12px">② 不能删到一块不剩（整份删除是另一件事）。此操作不可撤销。</p>
+                  <p style="font-size: 13px">① 新方案下每份文件各占自己的位置段，所以删的是这份文件自己的末尾，碰不到别的文件 —— 旧设计里“删中间一份要连后面一起删”的束缚已经不在了（那份文件本身没在全局末尾时会报 400）。</p>
+                  <p style="font-size: 13px">② 不能删到一块不剩（整份删除是另一件事）。此操作不可撤销。</p>
                 </template>
               </el-alert>
             </div>
@@ -1060,7 +1060,7 @@ onMounted(load)
             ? `浏览器本地验证通过：${decryptResult.blocks} 块 · ${decryptResult.bytes} 字节 · ${decryptResult.ms} ms`
             : `浏览器本地验证未通过：${decryptResult.verify.codeName} —— ${decryptResult.verify.message}`"
         >
-          <div style="font-size: 12px">
+          <div style="font-size: 13px">
             <p>
               素数：{{ decryptResult.primeCheck.message }}。
               分量由浏览器依据密文重算，与服务端返回值比对：
@@ -1097,7 +1097,7 @@ onMounted(load)
           </div>
         </el-alert>
         <div v-if="decryptResult" class="mt-3">
-          <div class="text-2 mono" style="font-size: 12px">{{ decryptResult.bytes }} 字节</div>
+          <div class="text-2 mono" style="font-size: 13px">{{ decryptResult.bytes }} 字节</div>
           <div v-if="decodePreview" class="decrypt-text">
             <el-alert
               v-if="decodePreview.head || decodePreview.tail"
@@ -1242,7 +1242,7 @@ onMounted(load)
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
-  font-size: 12px;
+  font-size: 13px;
 }
 .rev-idx {
   color: var(--text-1);

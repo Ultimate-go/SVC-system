@@ -188,7 +188,7 @@ function go(item) {
   padding: 12px 8px;
 }
 .nav-label {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -236,7 +236,7 @@ function go(item) {
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-3);
 }
 

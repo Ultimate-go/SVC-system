@@ -3,8 +3,8 @@
  * 内联 SVG 图标集。全部自己写 <svg>，不引外部字体或 sprite。
  *
  * 用法只有一种：<Icon name="dashboard" :size="14" />（图标名见下面的 ICONS 表）。
- * 图标表通过 defineExpose 暴露，方便别处读名字，但**没有** IconDashboard 这类
- * 具名导出 —— 别去 import 它们。
+ * 图标表通过 defineExpose 暴露以便按名读取；不存在 IconDashboard 一类具名导出，
+ * 不得 import 单个图标。
  */
 import { computed } from 'vue'
 

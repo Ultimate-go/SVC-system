@@ -3,9 +3,9 @@
  * 顶栏面包屑。
  *
  * 层级来自 routes.js 的 meta.parent —— 只有详情类页面有父级。
- * 没有 parent 时退化成「只显示当前页名」，与原来顶栏的行为一致。
+ * 无 parent 时退化为只显示当前页名。
  *
- * ★ 它是可点的：详情页上「返回」原来只有一个按钮，现在父级标题本身就是入口。
+ * 父级标题本身可点击，作为详情页的返回入口。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'

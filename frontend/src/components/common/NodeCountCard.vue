@@ -266,7 +266,7 @@ defineExpose({ refresh: load })
   <div class="panel mb-3" v-loading="loading">
     <div class="deploy-head">
       <h4 class="sec-title" style="margin-bottom: 0">服务器台数</h4>
-      <span class="mono text-2" style="font-size: 12px">
+      <span class="mono text-2" style="font-size: 13px">
         跑着 {{ running }} 台<template v-if="info"> · 配置 {{ info.node_count }} 台</template>
       </span>
     </div>
@@ -325,7 +325,7 @@ defineExpose({ refresh: load })
     />
 
     <!-- ---------- 收缩前的预估（只算不动，全部来自 /deploy/plan） ---------- -->
-    <div v-if="plan && plan.clamped" class="mt-3 text-3" style="font-size: 12px">
+    <div v-if="plan && plan.clamped" class="mt-3 text-3" style="font-size: 13px">
       台数被夹到 {{ plan.node_count }}（允许 {{ info?.min }}–{{ info?.max }}）。
     </div>
 
@@ -365,13 +365,13 @@ defineExpose({ refresh: load })
       </details>
     </template>
 
-    <div v-else-if="plan && growing" class="mt-3 text-3" style="font-size: 12px">
+    <div v-else-if="plan && growing" class="mt-3 text-3" style="font-size: 13px">
       要新加 {{ (plan.will_be_added || []).join('、') }}。
       <b>旧块不动</b>，还在原来那几台上；只有之后新写入的块才会摊到新机器上。
     </div>
 
     <div class="deploy-foot mt-3">
-      <span class="text-3" style="font-size: 12px">
+      <span class="text-3" style="font-size: 13px">
         台数存在 <span class="mono">{{ info?.source || 'nodes/deploy.json' }}</span>；
         「重置并启动.cmd」会把它复位成默认值。
       </span>
@@ -426,7 +426,7 @@ defineExpose({ refresh: load })
   display: flex;
   gap: 20px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
   margin-top: 12px;
 }
@@ -437,7 +437,7 @@ defineExpose({ refresh: load })
   display: flex;
   gap: 20px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .deploy-preview b {
@@ -451,7 +451,7 @@ defineExpose({ refresh: load })
   flex-wrap: wrap;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-bottom: 12px;
   line-height: 1.7;

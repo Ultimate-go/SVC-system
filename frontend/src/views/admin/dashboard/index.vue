@@ -1,10 +1,10 @@
 <script setup>
 /**
- * 总览页（★ 2026-10-12 起对全体用户开放：普通用户与管理员都进这一页）。
- * 展示：公开参数、全局摘要 δ、规模、集群健康、密钥模型、待补推横幅、自检。
+ * 总览页。对全体用户开放：普通用户与管理员均可访问。
+ * 展示内容：公开参数、逐文件摘要、规模、集群健康、密钥模型、待补推横幅、自检。
  *
- * ★ 自检按钮也对所有人可用（后端 ``POST /api/admin/check`` 已改为
- *   ``current_user``）：它只读，失败原因会原样显示。
+ * 自检按钮对全体用户可用（后端 ``POST /api/admin/check`` 使用 ``current_user``）。
+ * 该接口只读；失败原因原样显示。
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
@@ -26,7 +26,7 @@ const pending = ref(null)
 const checking = ref(false)
 const checkResult = ref(null)
 
-// ---- 系统自检：逐项推进（与后端 store.check() 的检查逻辑一一对应） ----
+// ---- 系统自检：逐项推进，与后端 store.check() 的检查项一一对应 ----
 const CHECK_ITEMS = [
   { key: 'registry', name: '位置段登记表', desc: '登记表自身一致' },
   { key: 'sync', name: '登记表与向量', desc: '登记表与向量同步' },
@@ -40,7 +40,7 @@ const CHECK_ITEMS = [
   { key: 'digest', name: '增量摘要一致性', desc: '增量摘要与一次性承诺一致' },
 ]
 
-// 自检失败时，把后端报错按关键词定位到具体检查项（best-effort）。
+// 自检失败时，按关键词把后端报错定位到具体检查项。
 const FAIL_LOCATE = [
   { key: 'registry', re: /登记表/ },
   { key: 'n_sync', re: /还没收敛|停在 n=|没跟上/ },
@@ -81,11 +81,11 @@ function saveLastCheck(record) {
   try {
     localStorage.setItem(LAST_CHECK_KEY, JSON.stringify(record))
   } catch {
-    /* 隐私模式写不进去：不影响自检结论本身 */
+    /* 隐私模式下无法写入，不影响自检结论 */
   }
 }
 
-/* 逐文件摘要默认只铺开头几条：文件多了这一块会没完没了地长。 */
+/* 逐文件摘要默认只显示前几条，避免随文件数无限增长。 */
 const FILE_PREVIEW = 4
 const showAllFiles = ref(false)
 const deltaFiles = computed(() => delta.value.files || [])
@@ -94,7 +94,7 @@ const visibleFiles = computed(() =>
 )
 const hiddenFileCount = computed(() => Math.max(0, deltaFiles.value.length - FILE_PREVIEW))
 
-// 逐项扫描节奏：每项约 1 秒，10 项合计约 10.5 秒，让过程从容、不显仓促。
+// 逐项扫描节奏：每项约 1 秒，10 项合计约 10.5 秒。
 const SCAN_MS = 950
 const STEP_GAP_MS = 100
 
@@ -113,13 +113,11 @@ const keywrap = computed(() => status.value?.keywrap || {})
 const clusterHealthy = computed(() => !status.value?.nodes_down?.length && !status.value?.under_replicated)
 
 /**
- * 副本达标的块数 —— 给那个环形仪表用。
+ * 副本达标的块数，供环形仪表使用。
  *
- * ★ 以前这个仪表画的是「已用位置 / n_max」。改造后**位置上限不存在了**
- *   （素数按块身份派生、槽位可以无限增长），"用了百分之多少"这个数
- *   失去了意义 —— 分母是一个与业务无关的常数。
- *   换成「多少块副本是齐的」：同样的位置、同样一眼看得懂，
- *   而且它**真的**在描述集群健康度（核副本不再是装饰）。
+ * 该仪表此前绘制「已用位置 / n_max」。位置上限已不存在（素数按块身份派生，
+ *   槽位可无限增长），该比值失去意义，其分母为与业务无关的常数。
+ *   现绘制「副本达标的块数 / 总块数」，直接反映集群健康度。
  */
 const replicaOk = computed(() =>
   Math.max(0, Number(status.value?.blocks || 0) - Number(status.value?.under_replicated || 0)),
@@ -219,7 +217,7 @@ onMounted(() => {
     >
       <template #default>
         <p class="mb-2">
-          请勿重复上传（该批全局下标已分配）。可在「设备」页执行补推；系统亦以固定间隔自动重试。
+          请勿重复上传（该批全局下标已分配）。可在「设备」页执行补推；系统亦按固定间隔自动重试。
         </p>
         <p v-if="pending?.site_note" class="mb-2">{{ pending.site_note }}</p>
         <el-button size="small" @click="router.push('/devices')">去补推</el-button>
@@ -231,7 +229,7 @@ onMounted(() => {
         <div>
           <span class="eyebrow mono">SYSTEM OVERVIEW / IAVC-VDSS</span>
           <h1 id="overview-title">全局运行态势</h1>
-          <p>从文件进入，到形成可验证证据的实时数据链路。</p>
+          <p>从文件进入系统到形成可验证证据的完整数据链路。</p>
         </div>
         <div class="health-pill" :class="clusterHealthy ? 'is-ok' : 'is-warn'">
           <span class="health-dot" />
@@ -240,15 +238,22 @@ onMounted(() => {
         </div>
       </div>
       <ProcessingFlow />
-      <!-- 管线下面是**当前真实规模**（全部取自 /api/system/status，没有编造值）：
-           管线上游画的是流程，这里补一句“这套流程现在跑了多少东西”。 -->
-      <div class="hero-scale">
-        <span class="hero-scale-item"><b class="mono">{{ status.files || 0 }}</b>份文件</span>
-        <span class="hero-scale-item"><b class="mono">{{ status.blocks || 0 }}</b>个块</span>
-        <span class="hero-scale-item"><b class="mono">{{ status.nodes || 0 }}</b>台节点</span>
-        <span class="hero-scale-item"><b class="mono">{{ status.replica_factor || 0 }}</b>份副本</span>
-        <span class="hero-scale-hint mono">LIVE · {{ status.mode }} · {{ status.transport }}</span>
-      </div>
+      <!-- 管线下方为当前规模，数值全部取自 /api/system/status。 -->
+      <div class="hero-scale" style="margin: 16px 0; display: flex; gap: 32px; align-items: center;">
+        <span class="hero-scale-item" style="font-size: 22px;">
+        <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.files || 0 }}</b>份文件
+        </span>
+  <span class="hero-scale-item" style="font-size: 22px;">
+    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.blocks || 0 }}</b>个块
+  </span>
+  <span class="hero-scale-item" style="font-size: 22px;">
+    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.nodes || 0 }}</b>台节点
+  </span>
+  <span class="hero-scale-item" style="font-size: 22px;">
+    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.replica_factor || 0 }}</b>份副本
+  </span>
+  <span class="hero-scale-hint mono" style="font-size: 14px; opacity: 0.6; margin-left: auto;">LIVE · {{ status.mode }} · {{ status.transport }}</span>
+</div>
     </section>
 
     <div class="section-heading">
@@ -256,13 +261,12 @@ onMounted(() => {
       <span class="section-note mono">CRS / STATIC</span>
     </div>
     <div class="grid">
-      <StatCard label="公开参数" :value="crs.N_bits" unit="位" hint="隐藏阶群的模数位长" />
-        <StatCard label="分量位长" :value="crs.l" unit="位" hint="一个分量的比特数" />
-        <StatCard label="素数位长" :value="crs.prime_bits" unit="位" hint="l + 1" />
-      <!-- ★ 以前这里是「位置上限 = n_max，不可更改」。改造后 n_max 不再是上限：
-           素数按块身份派生，块数没有任何天花板。于是改成一个**真的**在涨的数：
-           已分配过的存储槽位（含删除留下的空洞，所以它 ≥ 块数）。 -->
-      <StatCard label="存储槽位（已分配）" :value="delta.slots_allocated" hint="含删除留下的空洞" />
+      <StatCard hint-top label="公开参数" :value="crs.N_bits" unit="位" hint="隐藏阶群的模数位长" />
+        <StatCard hint-top label="分量位长" :value="crs.l" unit="位" hint="一个分量的比特数" />
+        <StatCard hint-top label="素数位长" :value="crs.prime_bits" unit="位" hint="分量位长 + 1" />
+      <!-- 原「位置上限 = n_max」已不适用：素数按块身份派生，块数无上限。
+            此处改为已分配的存储槽位（含删除留下的空洞，故 >= 块数）。 -->
+      <StatCard hint-top label="存储槽位" :value="delta.slots_allocated" hint="已分配位置，含删除留下的空洞" />
     </div>
 
     <div class="section-heading section-heading-spaced">
@@ -270,13 +274,14 @@ onMounted(() => {
       <span class="section-note mono">LIVE COUNTERS</span>
     </div>
     <div class="grid">
-      <StatCard label="文件数" :value="status.files" hint="全系统所有文件" />
-      <StatCard label="块数" :value="status.blocks" hint="各文件块数之和" />
-      <StatCard label="副本数" :value="status.replica_factor" hint="每块默认存几份" />
+      <StatCard hint-top label="文件数" :value="status.files" hint="全系统所有文件" />
+      <StatCard hint-top label="总块数" :value="status.blocks" hint="各文件块数之和" />
+      <StatCard hint-top label="副本数" :value="status.replica_factor" hint="每块默认存几份" />
       <StatCard
+        hint-top
         label="副本不足"
         :value="status.under_replicated"
-        :hint="status.under_replicated ? '开副本前传的老数据，重传可补齐' : '当前无缺口'"
+        :hint="status.under_replicated ? '开副本前上传的历史数据，重新上传可补齐' : '当前无缺口'"
       />
     </div>
 
@@ -292,9 +297,8 @@ onMounted(() => {
             <RingGauge :value="replicaOk" :max="status.blocks || 1" label="副本达标" />
             <div class="delta-detail">
               <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">在用块数（各文件之和）</span></div>
-              <!-- ★ 架构变了：摘要是**逐文件**的，没有单一的全局 U / C。
-                   以前这里显示 delta.U / delta.C —— 那两个字段在新架构里
-                   根本不存在，于是永远显示 "—"。现在如实给条数 + 逐条列表。 -->
+              <!-- 摘要为逐文件粒度，不存在单一全局 U / C。
+                   原 delta.U / delta.C 字段已不存在，故改为条数与逐条列表。 -->
               <div class="delta-item"><span class="k">向量</span><span class="v mono">{{ deltaFiles.length }}</span><span class="hint">每份文件一条</span></div>
               <div class="delta-item">
                 <span class="k">δ 指纹</span>
@@ -349,7 +353,7 @@ onMounted(() => {
           <div class="keywrap">
             <div class="keywrap-item"><span class="k">方案</span><span class="v">{{ keywrap.scheme }}</span></div>
             <div class="keywrap-item"><span class="k">用户 / 有密钥</span><span class="v mono">{{ keywrap.users }} / {{ keywrap.user_keys }}</span></div>
-            <div class="keywrap-item"><span class="k">服务端内存中的私钥</span><span class="v mono">{{ keywrap.sessions_with_key }}<span class="text-3" style="font-size: 11px">（默认模型下恒为 0）</span></span></div>
+            <div class="keywrap-item"><span class="k">服务端内存中的私钥</span><span class="v mono">{{ keywrap.sessions_with_key }}<span class="text-3" style="font-size: 13px">（默认模型下恒为 0）</span></span></div>
             <div class="keywrap-item"><span class="k">私钥存储位置</span><span class="v">{{ keywrap.private_key_storage }}</span></div>
             <div class="keywrap-item"><span class="k">解封在哪发生</span><span class="v">{{ keywrap.session_key_location || '——' }}</span></div>
           </div>
@@ -449,53 +453,58 @@ onMounted(() => {
   pointer-events: none;
 }
 .overview-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 24px; position: relative; z-index: 1; }
-.eyebrow, .section-kicker { color: var(--accent); font-size: 10px; letter-spacing: .13em; }
-.overview-head h1 { color: var(--text-1); font-size: 24px; letter-spacing: -.02em; margin: 7px 0 5px; }
-.overview-head p { color: var(--text-2); font-size: 13px; margin: 0; }
-.health-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-1); font-size: 12px; white-space: nowrap; background: color-mix(in srgb, var(--bg-raised) 78%, transparent); }
-.health-pill small { color: var(--text-3); font-size: 9px; margin-left: 3px; }
+.eyebrow, .section-kicker { color: var(--accent); font-size: 13px; letter-spacing: .13em; }
+.overview-head h1 { color: var(--text-1); font-size: 26px; letter-spacing: -.02em; margin: 7px 0 5px; }
+.overview-head p { color: var(--text-2); font-size: 15px; margin: 0; }
+.health-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-1); font-size: 14px; white-space: nowrap; background: color-mix(in srgb, var(--bg-raised) 78%, transparent); }
+.health-pill small { color: var(--text-3); font-size: 13px; margin-left: 3px; }
 .health-dot, .live-mark i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 12%, transparent); }
 .health-pill.is-warn .health-dot { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 12%, transparent); }
-/* 管线下面那行“当前规模”：数字取自 /api/system/status，实时刷新。 */
+/* 管线下方一行「当前规模」：数值取自 /api/system/status，实时刷新。 */
 .hero-scale { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 26px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line); position: relative; z-index: 1; }
-.hero-scale-item { color: var(--text-2); font-size: 12px; }
-.hero-scale-item b { color: var(--text-1); font-size: 17px; font-weight: 500; margin-right: 4px; }
-.hero-scale-hint { margin-left: auto; color: var(--text-3); font-size: 9px; letter-spacing: .1em; }
-/* 逐文件摘要的展开/收起 */
-.more-toggle { align-self: flex-start; margin-top: 10px; padding: 3px 0; color: var(--accent); font: inherit; font-size: 12px; background: none; border: 0; cursor: pointer; }
+.hero-scale-item { color: var(--text-2); font-size: 13px; }
+.hero-scale-item b { color: var(--text-1); font-size: 20px; font-weight: 500; margin-right: 4px; }
+.hero-scale-hint { margin-left: auto; color: var(--text-3); font-size: 13px; letter-spacing: .1em; }
+/* 逐文件摘要的展开 / 收起 */
+.more-toggle { align-self: flex-start; margin-top: 10px; padding: 3px 0; color: var(--accent); font: inherit; font-size: 14px; background: none; border: 0; cursor: pointer; }
 .more-toggle:hover { text-decoration: underline; }
-/* 自检按钮与“上次自检”一行 */
+/* 自检按钮与「上次自检」一行 */
 .diag-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.last-check { margin: 0; color: var(--text-3); font-size: 11px; }
+.last-check { margin: 0; color: var(--text-3); font-size: 13px; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 18px 1px 10px; }
 .section-heading-spaced { margin-top: 27px; }
-.section-heading h2 { color: var(--text-1); font-size: 16px; font-weight: 600; margin: 5px 0 0; }
-.section-note { color: var(--text-3); font-size: 10px; letter-spacing: .08em; }
+.section-heading h2 { color: var(--text-1); font-size: 19px; font-weight: 600; margin: 5px 0 0; }
+.section-note { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 .compact-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; margin-top: 6px; }
 .compact-section { min-width: 0; display: flex; flex-direction: column; }
 /* 自检 / 密钥模型整行显示：向下延伸时不再撑高同行的相邻卡片 */
 .compact-section--full { grid-column: 1 / -1; }
 .compact-section .section-heading { margin-top: 0; min-height: 43px; }
 .compact-section > .panel { flex: 1 1 auto; min-height: 214px; box-sizing: border-box; }
-/* 逐文件摘要会随文件数变长（默认只铺 4 条、可展开），所以它只保底高度、
+/* 逐文件摘要随文件数变长（默认显示 4 条，可展开），故只设最小高度；
    不设死高度；右边的运行状态卡则是恒定的几行，保持定高两边才对齐。 */
 .commitment-panel { height: auto; min-height: 214px; }
 .health-panel { height: 214px; }
 /* 整行的面板自适应高度，向下延伸不再受固定高度限制 */
 .compact-section--full > .panel { min-height: 0; height: auto; }
 .commitment-panel .delta-row { min-height: 112px; }
-.health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 12px; }
-.health-summary strong { color: var(--text-1); font-size: 31px; font-weight: 500; letter-spacing: -.04em; }
-.health-summary-status { margin-left: auto; font-size: 11px; }
+.health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 14px; }
+.health-summary strong { color: var(--text-1); font-size: 34px; font-weight: 500; letter-spacing: -.04em; }
+.health-summary-status { margin-left: auto; font-size: 13px; }
 .panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
-.panel-subtitle { color: var(--text-2); font-size: 12px; }
-.live-mark { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 9px; letter-spacing: .08em; }
+.panel-subtitle { color: var(--text-2); font-size: 14px; }
+.live-mark { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 .live-mark i { display: inline-block; width: 5px; height: 5px; }
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
 }
+/* 指标卡内文字字号整体上调，与页面其余文字保持均衡（仅作用于本页，不改共享组件基值） */
+.grid :deep(.stat-card .label) { font-size: 14px; }
+.grid :deep(.stat-card .value) { font-size: 30px; }
+.grid :deep(.stat-card .unit) { font-size: 15px; }
+.grid :deep(.stat-card .hint) { font-size: 13px; }
 .sec-title {
   font-size: 14px;
   font-weight: 500;
@@ -508,34 +517,36 @@ onMounted(() => {
 }
 .delta-detail {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 16px 32px;
   flex: 1;
 }
 .delta-item {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 .delta-item .k {
   font-family: var(--font-mono);
   color: var(--accent);
   font-weight: 500;
-  width: 20px;
+  font-size: 13px;
 }
 .delta-item .v {
   color: var(--text-1);
-  font-size: 15px;
+  font-size: 17px;
 }
 .delta-item .hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 13px;
 }
 .cluster-row {
   display: flex;
   flex-wrap: wrap;
   gap: 24px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-2);
 }
 .keywrap {
@@ -548,7 +559,7 @@ onMounted(() => {
   gap: 8px;
   align-items: baseline;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: 15px;
 }
 .keywrap-item .k {
   color: var(--text-3);
@@ -577,7 +588,7 @@ onMounted(() => {
   margin-bottom: 10px;
 }
 .check-progress-label {
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: .12em;
   color: var(--accent);
   white-space: nowrap;
@@ -660,13 +671,13 @@ onMounted(() => {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
 }
 .check-name {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-2);
   white-space: nowrap;
 }
 .check-desc {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-3);
   text-align: right;
   white-space: nowrap;
@@ -702,7 +713,7 @@ onMounted(() => {
   .compact-sections { grid-template-columns: 1fr; }
   .compact-section > .panel, .commitment-panel, .health-panel, .key-panel, .diagnostics-panel { height: auto; min-height: 0; }
 }
-/* 大屏（≥ 1500px）：卡片不被拉得过宽，一行别拉出一百多字的长句。 */
+/* 大屏（>= 1500px）：限制卡片宽度，避免单行文本过长。 */
 @media (min-width: 1500px) {
   .dashboard { max-width: 1560px; margin-left: auto; margin-right: auto; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(216px, 1fr)); }

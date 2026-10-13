@@ -374,6 +374,26 @@ function cardTitle(card) {
 }
 
 /**
+ * 完整标题按行给出：持有者、文件、覆盖块数各一行。
+ *
+ * 卡片上的标题是单行省略的，点开这里按行展示 —— 一行一个事实，
+ * 不再把「谁的文件、第几块、多少块」挤成一句。
+ */
+function cardTitleLines(card) {
+  const fs = card?.files || card?.result?.files || []
+  const out = []
+  for (const f of fs) {
+    const bs = Array.isArray(f.block_indices) ? f.block_indices : []
+    const n = bs.length || Number(f.n) || 0
+    const seg = bs.length ? `（第 ${humanList(bs.map((x) => x + 1)).join('、')} 块）` : ''
+    out.push(`${f.owner} 的文件 ${f.file_key}：${n} 块${seg}`)
+  }
+  if (!out.length) out.push(cardScope(card))
+  if (card?.src) out.push(card.src)
+  return out
+}
+
+/**
  * 「看完整标题」。
  *
  * ★ 标题在卡片上是**单行省略**的 —— 否则像
@@ -385,8 +405,9 @@ function cardTitle(card) {
  *   字可以直接选中、复制。
  */
 function showFullTitle(card) {
-  ElMessageBox.alert(cardTitle(card), '完整标题', {
+  ElMessageBox.alert(cardTitleLines(card).join('\n'), '这张卡覆盖什么', {
     confirmButtonText: '关闭',
+    customClass: 'pool-title-dialog',
   })
 }
 
@@ -437,42 +458,42 @@ const AGG_STEPS = [
   {
     name: '并下标集',
     en: 'UNION',
-    desc: '把选中那几张卡各自覆的块号并成一个集合。两份证据本身没法相加 —— 它们各自只对自己那些下标有定义。',
+    desc: '把所选卡片覆盖的块号合并为一个集合。两份证据不能直接相加：每份证据只对它覆盖的下标有定义。',
   },
   {
     key: '取回分量与凭证',
-    name: '取回材料',
+    name: '取得材料',
     en: 'FETCH',
-    desc: '把集合里每个块的分量（密文摘要）与它在向量里的位置取回来。',
+    desc: '取得集合内每个块的分量（密文摘要）及其在向量中的位置。',
   },
   {
     key: '合并位置集 P',
     name: '合并位置集',
     en: 'MERGE-P',
-    desc: '跳过多份文件时，把所有涉及的块抬到**一条**合并向量上 —— 这是设计 B 的关键：下标不再属于某一份文件。',
+    desc: '涉及多份文件时，把所有相关块抬到同一条合并向量上：此时下标不再属于任何单份文件。',
   },
   {
     key: '按主副本拆挑战',
     name: '拆挑战',
     en: 'SPLIT-CH',
-    desc: '一个挑战按主副本分给各节点，让每台只算自己存的那部分。',
+    desc: '按主副本把挑战分配给各节点，每个节点只计算自己持有的部分。',
   },
   {
     key: '承诺验证（合并向量）',
     name: '抬进合并向量',
     en: 'COMMIT',
-    desc: '把各文件的承诺抬进合并向量后重新算一次 δ —— 新的 δ 盖住了并集里的所有块。',
+    desc: '把各文件的承诺抬进合并向量后重新计算 δ，新的 δ 覆盖并集内全部块。',
   },
   {
     key: '聚合份额',
     name: '聚合成一份证据',
     en: 'AGGREGATE',
-    desc: '各节点的份额聚成**一份**证据：不管并了多少块、跳了几份文件，它仍是两个群元素（≤ 256 字节）。',
+    desc: '各节点的份额聚为一份证据：无论合并多少块、涉及多少文件，大小恒为两个群元素（≤ 256 字节）。',
   },
   {
     name: '结论',
     en: 'VERDICT',
-    desc: '新证据自己可验、可再聚合、可分解 —— 之后就和单文件证据一样用。',
+    desc: '新证据可独立验证、可再聚合、可分解，此后与单文件证据用法相同。',
   },
 ]
 
@@ -480,67 +501,67 @@ const DISAGG_STEPS = [
   {
     name: '定出要拆的子集',
     en: 'SUBSET',
-    desc: '从这张卡盖住的块里选出要单独拿走的那几块（人看是第几块）。',
+    desc: '从本卡覆盖的块中选出要单独取出的块（按人看的序号，从 1 起）。',
   },
   {
     key: '拆出子集证据（svc.disagg）',
     name: '拆出子集证据',
     en: 'DISAGG',
-    desc: '拿原来的证据推出一份只盖子集的新证据 —— 不用重新去节点取数据。',
+    desc: '由原证据推出只覆盖子集的新证据，无需重新向节点取得数据。',
   },
   {
     key: '验证拆出来的证据（VerRetrieve）',
-    name: '当场自验一次',
+    name: '当场自验',
     en: 'VERIFY',
-    desc: '新证据当场跑一遍公开检验：拆出来的东西必须自己站得住，不能“拆完再说”。',
+    desc: '新证据当场执行一次公开检验：拆出的证据必须独立成立。',
   },
   {
     name: '结论',
     en: 'VERDICT',
-    desc: '新卡入池，可以单独验证、继续聚合、再分解 —— 分解不会把原来的那张卡弄坏。',
+    desc: '新卡入池，可单独验证、继续聚合或再次分解；分解不影响原卡。',
   },
 ]
 
 const CROSS_STEPS = [
   {
-    name: '定要拆的那一份文件',
+    name: '选择文件',
     en: 'PICK',
-    desc: '跨文件卡是在「合并向量」上开的证据，它的下标不属于任何一份文件。所以要拆，得先说清要拆哪一份。',
+    desc: '跨文件卡是在合并向量上取得的证据，其下标不属于任何单份文件；分解前必须先指定文件。',
   },
   {
     key: '取回分量与凭证',
-    name: '取回那一份的材料',
+    name: '取得该文件的材料',
     en: 'FETCH',
-    desc: '只取这份文件自己的块 —— 拿到的分量与位置是它自己的，不是合并向量的。',
+    desc: '只取该文件自己的块：取得的分量与位置属于该文件，而非合并向量。',
   },
   {
     key: '生成挑战',
     name: '生成挑战',
     en: 'CHALLENGE',
-    desc: '现场取随机挑战：服务端押不到题，也就没机会先备一份“看起来对”的应答。',
+    desc: '现场生成随机挑战：服务端无法预知挑战，因而不能预先准备应答。',
   },
   {
     key: '各节点生成证明',
-    name: '各节点出证明',
+    name: '各节点生成证明',
     en: 'PROVE',
-    desc: '存了这些块的节点各算一份份额，最后要并回同一条向量。',
+    desc: '持有这些块的节点各计算一份份额，最终合并回同一条向量。',
   },
   {
     key: '聚合份额',
     name: '聚合成一份证据',
     en: 'AGGREGATE',
-    desc: '份额聚成一份证据（两个群元素）。',
+    desc: '份额聚为一份证据，大小为两个群元素。',
   },
   {
     key: '验证证明',
     name: '做一次双线性检验',
     en: 'BILINEAR',
-    desc: '当场公开检验一次：拆出来的东西必须自己站得住，不能“拆完就说自己对了”。',
+    desc: '当场执行公开检验：拆出的证据必须独立成立。',
   },
   {
     name: '结论',
     en: 'VERDICT',
-    desc: '拿到的是一份属于该文件自己的证据：能独立验证、能再聚合，也能继续分解。',
+    desc: '所得证据属于该文件自己：可独立验证、可再聚合、可继续分解。',
   },
 ]
 
@@ -554,42 +575,42 @@ const VERIFY_STEPS = [
   {
     name: '定下标集',
     en: 'SELECT',
-    desc: '只验你勾选的这些块。一份证据只对它盖住的下标有效 —— 没盖住的块，说它「验证通过」不算数。',
+    desc: '只验证所选块。一份证据仅对其覆盖的下标有效；未覆盖的块不因该证据而判定为通过。',
   },
   {
     key: '探测各节点（report）',
     name: '探测节点',
     en: 'PROBE',
-    desc: '问一遗集群：这些块现在分别存在哪几台。节点会如实报自己存了什么，这句话后面要拿验证来对它。',
+    desc: '查询集群：这些块当前由哪些节点持有。节点的声明随后由验证来核对。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '把这几块的密文拿回来 —— 拿回来的是密文，让协调者交明文它也给不出来。',
+    desc: '取得这些块的密文。协调者不持有明文。',
   },
   {
     key: '取回分量与凭证',
     name: '重算分量',
     en: 'DIGEST',
-    desc: '浏览器拿密文自己重算每一块的公开分量（SM3），不看服务端报的那份。',
+    desc: '浏览器依据密文自行重算每块的公开分量（SM3），不采用服务端提供的值。',
   },
   {
     key: '聚合凭证',
     name: '聚合成一份证据',
     en: 'AGGREGATE',
-    desc: '把这几块的分量聚成一份证据 π_I：两个群元素 ≤ 256 字节 —— 覆盖几块还是一块，都是这个大小。',
+    desc: '把这些块的分量聚为一份证据 π_I：大小为两个群元素（≤ 256 字节），与覆盖块数无关。',
   },
   {
     key: '承诺验证（VerRetrieve）',
     name: '公开检验一次',
     en: 'VERIFY',
-    desc: '拿 δ 与 π_I 做一次公开检验。它不需要明文、不需要密钥，也不需要相信任何一方 —— 谁拿这几样东西都能自己重跑。',
+    desc: '用 δ 与 π_I 执行一次公开检验。该检验不需要明文与密钥，也不依赖对任何一方的信任，任何持有这些输入的一方都可独立重算。',
   },
   {
     name: '结论',
     en: 'VERDICT',
-    desc: '通过 = 这些块还在、且与你上传那一版一致；不通过 = 有块被换/被删，或者交回来的密文对不上当前基准。',
+    desc: '通过：这些块仍在，且与上传版本一致。不通过：存在块被替换或被删除，或返回的密文与当前基准不符。',
   },
 ]
 
@@ -600,10 +621,10 @@ const STEPS_BY_KIND = {
   verify: VERIFY_STEPS,
 }
 const TITLE_BY_KIND = {
-  aggregate: '这次聚合走了哪几步',
-  disagg: '这次分解走了哪几步',
-  cross: '这次跨文件拆出走了哪几步',
-  verify: '这次验证走了哪几步',
+  aggregate: '聚合过程',
+  disagg: '分解过程',
+  cross: '跨文件拆出过程',
+  verify: '验证过程',
 }
 
 const processOpen = ref(false)
@@ -611,7 +632,7 @@ const processKind = ref('aggregate')
 const processTimings = ref(null)
 const processFacts = ref([])
 const processSteps = computed(() => STEPS_BY_KIND[processKind.value] || AGG_STEPS)
-const processTitle = computed(() => TITLE_BY_KIND[processKind.value] || '过程')
+const processTitle = computed(() => TITLE_BY_KIND[processKind.value] || '处理过程')
 
 function showProcess(kind, timings, facts) {
   processKind.value = kind
@@ -629,10 +650,10 @@ async function aggregateCards() {
     const card = await pool.aggregateSelected()
     if (files.size > 1) {
       ElMessage.success(
-        `已归约：${files.size} 份文件 → 一条合并向量上的证据（256 字节，覆盖 ${card?.indices?.length ?? 0} 个位置），仍可再聚合、可分解`,
+        `已归约：${files.size} 份文件归约为一条合并向量上的证据（256 字节，覆盖 ${card?.indices?.length ?? 0} 个位置），可继续聚合或分解`,
       )
     } else {
-      ElMessage.success(`已聚合 ${cardCount} 张卡（同一份文件内，走 VC.Agg）`)
+      ElMessage.success(`已聚合 ${cardCount} 张卡（同一份文件内，使用 VC.Agg）`)
     }
     showProcess('aggregate', card?.result?.timings, [
       { k: '参与卡片', v: `${cardCount} 张` },
@@ -677,7 +698,7 @@ async function mergeNow() {
  */
 async function verifySelected() {
   if (!pool.selectedCards.length) {
-    ElMessage.warning('先勾选几张卡片 —— 点卡片任意处都能选中')
+    ElMessage.warning('请先选择卡片。点击卡片任意位置即可选中')
     return
   }
   const files = pool.unionScope.files
@@ -685,10 +706,10 @@ async function verifySelected() {
     let firstAggregate = false
     try {
       await ElMessageBox.confirm(
-        `你选了 ${pool.selectedCards.length} 张卡，它们来自 ${files.size} 份文件。` +
-          '不同文件的证据各自落在自己的承诺上，一次结论只认「同一条向量」。' +
-          '要不要先聚合成一条合并向量上的证据，再验证？',
-        '先归约再验证？',
+        `已选 ${pool.selectedCards.length} 张卡，涉及 ${files.size} 份文件。` +
+          '不同文件的证据各自绑定自己的承诺，一次结论要求所有证据位于同一承诺。' +
+          '是否先聚合为一条合并向量上的证据，再验证？',
+        '先归约再验证',
         {
           confirmButtonText: '先聚合再验证',
           cancelButtonText: '直接验证',
@@ -707,7 +728,7 @@ async function verifySelected() {
       //   不能用“新出现的 id”去找：同一集合已有卡时 store 会**复用**那张卡，
       //   池子里根本不会多出新的 id（返值里才有它）。
       if (!card?.id) {
-        ElMessage.warning('没能归约出可验的卡 —— 上面的提示会说明原因，先别急着验')
+        ElMessage.warning('未能归约出可验证的卡；原因见上方提示')
         return
       }
       pool.clearSelection()
@@ -720,7 +741,7 @@ async function verifySelected() {
 async function batchVerify() {
   const cards = pool.selectedCards
   if (!cards.length) {
-    ElMessage.warning('先勾选几张卡片')
+    ElMessage.warning('请先选择卡片')
     return
   }
   batchRunning.value = true
@@ -736,12 +757,12 @@ async function batchVerify() {
     // ★ 点了要看得见：过程（每一步耗时 + 真实中间值）用弹框摆出来，
     //   结论文本与两套耗时对照仍在下面那块结果面板里。
     showProcess('verify', data?.timings, [
-      { k: '验证卡片', v: `${cards.length} 张` },
+      { k: '验证卡片数', v: `${cards.length} 张` },
       { k: '一次结论', v: data?.ok ? '通过' : '未通过' },
-      { k: '批量一次算完', v: data?.ms_batch != null ? `${data.ms_batch} ms` : '—' },
-      { k: '逐份分开对照', v: data?.ms_separate != null ? `${data.ms_separate} ms` : '—' },
+      { k: '批量验证耗时', v: data?.ms_batch != null ? `${data.ms_batch} ms` : '—' },
+      { k: '逐份对照耗时', v: data?.ms_separate != null ? `${data.ms_separate} ms` : '—' },
       {
-        k: '结论覆盖',
+        k: '结论覆盖范围',
         v: `${data?.universe_n ?? 0} 个位置 / ${(data?.universe_files || []).length} 份文件`,
       },
     ])
@@ -852,7 +873,7 @@ function openCrossDisagg() {
   const cross = many.find((c) => cardFiles(c).length > 1)
   if (!cross) {
     ElMessage.warning(
-      '先勾选一张跨文件的卡（只覆盖一份文件的那种，请用旁边那个「分解（单文件）」）',
+      '请先选择一张跨文件卡；仅覆盖一份文件的卡请用「分解（单文件）」',
     )
     return
   }
@@ -865,13 +886,13 @@ async function confirmCrossDisagg() {
   const c = crossCard.value
   if (!c) return
   if (crossFileIdx.value === null) {
-    ElMessage.warning('先选一份文件')
+    ElMessage.warning('请先选择文件')
     return
   }
   const fs = c.files || c.result?.files || []
   const f = fs[crossFileIdx.value]
   if (!f) {
-    ElMessage.warning('这份文件已经不在这张卡里了')
+    ElMessage.warning('该文件已不在本卡覆盖范围内')
     return
   }
   const blocks = crossBlocks.value
@@ -883,8 +904,8 @@ async function confirmCrossDisagg() {
   //   下标，正常构造下它是卡指数的子集、撞不上；但卡的来源一旦变多就会先炸。
   if (blocks.length > MAX_QUERY_INDICES) {
     ElMessage.warning(
-      `这份文件在这张卡里有 ${blocks.length} 块，超过一次能查的 ${MAX_QUERY_INDICES} 块 —— ` +
-        '先把它拆成几张小卡，再逐张拆。',
+      `该文件在本卡内共 ${blocks.length} 块，超过单次可查询的 ${MAX_QUERY_INDICES} 块。` +
+        '请先拆成多张小卡，再逐张拆出。',
     )
     return
   }
@@ -904,13 +925,13 @@ async function confirmCrossDisagg() {
     const { data } = await evidenceApi.queryFiles([[f.owner, f.file_key]], blocks)
     pool.addCard({
       label: `拆出（跨文件）：${f.file_key} 第 ${span(blocks)} 块`,
-      src: '分解而来（跨文件 → 按文件取回）',
+      src: '分解而来（跨文件，按文件取得）',
       result: data,
     })
     crossOpen.value = false
     ElMessage.success(
-      `已从这张跨文件卡里拆出 ${f.file_key} 的第 ${span(blocks)} 块（共 ${blocks.length} 块）——` +
-        '这是一份属于该文件自己的证据',
+      `已从该跨文件卡拆出 ${f.file_key} 的第 ${span(blocks)} 块（共 ${blocks.length} 块）` +
+        '；该证据属于这份文件自己',
     )
     showProcess('cross', data?.timings, [
       { k: '原卡覆盖', v: `${c.indices?.length ?? 0} 个位置` },
@@ -968,12 +989,12 @@ function groupHeadAt(i) {
       ? {
           title: '跨文件证据（合并向量）',
           note:
-            '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
-            '不按单份文件编号 —— 分解时也不能按单文件块号去切。',
+            '由多份文件的承诺抬进同一条合并向量后取得，其位置属于那条合并向量，' +
+            '不按单份文件编号；分解时不能按单文件块号切分。',
         }
       : {
           title: '单文件证据',
-          note: '只覆盖一份文件，聚合走同一向量内的 VC.Agg（只收凭证，不碰密文）。',
+          note: '只覆盖一份文件；聚合使用同一向量内的 VC.Agg，仅处理凭证，不涉及密文。',
         }
   }
   if (i === firstCross && firstCross > 0) {
@@ -1016,18 +1037,18 @@ async function refetchCard(c) {
   //   地方 —— 超了后端只会回一句 422。提前拦住，并说清怎么办。
   if ((c.indices?.length || 0) > MAX_QUERY_INDICES) {
     ElMessage.warning(
-      `这张卡覆盖 ${c.indices.length} 块，超过一次能查的 ${MAX_QUERY_INDICES} 块 —— ` +
-        '请回「上传文件」重新入池（那边会按上限自动切成几张卡）。',
+      `本卡覆盖 ${c.indices.length} 块，超过单次可查询的 ${MAX_QUERY_INDICES} 块。` +
+        '请回到「上传文件」页重新入池，该页会按上限自动切分为多张卡。',
     )
     return
   }
   refetching.value = true
   try {
     const { data } = await evidenceApi.query(c.indices)
-    pool.addCard({ label: `重取：${span(c.indices)}`, result: data, src: '重新取回' })
-    ElMessage.success(`已按当前 δ 重新取回 ${c.indices.length} 块`)
+    pool.addCard({ label: `重新取得：${span(c.indices)}`, result: data, src: '重新取得' })
+    ElMessage.success(`已按当前 δ 重新取得 ${c.indices.length} 块`)
   } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '重新取回失败')
+    ElMessage.error(e?.response?.data?.detail || '重新取得失败')
   } finally {
     refetching.value = false
   }
@@ -1045,21 +1066,21 @@ async function refetchCard(c) {
 function openDisagg() {
   const cards = pool.selectedCards
   if (!cards.length) {
-    ElMessage.warning('先勾选一张卡片（覆盖至少 2 块）')
+    ElMessage.warning('请先选择一张覆盖至少 2 块的卡片')
     return
   }
   const many = cards.filter((x) => (x.indices?.length || 0) >= 2)
   if (!many.length) {
-    ElMessage.warning('勾中的卡片都只覆盖 1 块，拆不出真子集')
+    ElMessage.warning('所选卡片均只覆盖 1 块，无法拆出真子集')
     return
   }
   const single = many.find((x) => cardFiles(x).length <= 1)
   if (!single) {
     const names = cardFiles(many[0])
     ElMessage.warning(
-      '这个「分解（单文件）」要在同一份文件的卡上做 —— 勾中的卡片都跨了多份文件' +
+      '「分解（单文件）」只适用于同一份文件的卡；所选卡片跳了多份文件' +
         (names.length ? `（如 ${names.slice(0, 3).join('、')}${names.length > 3 ? ' 等' : ''}）` : '') +
-        '。想按文件拆的话，请用旁边那个「分解（跨文件）」。',
+        '。按文件拆请使用「分解（跨文件）」。',
     )
     return
   }
@@ -1082,7 +1103,7 @@ async function confirmDisagg() {
   if (!c) return
   const K = disaggK.value
   if (!K.length) {
-    ElMessage.warning('选中的区间是空的')
+    ElMessage.warning('所选区间为空')
     return
   }
   disaggRunning.value = true
@@ -1118,14 +1139,15 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="证据池" subtitle="取证据，也能跨文件聚合成一份" />
+    <PageHeader title="证据池" subtitle="取得证据，并可跨文件归约为一份" />
 
     <div class="pool-wrap">
+    <div class="pool-side">
     <div class="panel mb-3">
       <div class="toolbar">
         <el-button :disabled="!pool.selectedCards.length" :loading="aggregating" @click="aggregateCards">聚合选中</el-button>
         <el-button type="primary" :disabled="!pool.selectedCards.length" :loading="batchRunning" @click="verifySelected">
-          验证{{ pool.selectedCards.length > 1 ? `这 ${pool.selectedCards.length} 份` : '' }}
+          验证{{ pool.selectedCards.length > 1 ? `（已选 ${pool.selectedCards.length} 张）` : '' }}
         </el-button>
         <el-button :disabled="!pool.selectedCards.length" @click="openDisagg" :loading="disaggRunning">分解（单文件）</el-button>
         <el-button :disabled="!pool.selectedCards.length" @click="openCrossDisagg" :loading="crossRunning">分解（跨文件）</el-button>
@@ -1135,20 +1157,20 @@ onMounted(() => {
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
       <p class="sweep-hint text-3">
-        按住鼠标在卡片上拖动，可以连着勾选（从已选中的卡片起手拖 = 连着取消）。
+        在卡片区域按住拖动可连续选择；从已选中的卡片起拖则连续取消。
       </p>
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
-          选中一张或多张卡片，点「聚合选中」合并成一份，或点「一次验这 N 份」批量验证，
-          点「分解」拆出部分数据。这里的数据只保存在当前页面，关闭后不会保留；
-          要单独取某份文件的证据，可到「上传文件」页点「入池」。
+          选择一张或多张卡片后：点「聚合选中」合并为一份证据；点「验证」做批量验证；
+          点「分解」拆出子集证据。池中数据只保存在当前页，关闭后不保留；
+          需要单份文件的证据，可在「上传文件」页点「入池」。
         </p>
       </details>
     </div>
 
     <div v-if="!pool.cards.length">
-      <EmptyState title="证据池为空" description="可取自取证结果，或从「完整性验证」页加入验证结果" icon="list" />
+      <EmptyState title="证据池为空" description="可从取证结果加入，或在「完整性验证」页把结果入池" icon="list" />
     </div>
 
     <div v-else class="cards" :class="{ sweeping }">
@@ -1170,52 +1192,45 @@ onMounted(() => {
           @mousedown="startSweep(card.id, $event)"
           @click="onCardClick(card, $event)"
         >
-        <!-- ★ 复选框只是“显示选中态”：勾选由**整卡点击**驱动，
-             它自己不再带 change 处理（否则点一下会翻两次）。 -->
-        <el-checkbox :model-value="pool.selectedIds.includes(card.id)" @click.prevent>
-          <!-- ★ 挂 `title`：标题被省略号截断后，hover 还能看到全称。 -->
-          <span class="card-title mono" :title="cardTitle(card)">{{ cardTitle(card) }}</span>
-        </el-checkbox>
-        <!-- ★ “看完整标题”：标题在卡上被省略号截断了（否则长标题会撞到右边那张卡），
-             但它本身有信息量 —— 哪几份文件、各第几块。原生 `title` 只在悬停时
-             出现（触屏拿不到、也不好复制），所以给一个点得开的入口。
-             ★ 紧跟在标题下面：标题看不全 → 点开看全，是两个相邻的动作，
-               中间不该隔着「取回于 …」。 -->
-        <div style="margin: 2px 0 4px">
-          <el-button link type="primary" size="small" @click="showFullTitle(card)">
-            看完整标题
-          </el-button>
+        <!-- 第 1 行：标题与「看完整标题」。勾选由整卡点击驱动，这个复选框只显示选中态。 -->
+        <div class="card-row card-head">
+          <el-checkbox :model-value="pool.selectedIds.includes(card.id)" @click.prevent>
+            <!-- 挂 `title`：标题被省略号截断后，hover 仍能看到全称。 -->
+            <span class="card-title mono" :title="cardTitle(card)">{{ cardTitle(card) }}</span>
+          </el-checkbox>
+          <!-- 标题在卡上会被省略号截断，但它本身有信息量（哪几份文件、各第几块）。
+               原生 `title` 只在悬停时出现，触屏拿不到也不好复制，所以另给一个点得开的入口。 -->
+          <el-button link type="primary" size="small" @click="showFullTitle(card)">看完整标题</el-button>
         </div>
+        <!-- 第 2 行：取得位置、时间与来源。来源决定这张卡是「同文件内聚合」还是「跨文件归约」。 -->
         <div class="card-meta">
-          <span class="mono text-3">取回于 n={{ card.n ?? '—' }}</span>
+          <span class="mono text-3">取得于 n = {{ card.n ?? '—' }}</span>
           <span class="mono text-3">{{ fmtAgo(card.ts) }}</span>
-          <!-- 来源必须显示：它决定了这张卡是「同文件内 VC.Agg」还是「跨文件归约」在的 -->
           <span v-if="card.src" class="text-3">{{ card.src }}</span>
         </div>
-        <div v-if="card.result?.verify">
-          <VerifyResult :result="card.result" />
+        <!-- 第 3 行：结论与操作。 -->
+        <div class="card-row card-ops">
+          <el-tag v-if="card.result?.verify" :type="card.result.verify.ok ? 'success' : 'danger'" size="small" effect="plain">
+            {{ card.result.verify.ok ? '验证通过' : '验证未通过' }}
+          </el-tag>
+          <el-button v-if="card.indices?.length" link type="primary" size="small" @click="toggleCard(card)">
+            {{ isOpen(card) ? '收起逐块指纹' : `展开逐块指纹（${card.indices.length} 块）` }}
+          </el-button>
+          <el-button link type="danger" size="small" @click="pool.removeCard(card.id)">移除</el-button>
+          <el-tag v-if="isStale(card)" type="danger" size="small">已作废，需重新取得</el-tag>
         </div>
-
-        <!-- 逐块分量：详细模式默认展开，单张卡片也能自己开合 -->
-        <div v-if="card.indices?.length" class="card-fp">
-          <div class="fp-head">
-            <el-button link type="primary" size="small" @click="toggleCard(card)">
-              {{ isOpen(card) ? '收起逐块指纹' : `细看逐块指纹（${card.indices.length} 块）` }}
-            </el-button>
-            <span v-if="card.delta_fp" class="text-3" style="font-size: 11px">δ 指纹 {{ card.delta_fp }}</span>
+        <!-- 展开区接在第 3 行之下：卡片不预设高度，展开后向下变高。 -->
+        <div v-if="card.indices?.length && isOpen(card)" class="card-fp">
+          <div v-if="card.delta_fp" class="fp-head">
+            <span class="text-3">δ 指纹 {{ card.delta_fp }}</span>
           </div>
           <BlockFingerprints
-            v-if="isOpen(card)"
             :indices="card.indices"
             :values="card.result?.values || []"
             :refs="fpRefs(card)"
             :len="24"
             :limit="FP_ROWS"
           />
-        </div>
-        <el-tag v-if="isStale(card)" type="danger" size="small" class="mt-2">已作废，需重新取</el-tag>
-        <div class="card-actions mt-2">
-          <el-button link type="danger" size="small" @click="pool.removeCard(card.id)">移除</el-button>
         </div>
         </div>
       </template>
@@ -1225,20 +1240,20 @@ onMounted(() => {
     <!-- 分解（跨文件）：选**一份文件**，把它在这张卡里占的那些下标拆出来。
          ★ 与旁边那个「分解（单文件）」是两件事（见 openCrossDisagg 的注释）。
          弹框挂在 body 上，所以放在模板哪个位置都不影响渲染。 -->
-    <el-dialog v-model="crossOpen" title="分解（跨文件）—— 选一份文件" width="600px">
+    <el-dialog v-model="crossOpen" title="分解（跨文件）：选择文件" width="760px">
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
-          选择要拆出的文件，点「拆出」，把这份文件的数据单独取出来，得到它自己的证据。
-          跨文件的证据需要按所选文件重新获取一次。
+          选择要拆出的文件，点「拆出」取得该文件的材料，得到属于它自己的证据。
+          跨文件证据需要按所选文件重新取得一次。
         </p>
       </details>
-      <el-select v-model="crossFileIdx" placeholder="选要拆出哪一份文件" style="width: 100%">
+      <el-select v-model="crossFileIdx" placeholder="选择要拆出的文件" style="width: 100%">
         <el-option
           v-for="f in crossFileList"
           :key="f.i"
           :value="f.i"
-          :label="`${f.file_key}（${f.owner}）—— 这张卡里有它的 ${f.blocks} 块`"
+          :label="`${f.file_key}（${f.owner}）：卡内含 ${f.blocks} 块`"
         />
       </el-select>
       <div v-if="crossFileIdx !== null" class="dg-row mt-2">
@@ -1274,7 +1289,7 @@ onMounted(() => {
       </div>
       <details v-if="batchResult.ms_batch != null" class="note-collapse">
         <summary>说明</summary>
-        <p class="note">批量验证比逐份慢（实测约 1.68 倍），换来的是一次结论。</p>
+        <p class="note">批量验证比逐份验证慢约 1.68 倍，其结果为一次结论。</p>
       </details>
       <!-- 成功时把“这是在哪种向量上给的结论”说清：一文件一向量 vs 合并向量 -->
       <details v-if="batchResult.universe_files?.length" class="note-collapse">
@@ -1294,14 +1309,14 @@ onMounted(() => {
         <details class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            这几张卡片来自不同文件，无法直接合并验证。先点「聚合选中」把它们并成一张，再点「一次验这 N 份」验证。
+            这几张卡片来自不同文件，无法合并为一次结论。先点「聚合选中」归约为一张，再执行验证。
           </p>
         </details>
         <el-button type="primary" size="small" :loading="aggregating" @click="mergeNow">
-          改用聚合选中（并成一条向量）
+          改用「聚合选中」归约为一条向量
         </el-button>
       </template>
-      <el-alert v-if="batchResult.agree === false" type="error" :closable="false" class="mt-2" title="两套结论不一致（这通常意味着实现有 bug）" />
+      <el-alert v-if="batchResult.agree === false" type="error" :closable="false" class="mt-2" title="两套结论不一致（通常表示实现存在缺陷）" />
       <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" class="mt-2" />
     </div>
 
@@ -1314,8 +1329,9 @@ onMounted(() => {
       </div>
       <details class="note-collapse">
         <summary>说明</summary>
-        <p class="note">拆出来的新块需要先获取对应数据，这一步不能跳过。</p>
+        <p class="note">拆出的新块需先取得对应数据，此步骤不可跳过。</p>
       </details>
+    </div>
     </div>
 
     <!--
@@ -1324,7 +1340,7 @@ onMounted(() => {
         展开后是一个限高可滚动的框，不会把对话框撞破。
       ★ 范围用下拉而不是手填数字：选出来的 K 必然 ⊆ I，不会白撞一次 400。
     -->
-    <el-dialog v-model="disaggOpen" title="分解证据（选从哪分到哪）" width="560px">
+    <el-dialog v-model="disaggOpen" title="分解证据：选择区间" width="720px">
       <template v-if="disaggCard">
         <div v-if="pool.selectedCards.length > 1" class="dg-row">
           <span class="dg-lbl">哪张卡</span>
@@ -1343,7 +1359,7 @@ onMounted(() => {
         </div>
 
         <div class="dg-row">
-          <span class="dg-lbl">这张卡覆盖</span>
+          <span class="dg-lbl">本卡覆盖</span>
           <span class="mono">{{ disaggIndices.length }} 块</span>
           <el-button link type="primary" size="small" @click="showAllIndices = !showAllIndices">
             {{ showAllIndices ? '收起完整块号' : '展开完整块号' }}
@@ -1356,7 +1372,7 @@ onMounted(() => {
             {{ disaggFiles.join('、') }}
           </span>
           <span v-if="!disaggSingleFile" class="text-danger">
-            —— 跨了 {{ disaggFiles.length }} 份文件，不能分解；请按单份文件重新取一份证据
+            —— 跨了 {{ disaggFiles.length }} 份文件，不可分解；请按单份文件重新取得证据
           </span>
         </div>
         <!--
@@ -1368,8 +1384,8 @@ onMounted(() => {
         <div v-if="!disaggCardFresh" class="dg-row">
           <span class="dg-lbl">这张卡</span>
           <span class="text-danger">
-            已作废：是在 n={{ disaggCard.n ?? '—' }} 上取的，当前是 n={{ pool.currentN ?? '—' }}
-            —— 拆出来的证据必然验不过
+            已作废：取得于 n = {{ disaggCard.n ?? '—' }}，当前 n = {{ pool.currentN ?? '—' }}
+            —— 拆出的证据必然验证不通过
           </span>
           <el-button
             link
@@ -1378,7 +1394,7 @@ onMounted(() => {
             :loading="refetching"
             @click="refetchCard(disaggCard)"
           >
-            重新取一次
+            重新取得
           </el-button>
         </div>
         <div class="dg-idx" :class="{ open: showAllIndices }">
@@ -1387,7 +1403,7 @@ onMounted(() => {
         <details class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            这里列出所选文件里的块，用「从哪分到哪」选择要拆出的范围。
+            下方列出所选文件内的块；用「从哪分到哪」选择要拆出的范围。
           </p>
         </details>
 
@@ -1406,11 +1422,11 @@ onMounted(() => {
           <div>拆出 π_K：<span class="mono">{{ blockText(disaggCard, disaggK) }}</span>（{{ disaggK.length }} 块）</div>
           <div>丢弃：<span class="mono">{{ blockText(disaggCard, disaggDropped) }}</span>（{{ disaggDropped.length }} 块）</div>
           <p v-if="!disaggDropped.length" class="dg-warn">
-            丢弃为空 —— 这样等于原样复制一份，分解的意义在于「只留一部分」。把范围缩小一点。
+            丢弃为空：结果与原证据相同。分解应只保留一部分，请缩小范围。
           </p>
           <details v-else class="note-collapse">
             <summary>说明</summary>
-            <p class="note">分解只在本页计算，不重新获取数据。如果结果里包含新块，需先点「重新取一次」。</p>
+            <p class="note">分解只在本页做代数运算，不重新取得数据。若结果包含新块，需先点「重新取得」。</p>
           </details>
         </div>
       </template>
@@ -1429,7 +1445,7 @@ onMounted(() => {
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"
-      subtitle="每一步都只动公开数据 —— 耗时是这次请求的真实值。"
+      subtitle="各步仅涉及公开数据；耗时为本次请求的实际值。"
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"
@@ -1462,7 +1478,7 @@ onMounted(() => {
   width: 180px;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   margin-top: 8px;
 }
@@ -1479,7 +1495,8 @@ onMounted(() => {
 }
 .card :deep(.el-checkbox) {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  height: 22px;
   min-width: 0;
 }
 .card :deep(.el-checkbox__label) {
@@ -1505,7 +1522,7 @@ onMounted(() => {
   margin: 0 0 4px;
 }
 .group-note {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.6;
   color: var(--text-3);
   margin: 0 0 10px;
@@ -1530,16 +1547,16 @@ onMounted(() => {
   .pool-wrap > .cards,
   .pool-wrap > .pool-right { grid-column: 1; grid-row: auto; }
 }
-/* 卡片变小（横向纵向都紧凑）：一屏里功能、卡片、结果能同时看到。 */
+/* 卡片墙：矩形卡，一行一张。 */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 /* ---------- 划选：拖动期间禁止拽出文本选区，并给选中卡片一点看得见的边 ---------- */
 .sweep-hint {
   margin: 10px 0 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 .cards.sweeping {
   user-select: none;
@@ -1555,22 +1572,25 @@ onMounted(() => {
   opacity: 0.6;
 }
 .card-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
 }
+/* 第 2 行（信息简介）：强制单行，换行会把卡片高度撑破结构。 */
 .card-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 4px 10px;
-  margin: 2px 0 6px;
-  font-size: 11px;
+  margin: 0;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
-/* 卡片内边距收紧（原来偏鬆，一屏放不下几张） */
+/* 卡片内边距收紧：三行文字加内边距即卡片高度，不再另设高度。 */
 .cards > .card {
   padding: 8px 10px;
 }
-.card-actions { margin-top: 4px; }
-.card-fp { margin-top: 4px; }
 .sec-title {
   font-size: 14px;
   font-weight: 500;
@@ -1600,7 +1620,7 @@ onMounted(() => {
   border: 1px dashed var(--line);
   border-radius: var(--radius-sm);
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
   word-break: break-all;
 }
@@ -1615,7 +1635,118 @@ onMounted(() => {
 }
 .dg-warn {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--warn);
+}
+/* ---------- 矩形卡：固定三行，展开区在第 3 行之下 ---------- */
+.cards > .card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* 第 1 行：标题占满剩余宽度，右侧固定放「看完整标题」。 */
+.card-head {
+  justify-content: space-between;
+}
+.card-head :deep(.el-checkbox) {
+  flex: 1 1 auto;
+}
+/* 第 3 行：结论与操作同排。 */
+.card-ops {
+  min-height: 24px;
+}
+.card-fp {
+  margin-top: 8px;
+}
+/* ---------- 布局：整页不滚动 ----------
+   左栏为证据列表（内部滚动），右栏为功能与验证结果（各面板内部滚动）。
+   外层限高且 overflow: hidden，因此页面本身不会出现滚动条。
+   包裹层用 display: contents 透明化，使卡片与面板直接参与外层网格。 */
+.pool-wrap {
+  /* 左列只放一张卡，剩下的横向空间全部归右栏 */
+  --pool-card-w: 466px;
+  grid-template-columns: minmax(0, var(--pool-card-w)) minmax(320px, 1fr);
+  align-items: start;
+  height: calc(100vh - 200px);
+  overflow: hidden;
+}
+.pool-wrap > .pool-side { display: contents; }
+/* 左栏：证据列表，自身滚动 */
+.pool-wrap > .pool-side > .cards {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  align-content: start;
+  max-width: var(--pool-card-w);
+  max-height: 100%;
+  overflow: auto;
+  padding-right: 4px;
+}
+/* 右栏上：功能面板，按内容高，过高时自己内滚。 */
+.pool-wrap > .pool-side > .panel {
+  grid-column: 2;
+  min-width: 0;
+  max-height: 34vh;
+  overflow: auto;
+}
+/* 右栏下：验证结果占满剩余高度（第 2 行为 1fr），内容多时在面板内滚动。
+   注意结果面板是 pool-wrap 的直接子元素（pool-side 只包住了功能面板与卡片列表），
+   所以不能与上面合并成一条选择器；align-self 取 stretch 才能跳开外层的 align-items: start。 */
+.pool-wrap > .panel {
+  grid-column: 2;
+  min-width: 0;
+  align-self: stretch;
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+}
+/* 空态容器（非 .panel、非 .cards）占卡片那一列 */
+.pool-wrap > .pool-side > div:not(.panel):not(.cards) {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  max-height: 100%;
+  overflow: auto;
+}
+/* 分组标题吸顶：滚动时始终能看出当前落在哪一组 */
+.cards .card-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-page);
+  padding: 4px 0 6px;
+}
+@media (max-width: 1100px) {
+  .pool-wrap { grid-template-columns: minmax(0, 1fr); }
+  .pool-wrap > .pool-side,
+  .pool-wrap > .cards {
+    grid-column: 1;
+    grid-row: auto;
+    max-height: none;
+    max-width: none;
+  }
+  /* 单列时行高回归内容，结果面板不再撑满。 */
+  .pool-wrap > .panel {
+    grid-column: 1;
+    grid-row: auto;
+    align-self: auto;
+    max-height: none;
+  }
+}
+</style>
+
+<!-- 非 scoped：作用于挂到 body 的弹框（customClass 的元素不在本组件作用域内）。 -->
+<style>
+.pool-title-dialog {
+  width: min(760px, 94vw);
+}
+.pool-title-dialog .el-message-box__message {
+  font-size: 14px;
+  line-height: 1.9;
+  white-space: pre-line;
 }
 </style>

@@ -1,24 +1,22 @@
 <script setup>
 /**
- * 视频背景（当前只用在登录页）。
+ * 视频背景。当前仅登录页使用。
  *
- * 三条底线，少一条在真机上就会翻车：
- *  1. `muted + playsinline + loop` —— 少任何一个，浏览器都会直接拒绝自动播放，
- *     表现是「一片静止的黑」而不是报错；
- *  2. `poster` —— 视频数据到达之前先顶上静图，避免先黑一下；
- *  3. 该关的时候真的关 —— 三种情况之一成立就不加载视频（省流量，也尊重设置）：
- *     系统开了「减少动效」、浏览器开了「节省流量」、或「界面偏好」里关掉了动效。
- *     此时直接退回调用方原有的 CSS 背景。
+ * 播放前提（任一不满足都会导致自动播放被拒）：
+ *  1. `muted + playsinline + loop` 三者必须同时具备；
+ *  2. `poster` 在视频数据到达前显示静态图，避免先出现黑屏；
+ *  3. 下列任一条件成立时不得加载视频，直接使用调用方的 CSS 背景：
+ *     系统启用「减少动效」、浏览器启用「节省流量」、界面偏好中关闭动效。
  *
- * ★ 它是**叠加层**，不是替换层：调用方的 CSS 背景必须一直在，
- *   这样视频没来 / 被跳过 / 加载失败时，页面看起来仍然是完整的。
+ * 本组件是叠加层：调用方的 CSS 背景必须始终存在，
+ * 使视频未到达、被跳过或加载失败时页面保持完整。
  */
 import { ref, computed, onMounted } from 'vue'
 
 const props = defineProps({
   src: { type: String, default: '/media/login-bg.mp4' },
   poster: { type: String, default: '/media/login-bg-poster.jpg' },
-  /** 是否自带一层遮罩。半透明视频叠在深色背景上时，没有遮罩文字会飘。 */
+  /** 是否自带遮罩。半透明视频叠在深色背景上时，无遮罩会使文字对比不足。 */
   scrim: { type: Boolean, default: true },
 })
 
@@ -31,13 +29,13 @@ const show = computed(() => !skipped.value && !failed.value)
 onMounted(() => {
   const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true
   const saveData = navigator.connection?.saveData === true
-  // 「界面偏好」里的动效开关也管这里 —— 关掉动效就别再放视频了。
+  // 界面偏好中的动效开关同样作用于本组件：关闭动效时不加载视频。
   const motionOff = localStorage.getItem('vds_motion') === 'off'
   if (reduce || saveData || motionOff) {
     skipped.value = true
     return
   }
-  // muted 之下一般不会被拦，但真被拦了就静默退回 CSS 背景，不弹错误。
+  // 静音状态下通常不会被拦截；若被拦截则静默退回 CSS 背景，不提示错误。
   videoEl.value?.play?.().catch(() => (failed.value = true))
 })
 </script>
@@ -73,10 +71,9 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* 半透明 —— 让下层的 CSS 光斑与网格透上来。
-     不透明的视频会把这页原有的 CSS 背景整块盖掉，那就不是「加一层」而是「换一张脸」了。
-     ★ 这一组与下面 scrim 的两端透明度是**配套**的：视频换成高清版（15 s、3 Mbps，
-     见 public/media/login-bg.mp4）之后按 xjam 那一版调亮 —— 视频更亮、遮罩更轻。 */
+  /* 半透明：使下层的 CSS 光斑与网格可见。
+     不透明会完全覆盖页面原有背景。
+     本组透明度与下方 scrim 两端配套：素材为 public/media/login-bg.mp4（15 s、3 Mbps）。 */
   opacity: 0.8;
 }
 .scrim {

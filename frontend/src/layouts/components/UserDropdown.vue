@@ -20,7 +20,7 @@ async function logout() {
     await auth.logout()
     router.replace('/login')
   } catch {
-    // 即使后端 logout 失败，也本地清除并跳转。
+    // 后端登出失败时同样清除本地状态并跳转。
     auth.clear()
     router.replace('/login')
   }

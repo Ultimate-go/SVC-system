@@ -1,29 +1,26 @@
 <script setup>
 /**
- * 阶段耗时条 —— 数据源是响应里的 timings。
+ * 阶段耗时条。数据源为响应中的 timings。
  *
- * ★ 2026-10-12 改版（用户要求）：
- *   ① 不再画「按比例堆叠的多色条」，改成**一道从左到右填满的条**
- *      （与登录页“正在派生口令”同一个观感）；动画只走一次、**停在满格**，
- *      不做循环的假进度；
- *   ② 每一步**单独一行**显示它自己的耗时（原来全挤在一条 legend 里），
- *      颜色仍用原先那套 tone，一眼能看出“时间花在哪一步”；
- *   ③ `state` 为 `fail` 时那道条用告警色 —— 验证不通过时不能长得跟通过一样。
+ * 呈现约束：
+ *   ① 使用从左到右的填充条，不做分段堆叠；动画只播放一次并停在满格。
+ *   ② 每一步单独一行显示该步耗时，颜色沿用 tone 区分。
+ *   ③ `state` 为 `fail` 时填充条使用告警色。
  *
- * ★ timings 不编百分比：这里只画后端真实返回的毫秒数。
+ * 数据约束：只绘制后端返回的毫秒值，不换算百分比。
  */
 import { computed } from 'vue'
 import { buildPerf, formatMs } from '../../utils/timing'
 
 const props = defineProps({
   timings: { type: Object, default: null },
-  /** 结论态：''（中性）/ 'ok' / 'fail' —— 只影响那道填满条的颜色。 */
+  /** 结论态：''（中性）/ 'ok' / 'fail'；只影响填充条颜色。 */
   state: { type: String, default: '' },
 })
 
 const perf = computed(() => buildPerf(props.timings))
 
-/** 填满动画的时长：按真实总耗时缩一下，但夹在 0.5~1.6 秒之间（太快看不见、太慢碍事）。 */
+/** 填充动画时长：按实际总耗时缩放，夹在 0.5~1.6 秒内。 */
 const animMs = computed(() => {
   const t = Number(perf.value.total_ms) || 0
   return Math.max(500, Math.min(1600, Math.round(t * 0.6)))
@@ -50,7 +47,7 @@ const toneCss = {
     </div>
     <div class="fill-total mono">合计 {{ formatMs(perf.total_ms) }}</div>
 
-    <!-- 每一步单独一行：阶段名 + 它自己的耗时（不再挤成一长条） -->
+    <!-- 每一步单独一行：阶段名与该步耗时。 -->
     <ol class="stage-rows">
       <li v-for="(s, i) in perf.stages" :key="i" class="row">
         <span class="dot" :style="{ background: toneCss[s.tone] }" />
@@ -68,7 +65,7 @@ const toneCss = {
   flex-direction: column;
   gap: 9px;
 }
-/* ---------- 一道从左到右填满的条（动画结束停在满格） ---------- */
+/* ---------- 填充条：动画结束停在满格 ---------- */
 .fill-track {
   position: relative;
   height: 6px;
@@ -88,7 +85,7 @@ const toneCss = {
 .fill-track.is-ok .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 70%, var(--accent)), var(--ok)); }
 .fill-track.is-danger .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--danger) 65%, var(--warn)), var(--danger)); }
 .fill-track::after {
-  /* 一道扫光只说明“正在长”，随填充一起停住 */
+  /* 扫光用于指示填充进行中，随填充一同停止。 */
   content: '';
   position: absolute;
   inset: 0;
@@ -112,7 +109,7 @@ const toneCss = {
 }
 .fill-total {
   color: var(--text-1);
-  font-size: 12px;
+  font-size: 13px;
 }
 /* ---------- 每一步单独一行 ---------- */
 .stage-rows {
@@ -127,7 +124,7 @@ const toneCss = {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-2);
 }
 .dot {

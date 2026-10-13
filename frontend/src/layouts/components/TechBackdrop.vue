@@ -1,6 +1,6 @@
 <script setup>
 // 背景网格：两层 repeating-linear-gradient（20px 一格），中心一枚极淡径向渐晕。
-// 不要动效。
+// 不使用动效。
 </script>
 
 <template>

@@ -1,11 +1,11 @@
 <script setup>
 /**
- * 验证结果 —— 结论 + 失败环节名。
+ * 验证结果：结论与失败环节名。
  *
- * ★ 只有一个结论：``ok`` 就是承诺验证（SVC）的结论。而承诺里那些分量，是
- *   验证方**自己从收到的密文算**出来的（见 core/store.py::_collect）——
- *   所以这一个结论已经把"交付的字节对不对得上承诺"一并盖住了，没有第二层可看。
- *   标题绝不能写成「验证失败 · OK」。直接用 verifyFailTitle / verifyFailDetail。
+ * 只有一个结论：``ok`` 即承诺验证（SVC）的结论。承诺中的分量由验证方
+ *   依据收到的密文自行计算（见 core/store.py::_collect），
+ *   因此该结论已覆盖「交付字节是否与承诺一致」这一判定，不存在第二层。
+ *   标题不得写成「验证失败 · OK」；失败时使用 verifyFailTitle / verifyFailDetail。
  */
 import { computed } from 'vue'
 import { verifyFailTitle, verifyFailDetail } from '../../utils/format'
@@ -74,7 +74,7 @@ const codeName = computed(() => props.result?.verify?.code_name || '')
 .layer.danger { border-color: var(--danger); }
 .layer-state {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
 }
 .detail {
   font-size: 13px;

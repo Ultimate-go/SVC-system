@@ -121,9 +121,9 @@ onMounted(load)
 <style scoped>
 .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .lead { margin: 0 0 6px; color: var(--text-1); font-size: 14px; }
-.sub { margin: 0; color: var(--text-3); font-size: 12px; line-height: 1.7; }
+.sub { margin: 0; color: var(--text-3); font-size: 13px; line-height: 1.7; }
 .panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.panel-subtitle { color: var(--text-2); font-size: 12px; }
-.live-mark { color: var(--text-3); font-size: 10px; letter-spacing: .08em; }
+.panel-subtitle { color: var(--text-2); font-size: 13px; }
+.live-mark { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 .tag { margin-left: 8px; }
 </style>

@@ -110,7 +110,7 @@ async function submit() {
   margin-bottom: 10px;
 }
 .note {
-  font-size: 12px;
+  font-size: 13px;
   margin-top: 10px;
 }
 </style>

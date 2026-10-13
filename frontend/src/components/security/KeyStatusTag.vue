@@ -51,7 +51,7 @@ const serverHoldsKey = computed(() => props.user?.session_key === true)
   align-items: center;
 }
 .tag {
-  font-size: 11px;
+  font-size: 13px;
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--line-strong);
