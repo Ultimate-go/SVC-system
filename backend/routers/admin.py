@@ -332,7 +332,6 @@ def delete_user(
 def list_audit(
     page: int = 1,
     page_size: int = 10,
-    target: str | None = None,
     actor: str | None = None,
     action: str | None = None,
     ok: bool | None = None,
@@ -359,13 +358,11 @@ def list_audit(
 
     过滤条件：
 
-    * ``target`` / ``actor`` —— 做「回放」用的**精确匹配**，可同时给（交集）。
-      刻意不做模糊搜索：回放要的是「这一个对象 / 这一个人」，含糊匹配只会
+    * ``actor`` —— 做「回放」用的**精确匹配**。
+      刻意不做模糊搜索：回放要的是「这一个人」，含糊匹配只会
       把别人的记录混进来，那比不过滤更糟。
-      - ``target`` 形如 ``所有者/文件标识``：**文件级**动作（上传、改块、追加、
-        授权、解密、解密被拒）都用这个键，所以按它能把一份文件的完整经历捞出来；
-      - ``actor`` 是操作者。**查询类动作只能靠它** —— 查询是按全局下标记的
-        （``target`` 是"12 块"这种摘要），本来就不落在某个具体文件上。
+      **查询类动作只能靠它** —— 查询是按全局下标记的
+      （``target`` 是"12 块"这种摘要），本来就不落在某个具体文件上。
     * ``ok``    —— 只看成功 / 只看被拒。被拒才是审计里最该被翻出来的一类，
       所以它必须是一个**一等的过滤条件**，不能靠肉眼从一屏流水里挑。
     * ``since`` / ``until`` —— 时间窗，**半开区间** ``[since, until)``。
@@ -377,8 +374,7 @@ def list_audit(
       ★ 只给日期的 ``until`` 会自动扩到**当天 24:00**（含整日）——
         否则"查到 10-02"会漏掉 10-02 当天的记录。
     * ``q``     —— 在 ``actor / action / target / detail / remark`` 上做模糊匹配
-      （不区分大小写）。它是**多余的**、只是为了"我就记得有个人叫啥啥"时好使；
-      与 ``target`` 精确匹配并存，各管各的用法。
+      （不区分大小写）。它是**多余的**、只是为了"我就记得有个人叫啥啥"时好使。
 
     只记元数据这一条不变：返回体里永远不含明文、密钥或密文。
     """
@@ -386,8 +382,6 @@ def list_audit(
     page = max(1, page)
 
     stmt = select(AuditRow)
-    if target:
-        stmt = stmt.where(AuditRow.target == target)
     if actor:
         stmt = stmt.where(AuditRow.actor == actor)
     if action:
@@ -619,9 +613,10 @@ def run_check(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"自检失败：{exc}") from exc
     audit(db, actor.username, "check", ok=True, detail="；".join(notes))
     metrics.record("check", sw.total_ms(), sw.rows())
+    # 「自检通过」那一句是方案常量（描述这项检查查了哪几类东西），已移到前端
+    # ``frontend/src/views/admin/dashboard/index.vue``；这里只回状态与提示。
     return {
         "ok": True,
-        "message": "自检通过：登记表 / 节点视图 / 增量摘要与一次性承诺一致",
         "notes": notes,
         "timings": sw.payload(),
     }

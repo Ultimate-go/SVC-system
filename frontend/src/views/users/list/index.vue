@@ -2,7 +2,7 @@
 /**
  * 用户列表页（用户点名要求）。
  *
- * - 查询区：关键词（用户名/显示名）+ 角色下拉 + 状态下拉 + 密钥对下拉 + 查询/重置。
+ * - 查询区：关键词（用户名/显示名）+ 角色下拉 + 状态下拉 + 密钥对下拉 + 查询。
  * - 后端 GET /api/admin/users 没有任何过滤/分页参数，返回全量。过滤与分页都在前端做。
  * - 自己那一行不给「停用」「删除」。
  * - 删除前弹确认框，把后端返回的 warning 原样显示。
@@ -74,14 +74,6 @@ async function load() {
   }
 }
 
-function reset() {
-  keyword.value = ''
-  roleFilter.value = ''
-  statusFilter.value = ''
-  keyFilter.value = ''
-  page.value = 1
-}
-
 async function toggleDisabled(u) {
   try {
     await usersApi.patch(u.id, { disabled: !u.disabled })
@@ -132,7 +124,7 @@ onMounted(load)
       </el-button>
     </PageHeader>
 
-    <FilterBar v-model:keyword="keyword" placeholder="搜索用户名 / 显示名" @search="page = 1" @reset="reset">
+    <FilterBar v-model:keyword="keyword" placeholder="搜索用户名 / 显示名" :show-reset="false" @search="page = 1">
       <el-select v-model="roleFilter" placeholder="角色" clearable style="width: 110px">
         <el-option label="管理员" value="admin" />
         <el-option label="普通用户" value="user" />

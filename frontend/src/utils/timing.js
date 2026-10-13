@@ -20,7 +20,7 @@ export function stageColor(stageName) {
   if (s.includes('承诺') || s.includes('commit') || s.includes('分量') || s.includes('模幂')) {
     return 'accent'
   }
-  if (s.includes('分发') || s.includes('推') || s.includes('网络') || s.includes('落库') || s.includes('取回') || s.includes('补推')) {
+  if (s.includes('分发') || s.includes('推') || s.includes('网络') || s.includes('落库') || s.includes('取回')) {
     return 'accent2'
   }
   if (s.includes('验证') || s.includes('verify') || s.includes('自检') || s.includes('哈希')) {

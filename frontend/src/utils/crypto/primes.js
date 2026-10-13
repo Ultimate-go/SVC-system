@@ -255,7 +255,7 @@ export function checkPrimes({ bits, start, indices, values, expectStart = null, 
         ok: false,
         checked: k,
         ms: Date.now() - t0,
-        message: `第 ${indices[k]} 个"素数" ${e} 其实是合数 —— 服务端给的素数表不可信`,
+        message: `第 ${indices[k]} 个"素数" ${e} 实为合数 —— 服务端提供的素数表不可信`,
       }
     }
     prevIdx = indices[k]

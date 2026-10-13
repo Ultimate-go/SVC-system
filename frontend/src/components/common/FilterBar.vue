@@ -6,6 +6,9 @@
 const props = defineProps({
   keyword: { type: String, default: '' },
   placeholder: { type: String, default: '搜索…' },
+  // ★ 用户管理页不需要「重置」筛选按钮（管理员容易误以为是「重置口令」），
+  //   默认显示，按需关闭。
+  showReset: { type: Boolean, default: true },
 })
 const emit = defineEmits(['update:keyword', 'search', 'reset'])
 </script>
@@ -22,7 +25,7 @@ const emit = defineEmits(['update:keyword', 'search', 'reset'])
     />
     <slot />
     <el-button type="primary" @click="emit('search')">查询</el-button>
-    <el-button @click="emit('reset')">重置</el-button>
+    <el-button v-if="showReset" @click="emit('reset')">重置</el-button>
   </div>
 </template>
 

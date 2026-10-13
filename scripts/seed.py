@@ -122,8 +122,8 @@ def main() -> int:
             made.append(username)
     kw = manager.keywrap_status()
     print(f"[keys] 这次新生成了密钥对: {made or '（无，都已存在）'}")
-    print(f"[keys] 方案: {kw['scheme']}")
-    print(f"[keys] 私钥存放: {kw['private_key_storage']}")
+    print("[keys] 方案: SM2-ECIES（封装块密钥）+ PBKDF2-HMAC-SM3（封装用户私钥）")
+    print(f"[keys] 私钥存放: 口令派生密钥加密后入库（users.sk_wrapped，明文不落库）")
     print(f"[keys] 已有密钥对的账号: {kw['user_keys']}/{kw['users']}")
 
     if args.demo:

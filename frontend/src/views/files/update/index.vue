@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 更新文件（★ 2026-10-12 从「文件详情」里拆出来的入口）。
+ * 变更文件（★ 2026-10-12 从「文件详情」里拆出来的入口）。
  *
  * 为什么拆：以前「文件详情」既放**读**的东西（摘要、块分布、块明细），
  * 又放**改**的东西（改块 / 追加 / 截断 / 回滚演示 / 解密预览）。
@@ -8,10 +8,10 @@
  *
  * 现在分工是：
  *   · 「文件详情」= 只读：这份文件是什么、块在哪、指纹长什么样；
- *   · 「更新文件」= 改它：选中一份文件后直接进它的操作详情。
+ *   · 「变更文件」= 变更它：选中一份文件后直接进它的操作详情。
  *
  * 所以本页只做一件事：**把文件选出来**。列表比「上传文件」那页更轻 ——
- * 不放上传、不放删除，只留"这份文件现在什么样"与一个「进入更新」。
+ * 不放上传、不放删除，只留“这份文件现在什么样”与一个「进入变更」。
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
@@ -52,16 +52,16 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="更新文件">
+    <PageHeader title="变更文件">
       <el-button :loading="loading" @click="load">刷新</el-button>
     </PageHeader>
 
     <div class="panel mb-3">
       <div class="head">
         <div>
-          <p class="lead">选中一份文件，进入它的更新页：改块 / 清零 / 追加 / 截断，以及浏览器本地的解密验证。</p>
+          <p class="lead">选择一份文件进入变更视图：内容更新、置零、追加、截断，以及浏览器本地的解密与完整性验证。</p>
           <p class="sub">
-            这些操作会改写内容并让版本号 +1，只有文件所有者能做。别人的文件在这里是灰的。
+            上述四类写操作均会改写密文，并使版本号递增 1；写权限仅限文件所有者，非所有者文件不可进入。
           </p>
         </div>
         <el-switch v-model="onlyMine" active-text="只看我的" />
@@ -92,17 +92,17 @@ onMounted(load)
         <el-table-column label="版本" width="80" align="center">
           <template #default="{ row }"><span class="mono">v{{ row.version }}</span></template>
         </el-table-column>
-        <el-table-column label="块编号（第几块）" min-width="160">
+        <el-table-column label="位置段（全局编号）" min-width="170">
           <template #default="{ row }"><span class="mono">{{ span(row.indices) }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="130" align="center">
           <template #default="{ row }">
-            <el-button size="small" type="primary" :disabled="!row.is_mine" @click="enter(row)">进入更新</el-button>
+            <el-button size="small" type="primary" :disabled="!row.is_mine" @click="enter(row)">进入变更</el-button>
           </template>
         </el-table-column>
         <template #empty>
           <p class="text-3" style="padding: 12px 0">
-            {{ files.length ? '没有属于你的文件 —— 关掉「只看我的」能看到别人的（但不能改）。' : '还没有文件。' }}
+            {{ files.length ? '当前账号名下没有文件。关闭「只看我的」可查看其他所有者的文件，但不具备写权限。' : '系统中尚无文件。' }}
           </p>
         </template>
       </el-table>
@@ -110,8 +110,10 @@ onMounted(load)
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
-          更新是「重新加密 + 重新承诺」：改块只换这一块（其余块不动），追加在末尾接新块，
-          截断只删这份文件自己的末尾。三种都会让版本号 +1，并把这份文件新的 δ 记进本地。
+          变更的语义是「重新加密并重新计算承诺」：更新只替换指定分块的内容，其余分块保持不变；
+          置零把指定分块替换为等长的全 0 字节；
+          追加在向量末尾增加新分块；截断仅移除本文件所占位置段的末尾部分。
+          四类操作都会使版本号递增 1，并把该文件新的聚合承诺 δ 记入本地锚。
         </p>
       </details>
     </div>

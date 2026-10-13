@@ -44,7 +44,6 @@ __all__ = [
     "AuditRow",
     "RevokedTokenRow",
     "ReplayRow",
-    "PendingWriteRow",
     "utcnow",
 ]
 
@@ -89,32 +88,6 @@ class MetaRow(Base):
 
     key: Mapped[str] = mapped_column(String(32), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-class PendingWriteRow(Base):
-    """**待补推现场**——写失败之后留在盘上的那一份（全库只有一行，``id=1``）。
-
-    为什么要有它（实测踩过）：现场原来只在**内存**里（
-    :attr:`core.store.VectorStore._pending` 与 ``manager._finish_cb``）。
-    一旦进程没了，现场就永久丢失 —— 而**节点上已经跟进的那几台不会回退**。
-    于是重启时启动守卫看到"节点跑在前面"，报一句
-    「存储节点与协调者不同步，拒绝启动」就把整个系统**锁死**，
-    而唯一出路是人工去每台节点上清那半段。
-
-    落库之后重启就能接着办：先恢复现场（守卫也知道"跑在前面"是预期的），
-    再把那次更新补推给没跟上的几台。
-
-    ★ 里面确实包含**密文**（``payloads`` 就是没送出去的那几份请求体）。
-    这不是多出来的暴露面：同一份密文在存储节点上本来就有，而且
-    它没送出去时这是**唯一**的一份 —— 不存下来，那次写就只能丢。
-    块密钥依旧是密文（``blocks.key_ct`` 那条性质不变）。
-    """
-
-    __tablename__ = "pending_write"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # 恒为 1
-    payload: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class FileDeltaRow(Base):

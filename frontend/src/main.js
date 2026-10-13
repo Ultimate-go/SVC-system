@@ -7,6 +7,7 @@ import 'element-plus/dist/index.css'
 import App from './App.vue'
 import router from './router'
 import { setUnauthorizedHandler } from './api/client'
+import { startIdleWatch, idleExpired, touch } from './utils/session'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
 
@@ -50,6 +51,29 @@ setUnauthorizedHandler(() => {
         : { redirect: current.fullPath },
     })
     .then(done, done)
+})
+
+// ---------------------------------------------------------------------------
+// 会话时效：闲置 5 分钟才要求重新登录；刷新不影响登录态。
+//
+//   ① 启动时先看盘上的“最后活动时刻”：已经超时就当“已退出”处理 ——
+//      免得一个放了很久的标签页看起来还在线；
+//   ② 之后每 10 秒看一次；到点先请服务端把那枚令牌作废，再回登录页。
+//      回落路径与 401 一致（expired=1，登录页会说明原因）。
+// ---------------------------------------------------------------------------
+const auth = useAuthStore(pinia)
+if (auth.token && idleExpired()) auth.clear()
+touch()
+
+startIdleWatch(async () => {
+  try {
+    await auth.logout()
+  } catch {
+    auth.clear()
+  }
+  const current = router.currentRoute.value
+  if (current.name === 'login') return
+  router.replace({ path: '/login', query: { redirect: current.fullPath, expired: '1' } })
 })
 
 app.mount('#app')

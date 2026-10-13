@@ -1,7 +1,7 @@
 <script setup>
 /**
  * 总览页。对全体用户开放：普通用户与管理员均可访问。
- * 展示内容：公开参数、逐文件摘要、规模、集群健康、密钥模型、待补推横幅、自检。
+ * 展示内容：公开参数、逐文件摘要、规模、集群健康、密钥模型、自检。
  *
  * 自检按钮对全体用户可用（后端 ``POST /api/admin/check`` 使用 ``current_user``）。
  * 该接口只读；失败原因原样显示。
@@ -22,9 +22,9 @@ const router = useRouter()
 const loading = ref(true)
 const error = ref('')
 const status = ref(null)
-const pending = ref(null)
 const checking = ref(false)
 const checkResult = ref(null)
+const healthDetailOpen = ref(false)
 
 // ---- 系统自检：逐项推进，与后端 store.check() 的检查项一一对应 ----
 const CHECK_ITEMS = [
@@ -94,12 +94,16 @@ const visibleFiles = computed(() =>
 )
 const hiddenFileCount = computed(() => Math.max(0, deltaFiles.value.length - FILE_PREVIEW))
 
-// 逐项扫描节奏：每项约 1 秒，10 项合计约 10.5 秒。
-const SCAN_MS = 950
-const STEP_GAP_MS = 100
+// 逐项扫描节奏：每项约 0.79 秒，10 项合计约 7.9 秒（约为原时长的 75%）。
+const SCAN_MS = 713
+const STEP_GAP_MS = 75
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function itemName(key) {
+  return CHECK_ITEMS.find((x) => x.key === key)?.name || key
 }
 
 function locateFailKey(message) {
@@ -110,7 +114,42 @@ function locateFailKey(message) {
 const delta = computed(() => status.value?.delta || {})
 const crs = computed(() => status.value?.crs || {})
 const keywrap = computed(() => status.value?.keywrap || {})
+
+/*
+ * 「密钥模型」卡里这两行是**方案常量**，不是运行时状态：
+ * 它们描述的是 core/keywrap.py 那一层的实现约定（算法、盐与密钥长度、迭代数、在哪解封），
+ * 任何部署、任何时刻都相同，也不随请求变化，所以写在这里而不是每次轮询都由后端回传；
+ * 后端 key_model() 相应地不再提供这两个字段。
+ * 改协议（换算法 / 改迭代数 / 改封装格式）时改这两段，并对照那一层的权威实现：
+ * core/keywrap.py 里的 KIND_USER_KEY、PBKDF2_ITERATIONS、PRIVATE_KEY_BYTES。
+ */
+const CHECK_OK_TEXT = '自检通过：登记表 / 节点视图 / 增量摘要与一次性承诺一致'
+const KEY_SCHEME_TEXT = 'SM2-ECIES（封装块密钥）+ PBKDF2-HMAC-SM3（封装用户私钥）'
+const KEY_STORAGE_TEXT =
+  '库中仅存储私钥密文，不存储明文私钥或口令。' +
+  '加密方式：口令经 PBKDF2-HMAC-SM3（盐 16 字节、迭代 20 万轮）派生出密钥加密钥（KEK，32 字节），' +
+  '由其派生 SM4 密钥（16 字节），对 32 字节私钥标量做 SM4-CTR 加密，并附 32 字节完整性标签。'
+const KEY_UNWRAP_TEXT =
+  '解封在浏览器内完成：后端只返回私钥密文，口令在本地派生出 KEK，' +
+  '完整性标签校验通过后解出私钥标量。私钥仅存于当前标签页的会话存储' +
+  '（sessionStorage；闲置 5 分钟或关闭标签即清除），不写入 localStorage，也不随任何请求上传。' +
+  '验证与解密均由浏览器执行。'
 const clusterHealthy = computed(() => !status.value?.nodes_down?.length && !status.value?.under_replicated)
+
+// 「模式 / 传输」取值说明：后端可能出现的取值 → 解释（manager.py 按部署配置返回）。
+// mode 只有两档；transport 显示的是传输层类名，共三种（FaultyTransport 为故障演练代理，
+// 首次演练时装上并持续生效，重启后恢复为真实传输）。未知取值走兜底文案。
+const MODE_DESC = {
+  distributed: '跨进程分布式：协调者通过 HTTP 与多个独立节点进程通信，分块与副本分散在多台节点上，不存在单点持有全部数据。',
+  'single-process': '单进程演示：协调者与各节点同处一个 Python 进程内，存储层为进程内直连、不经网络，仅用于本地演示与自测。',
+}
+const TRANSPORT_DESC = {
+  LocalTransport: '进程内直连：单进程模式下由存储层自建的本地传输，调用不经过网络。',
+  HttpTransport: '跨进程 HTTP：协调者经 HTTP 加访问令牌访问各节点服务，带重试、退避与超时配置。',
+  FaultyTransport: '故障演练代理：包在真实传输外层，可注入节点掉线或永久损毁两类故障，用于验证部分节点失效时副本与完整性验证仍然成立；安装后持续生效，重启恢复为真实传输。',
+}
+const modeDesc = computed(() => MODE_DESC[status.value?.mode] || '当前部署模式未收录说明，请结合部署文档确认该取值。')
+const transportDesc = computed(() => TRANSPORT_DESC[status.value?.transport] || '当前传输层未收录说明；它由后端按部署配置自动选择。')
 
 /**
  * 副本达标的块数，供环形仪表使用。
@@ -123,18 +162,12 @@ const replicaOk = computed(() =>
   Math.max(0, Number(status.value?.blocks || 0) - Number(status.value?.under_replicated || 0)),
 )
 
-const hasPending = computed(() => {
-  const p = pending.value
-  return !!(p?.pending || p?.persist_pending)
-})
-
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [s, p] = await Promise.all([systemApi.status(), devicesApi.pending()])
+    const s = await systemApi.status()
     status.value = s.data
-    pending.value = p.data
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '加载失败'
   } finally {
@@ -172,24 +205,26 @@ async function runCheck() {
       ok: true,
       passed: CHECK_ITEMS.length,
       total: CHECK_ITEMS.length,
-      message: r.data?.message || '全部通过',
+      message: CHECK_OK_TEXT,
     })
   } else {
+    // 定位得到就标出那一项；定位不到就**什么都不标**。
+    //   为什么不再默认冤枉最后一项（原来 failIdx 缺省为 length-1）：后端是
+    //   **一次调用**返回首个问题，而任何没被规则覆盖的原因（比如库读不出来）
+    //   都会被按到「增量摘要一致性」头上 —— 那是在编一个看起来很像的结论。
     const failKey = locateFailKey(r.message)
-    const failIdx = failKey
-      ? CHECK_ITEMS.findIndex((x) => x.key === failKey)
-      : CHECK_ITEMS.length - 1
+    const failIdx = failKey ? CHECK_ITEMS.findIndex((x) => x.key === failKey) : -1
     checkSteps.value.forEach((s, i) => {
-      if (i < failIdx) s.state = 'pass'
+      if (failIdx >= 0 && i < failIdx) s.state = 'pass'
       else if (i === failIdx) s.state = 'fail'
-      else s.state = 'pending'
+      else s.state = 'pending' // 未判定：灰点（不再冒充已通过）
     })
-    checkResult.value = { ok: false, message: r.message }
+    checkResult.value = { ok: false, message: r.message, located: failIdx >= 0 }
     saveLastCheck({
       at: Date.now(),
       ok: false,
-      passed: failIdx,
       total: CHECK_ITEMS.length,
+      failKey: failKey || '',
       message: r.message,
     })
   }
@@ -208,21 +243,6 @@ onMounted(() => {
     <el-button class="mt-3" @click="load">重试</el-button>
   </div>
   <div v-else-if="status" class="dashboard">
-    <el-alert
-      v-if="hasPending"
-      type="warning"
-      :closable="false"
-      class="mb-3"
-      :title="pending?.restored ? '写失败状态已跨重启持久化' : '写操作未完成，摘要暂不一致'"
-    >
-      <template #default>
-        <p class="mb-2">
-          请勿重复上传（该批全局下标已分配）。可在「设备」页执行补推；系统亦按固定间隔自动重试。
-        </p>
-        <p v-if="pending?.site_note" class="mb-2">{{ pending.site_note }}</p>
-        <el-button size="small" @click="router.push('/devices')">去补推</el-button>
-      </template>
-    </el-alert>
 
     <section class="hero-panel panel mb-3" aria-labelledby="overview-title">
       <div class="overview-head">
@@ -240,17 +260,21 @@ onMounted(() => {
       <ProcessingFlow />
       <!-- 管线下方为当前规模，数值全部取自 /api/system/status。 -->
       <div class="hero-scale" style="margin: 16px 0; display: flex; gap: 32px; align-items: center;">
-        <span class="hero-scale-item" style="font-size: 22px;">
-        <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.files || 0 }}</b>份文件
+          <span class="hero-scale-item" style="font-size: 22px;">
+            当前系统状态：
         </span>
+        <span class="hero-scale-item" style="font-size: 22px;">
+            <b class="mono" style="color: var(--text-1); margin-right: 4px;">{{ status.files || 0 }}</b>份文件
+        </span>
+
   <span class="hero-scale-item" style="font-size: 22px;">
-    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.blocks || 0 }}</b>个块
+    <b class="mono" style="color: var(--text-1); margin-right: 4px;">{{ status.blocks || 0 }}</b>个块
   </span>
   <span class="hero-scale-item" style="font-size: 22px;">
-    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.nodes || 0 }}</b>台节点
+    <b class="mono" style="color: var(--text-1); margin-right: 4px;">{{ status.nodes || 0 }}</b>台节点
   </span>
   <span class="hero-scale-item" style="font-size: 22px;">
-    <b class="mono" style="color: #fff; margin-right: 4px;">{{ status.replica_factor || 0 }}</b>份副本
+    <b class="mono" style="color: var(--text-1); margin-right: 4px;">{{ status.replica_factor || 0 }}</b>份副本
   </span>
   <span class="hero-scale-hint mono" style="font-size: 14px; opacity: 0.6; margin-left: auto;">LIVE · {{ status.mode }} · {{ status.transport }}</span>
 </div>
@@ -289,10 +313,9 @@ onMounted(() => {
       <section class="compact-section">
         <div class="section-heading">
           <div><span class="section-kicker mono">COMMITMENTS</span><h2>逐文件摘要 <span class="mono">每份文件一条向量</span></h2></div>
-          <span class="section-note mono">{{ status.replica_factor || 1 }}× REPLICA</span>
         </div>
         <div class="panel commitment-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">每份文件各自的公开指纹与已用位置</span><span class="live-mark"><i />SYNCED</span></div>
+          <div class="panel-title-row"><span class="live-mark"><i />SYNCED</span></div>
           <div class="delta-row">
             <RingGauge :value="replicaOk" :max="status.blocks || 1" label="副本达标" />
             <div class="delta-detail">
@@ -305,20 +328,20 @@ onMounted(() => {
                 <span
                   class="v mono"
                   :title="deltaFiles.length === 1 ? ('U = ' + deltaFiles[0].U + '\nC = ' + deltaFiles[0].C) : ''"
-                >{{ deltaFiles.length === 1 ? hexFp(deltaFiles[0].delta_fp, 16) : '每份各不相同' }}</span>
+                >{{ deltaFiles.length === 1 ? hexFp(deltaFiles[0].delta_fp, 12) : '每份各不相同' }}</span>
                 <span class="hint">一份文件一个值</span>
               </div>
             </div>
           </div>
+          <p class="fp-note">指纹是文件公开承诺 δ 的 12 位十六进制短摘要（sha256("U:C:n") 的前 12 位），用于在不暴露明文的前提下快速识别与核对文件；悬浮可查看该文件承诺的完整 U 与 C。</p>
           <div
             v-for="f in visibleFiles"
             :key="`${f.owner}/${f.file_key}`"
-            class="panel-subtitle mono"
+            class="panel-subtitle mono file-line"
             style="white-space: normal; margin-top: 6px"
             :title="'U = ' + f.U + '\nC = ' + f.C"
           >
-            {{ f.owner }} / {{ f.file_key }} · n={{ f.n }} · offset={{ f.offset }} ·
-            {{ hexFp(f.delta_fp, 16) }}
+            （{{ f.owner }}）{{ f.file_key }} n={{ f.n }} 指纹 {{ hexFp(f.delta_fp, 12) }}
           </div>
           <button v-if="hiddenFileCount" type="button" class="more-toggle" @click="showAllFiles = !showAllFiles">
             {{ showAllFiles ? '收起' : `展开其余 ${hiddenFileCount} 条` }}
@@ -329,7 +352,6 @@ onMounted(() => {
       <section class="compact-section">
         <div class="section-heading">
           <div><span class="section-kicker mono">RUNTIME HEALTH</span><h2>运行状态</h2></div>
-          <span class="section-note mono">CONTROL PLANE</span>
         </div>
         <div class="panel health-panel">
           <div class="panel-title-row"><span class="panel-subtitle">协调者与存储节点连接状态</span><span class="live-mark"><i />MONITORING</span></div>
@@ -340,6 +362,13 @@ onMounted(() => {
             <span v-if="status.nodes_down?.length" class="cluster-item text-danger">离线：<b class="mono">{{ status.nodes_down.join(', ') }}</b></span>
             <span v-else class="cluster-item text-ok">全部在线</span>
           </div>
+          <div class="detail-toggle" @click="healthDetailOpen = !healthDetailOpen">
+            <span>详情</span><span class="caret" :class="{ open: healthDetailOpen }">▾</span>
+          </div>
+          <div v-show="healthDetailOpen" class="detail-body">
+            <p class="detail-line"><b>模式 {{ status.mode }}</b>：{{ modeDesc }}</p>
+            <p class="detail-line"><b>传输 {{ status.transport }}</b>：{{ transportDesc }}</p>
+          </div>
         </div>
       </section>
 
@@ -349,13 +378,12 @@ onMounted(() => {
           <span class="section-note mono">NO MASTER KEY</span>
         </div>
         <div class="panel key-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">私钥在浏览器里解封，服务端不留</span><span class="live-mark"><i />PROTECTED</span></div>
+
           <div class="keywrap">
-            <div class="keywrap-item"><span class="k">方案</span><span class="v">{{ keywrap.scheme }}</span></div>
-            <div class="keywrap-item"><span class="k">用户 / 有密钥</span><span class="v mono">{{ keywrap.users }} / {{ keywrap.user_keys }}</span></div>
-            <div class="keywrap-item"><span class="k">服务端内存中的私钥</span><span class="v mono">{{ keywrap.sessions_with_key }}<span class="text-3" style="font-size: 13px">（默认模型下恒为 0）</span></span></div>
-            <div class="keywrap-item"><span class="k">私钥存储位置</span><span class="v">{{ keywrap.private_key_storage }}</span></div>
-            <div class="keywrap-item"><span class="k">解封在哪发生</span><span class="v">{{ keywrap.session_key_location || '——' }}</span></div>
+            <div class="keywrap-item"><span class="k">方案</span><span class="v">{{ KEY_SCHEME_TEXT }}</span></div>
+            <div class="keywrap-item"><span class="k">用户 / 持有密钥：</span><span class="v mono">{{ keywrap.users }} / {{ keywrap.user_keys }}</span></div>
+            <div class="keywrap-item"><span class="k">私钥存储位置</span><span class="v">{{ KEY_STORAGE_TEXT }}</span></div>
+            <div class="keywrap-item"><span class="k">解封位置</span><span class="v">{{ KEY_UNWRAP_TEXT }}</span></div>
           </div>
         </div>
       </section>
@@ -375,9 +403,14 @@ onMounted(() => {
             <el-button :loading="checking" @click="runCheck"><Icon name="refresh" :size="14" style="margin-right: 6px" />启动自检</el-button>
             <p v-if="lastCheck" class="last-check mono">
               本机上次自检 · {{ fmtAgo(lastCheck.at) }} ·
-              <span :class="lastCheck.ok ? 'text-ok' : 'text-danger'">{{ lastCheck.ok
+              <span
+                :class="lastCheck.ok ? 'text-ok' : 'text-danger'"
+                :title="lastCheck.ok ? '' : lastCheck.message"
+              >{{ lastCheck.ok
                 ? `全部通过 ${lastCheck.passed}/${lastCheck.total}`
-                : `未通过（${lastCheck.passed}/${lastCheck.total}）：${lastCheck.message}` }}</span>
+                : (lastCheck.failKey
+                    ? `未通过：${itemName(lastCheck.failKey)}（原因悬停可见）`
+                    : '未通过（未能定位到具体检查项，原因悬停可见）') }}</span>
             </p>
           </div>
 
@@ -408,7 +441,19 @@ onMounted(() => {
 
           <!-- 最终结论：全部检查完成后才出现 -->
           <div v-if="checkResult" class="check-verdict">
-            <el-alert :type="checkResult.ok ? 'success' : 'error'" :closable="false" :title="checkResult.message" />
+            <el-alert
+              :type="checkResult.ok ? 'success' : 'error'"
+              :closable="false"
+              :title="checkResult.ok ? CHECK_OK_TEXT : '自检未通过'"
+              :description="checkResult.ok ? '' : checkResult.message"
+            />
+            <p
+              v-if="checkResult.ok === false && checkResult.located === false"
+              class="text-3"
+              style="font-size: 13px; line-height: 1.7; margin: 8px 0 0"
+            >
+              未能定位到具体检查项 —— 清单保持灰点（未判定），结论以本条为准。
+            </p>
             <el-alert
               v-for="(note, i) in checkResult.notes || []"
               :key="i"
@@ -466,11 +511,17 @@ onMounted(() => {
 .hero-scale-item b { color: var(--text-1); font-size: 20px; font-weight: 500; margin-right: 4px; }
 .hero-scale-hint { margin-left: auto; color: var(--text-3); font-size: 13px; letter-spacing: .1em; }
 /* 逐文件摘要的展开 / 收起 */
-.more-toggle { align-self: flex-start; margin-top: 10px; padding: 3px 0; color: var(--accent); font: inherit; font-size: 14px; background: none; border: 0; cursor: pointer; }
+.more-toggle { align-self: flex-start; margin-top: 10px; padding: 3px 0; color: var(--accent); font: inherit; font-size: 15px; background: none; border: 0; cursor: pointer; }
 .more-toggle:hover { text-decoration: underline; }
 /* 自检按钮与「上次自检」一行 */
 .diag-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .last-check { margin: 0; color: var(--text-3); font-size: 13px; }
+/* 自检失败的原因是多句文本（含换行），按原样换行显示，不折成一团。 */
+.diagnostics-panel :deep(.el-alert__description) {
+  white-space: pre-line;
+  line-height: 1.7;
+  margin-top: 6px;
+}
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 18px 1px 10px; }
 .section-heading-spaced { margin-top: 27px; }
 .section-heading h2 { color: var(--text-1); font-size: 19px; font-weight: 600; margin: 5px 0 0; }
@@ -480,19 +531,20 @@ onMounted(() => {
 /* 自检 / 密钥模型整行显示：向下延伸时不再撑高同行的相邻卡片 */
 .compact-section--full { grid-column: 1 / -1; }
 .compact-section .section-heading { margin-top: 0; min-height: 43px; }
-.compact-section > .panel { flex: 1 1 auto; min-height: 214px; box-sizing: border-box; }
+.compact-section > .panel { flex: 1 1 auto; min-height: 262px; box-sizing: border-box; }
 /* 逐文件摘要随文件数变长（默认显示 4 条，可展开），故只设最小高度；
-   不设死高度；右边的运行状态卡则是恒定的几行，保持定高两边才对齐。 */
-.commitment-panel { height: auto; min-height: 214px; }
-.health-panel { height: 214px; }
+   右边的运行状态卡也不再定高 —— 详情展开后卡片跟着变高，
+   内容不会溢出卡片边框；两边都不写死高度，靠同一行的拉伸对齐。 */
+.commitment-panel { height: auto; min-height: 262px; }
+.health-panel { height: auto; min-height: 262px; }
 /* 整行的面板自适应高度，向下延伸不再受固定高度限制 */
 .compact-section--full > .panel { min-height: 0; height: auto; }
 .commitment-panel .delta-row { min-height: 112px; }
-.health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 14px; }
+.health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 15px; }
 .health-summary strong { color: var(--text-1); font-size: 34px; font-weight: 500; letter-spacing: -.04em; }
-.health-summary-status { margin-left: auto; font-size: 13px; }
+.health-summary-status { margin-left: auto; font-size: 14px; }
 .panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
-.panel-subtitle { color: var(--text-2); font-size: 14px; }
+.panel-subtitle { color: var(--text-2); font-size: 15px; }
 .live-mark { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 .live-mark i { display: inline-block; width: 5px; height: 5px; }
 .grid {
@@ -540,7 +592,7 @@ onMounted(() => {
 }
 .delta-item .hint {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 14px;
 }
 .cluster-row {
   display: flex;
@@ -549,18 +601,30 @@ onMounted(() => {
   font-size: 15px;
   color: var(--text-2);
 }
+.detail-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--accent); font-size: 13px; cursor: pointer; user-select: none; }
+.detail-toggle .caret { transition: transform .2s ease; font-size: 11px; }
+.detail-toggle .caret.open { transform: rotate(180deg); }
+.detail-body { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raised); }
+.detail-line { color: var(--text-2); font-size: 14px; line-height: 1.7; margin: 0 0 8px; }
+.detail-line:last-child { margin-bottom: 0; }
+.detail-line b { color: var(--text-1); }
+.fp-note { color: var(--text-3); font-size: 14px; line-height: 1.6; margin: 10px 0 2px; }
+.file-line { color: var(--text-2); font-size: 15px; }
+/*
+ * 标签列 + 值列：四项都是「标签在左、值在右」，值一律从**同一条竖线**开始。
+ * 标签列宽取最宽的那个标签（max-content），所以「方案」「用户 / 持有密钥：」
+ * 「私钥存储位置」「解封位置」后面的内容左边缘对齐。
+ * .keywrap-item 用 display: contents 摊平，让 .k / .v 直接当 grid 的两列；
+ * align-items: baseline 保证长值换行时，值的第一行仍与标签同一基线。
+ */
 .keywrap {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 28px;
-}
-.keywrap-item {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
   align-items: baseline;
-  padding: 6px 0;
   font-size: 15px;
 }
+.keywrap-item { display: contents; }
 .keywrap-item .k {
   color: var(--text-3);
   white-space: nowrap;

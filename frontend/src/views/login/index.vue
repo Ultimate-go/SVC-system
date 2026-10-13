@@ -38,9 +38,9 @@ const NET_TIPS = [
   '正在取回被封装的私钥…',
   '正在核对密钥对归属…',
 ]
-const KDF_TIP = '正在用口令派生 KEK…'
+const KDF_TIP = '正在用口令派生密钥…'
 //: 上面那句的完整版本（面板宽度放不下，挂在 title 里）
-const KDF_TIP_FULL = '正在用口令派生 KEK（PBKDF2-HMAC-SM3 · 20 万轮）…'
+const KDF_TIP_FULL = '正在用口令派生密钥（PBKDF2-HMAC-SM3 · 20 万轮）…'
 const UNWRAP_TIP = '正在解封私钥，建立加密会话…'
 /** net（请求中）→ kdf（派生 KEK）→ unwrap（收尾）。 */
 const busyPhase = ref('net')
@@ -73,7 +73,7 @@ function stopTips() {
 
 async function submit() {
   if (!form.username || !form.password) {
-    ElMessage.warning('请输入账号与密码')
+    ElMessage.warning('请输入账号与口令')
     return
   }
   loading.value = true
@@ -107,11 +107,11 @@ function switchMode(next) {
 
 async function submitRegister() {
   if (!form.username || !form.password) {
-    ElMessage.warning('请输入账号与密码')
+    ElMessage.warning('请输入账号与口令')
     return
   }
   if (form.password !== form.confirm) {
-    ElMessage.warning('两次输入的密码不一致')
+    ElMessage.warning('两次输入的口令不一致')
     return
   }
   loading.value = true
@@ -220,15 +220,15 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
             <h2>{{ mode === 'register' ? '注册账号' : '登录系统' }}</h2>
           </div>
         </div>
-        <p class="card-sub">{{ mode === 'register' ? '请设置账号与密码（注册成功后自动登录）' : '请输入账号和密码' }}</p>
+        <p class="card-sub">{{ mode === 'register' ? '请设置账号与口令（注册成功后自动登录）' : '请输入账号和口令' }}</p>
 
         <el-alert
           v-if="route.query.expired === '1'"
           type="info"
           :closable="false"
           class="login-alert"
-          title="登录已过期，请重新登录"
-          description="后端重启会换掉签名密钥，重登一次就好。"
+          title="登录状态已失效，请重新登录"
+          description="会话闲置超过 5 分钟，或服务端重启更换了令牌签名密钥，都会使当前登录失效。重新登录即可继续。"
         />
 
         <div v-if="mode === 'login'" class="form">
@@ -244,12 +244,12 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           >
             <template #prefix><Icon name="user" :size="15" /></template>
           </el-input>
-          <label class="field-label mono" for="login-password">密码</label>
+          <label class="field-label mono" for="login-password">口令</label>
           <el-input
             id="login-password"
             v-model="form.password"
             type="password"
-            placeholder="请输入密码"
+            placeholder="请输入口令（即登录密码）"
             size="large"
             show-password
             :disabled="loading"
@@ -292,12 +292,12 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           >
             <template #prefix><Icon name="user" :size="15" /></template>
           </el-input>
-          <label class="field-label mono" for="reg-password">密码</label>
+          <label class="field-label mono" for="reg-password">口令</label>
           <el-input
             id="reg-password"
             v-model="form.password"
             type="password"
-            placeholder="请输入密码"
+            placeholder="请输入口令（即登录密码）"
             size="large"
             show-password
             :disabled="loading"
@@ -306,12 +306,12 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
           >
             <template #prefix><Icon name="lock" :size="15" /></template>
           </el-input>
-          <label class="field-label mono" for="reg-confirm">确认密码</label>
+          <label class="field-label mono" for="reg-confirm">确认口令</label>
           <el-input
             id="reg-confirm"
             v-model="form.confirm"
             type="password"
-            placeholder="请再次输入密码"
+            placeholder="请再次输入口令"
             size="large"
             show-password
             :disabled="loading"

@@ -72,7 +72,7 @@ export function getAnchor(fileId, blockIdx) {
  *
  * :param sha256: 明文的 SHA-256（十六进制）—— 判据本体
  * :param version: 记锚时文件的版本号（用于解释"期间有别的改动"）
- * :param deltaFp: 记锚时的全局 δ 指纹（回滚检测用）
+ * :param deltaFp: 记锚时本文件的 δ 指纹（回滚检测用）
  * :param source: 人类可读的来源（"上传"/"改块"/"清零"…），界面要显示它
  */
 export function setAnchor(fileId, blockIdx, { sha256, version = null, deltaFp = null, bytes = null, source = '' }) {
@@ -271,7 +271,7 @@ export function setDeltaAnchor(
 /**
  * 丢掉这份文件的 δ 锚。
  *
- * ★ 什么时候该丢：**你自己**改动了这份文件（改块 / 清零 / 追加 / 截断）——
+ * ★ 什么时候该丢：**你自己**改动了这份文件（更新 / 清零 / 追加 / 截断）——
  *   那之后 δ 必然变，而"新 δ 是什么"只有服务端能告诉你。
  *   此时把锚丢掉（而不是默默跟着更新），让下一次解密变成"重新见证"：
  *   要么你自己确认一下新版本，要么就让它一直处于"未钉扎"状态（界面会如实标出）。

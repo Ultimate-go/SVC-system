@@ -75,7 +75,7 @@ onMounted(load)
           <div class="kv-row"><span class="k">n（对账）</span><span class="mono">{{ node.unreachable ? '—' : node.n }}</span></div>
           <div class="kv-row"><span class="k">持有块数</span><span class="mono">{{ node.held }}</span></div>
           <div class="kv-row"><span class="k">跨度</span><span class="mono">{{ node.span }}</span></div>
-          <div class="kv-row"><span class="k">全部编号</span><span class="mono">{{ humanList(node.indices).join(', ') || '—' }}</span></div>
+          <div class="kv-row"><span class="k">持有位置段（全局编号）</span><span class="mono">{{ humanList(node.indices).join(', ') || '—' }}</span></div>
           <div class="kv-row"><span class="k">一致性</span><span :class="node.valid ? 'text-ok' : 'text-danger'">{{ node.valid ? '一致' : '不一致' }}</span></div>
         </div>
       </div>
@@ -86,35 +86,35 @@ onMounted(load)
       </div>
 
       <div class="panel">
-        <h4 class="sec-title">存储证明（PoR）挑战</h4>
+        <h4 class="sec-title">存储证明（PoR）抽样挑战</h4>
         <!-- ★ 这块以前只有一句标题 + 一个按钮，**没有任何说明** —— 用户不知道
              “挑战”是什么、看到的结果意味着什么。补上四句：它问什么、怎么算过、
              数字怎么读、以及它**不能**证明什么。 -->
         <p class="por-note">
-          PoR（Proof of Retrievability，可检索性证明）验的是
-          <b>这台节点是不是真的还存着它名下的那些块</b> —— 不是听它自己说，
-          而是让它现场回答一份挑战。
+          PoR（Proof of Retrievability，可检索性证明）用于核验
+          <b>该节点是否确实仍持有其名下的分块</b>：验证方向节点发出随机挑战，
+          要求其现场作出应答，而不采信节点自身的陈述。
         </p>
         <p class="por-note">
-          流程：协调者随机抽一批块 → 让节点交出这些块的密文 →
-          协调者<b>自己重算</b>分量（<code class="mono">v = SM3(密文)</code>）
-          并与登记表里的记录比对：一致则记为已响应，不一致或不可达则记为未响应。
-          所以「问到 N / 答到 M」里 <b>M &lt; N</b> 的含义很明确：<b>它答不上来</b>。
+          流程：协调者随机抽取一批分块位置 → 要求节点返回这些分块的密文 →
+          协调者<b>独立重算</b>分量（<code class="mono">v = SM3(密文)</code>）
+          并与登记表中的记录比对：一致则记为已响应，不一致或不可达则记为未响应。
+          因此「已挑战 N / 已响应 M」中 <b>M &lt; N</b> 的含义是：
+          <b>该节点未能对全部挑战作出正确应答</b>。
         </p>
         <p class="por-note">
-          ★ 诚实边界：这只是<b>抽样</b>，不是全量盘点 —— 答到 N 个只说明
-          “抽查到的这些它确实都在”，<b>不能</b>推出“它一块都没丢”。
-          要更强的不在树里的保证，得看上面的块分布矩阵与「全量自检」。
+          边界条件：该验证为<b>抽样检验</b>，而非全量盘点。已响应数等于已挑战数（M = N）
+          只能说明被抽到的这些分块确实存在，<b>不能</b>推出该节点未丢失任何分块。
+          需要更强的保证时，应参考上方的块分布矩阵与全量自检结果。
         </p>
         <el-button type="primary" :loading="porRunning" @click="runPor">
           <Icon name="pulse" :size="14" style="margin-right: 6px" />发起挑战
-        </el-button>
-        <div v-if="myShare" class="mt-3">
+        </el-button>        <div v-if="myShare" class="mt-3">
           <el-alert
             :type="myShare.unreachable ? 'error' : 'success'"
             :closable="false"
-            :title="`本节点问到 ${myShare.asked} 个 / 答到 ${myShare.answered} 个`"
-            :description="myShare.unreachable ? '不可达' : myShare.error || ''"
+            :title="`本节点已挑战 ${myShare.asked} 个分块 / 已正确响应 ${myShare.answered} 个`"
+            :description="myShare.unreachable ? '节点不可达，本次挑战未获得应答' : myShare.error || ''"
           />
         </div>
         <div v-if="porResult && !porResult.ok" class="mt-2 text-danger">{{ porResult.message }}</div>

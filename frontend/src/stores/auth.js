@@ -3,6 +3,7 @@ import api from '../api/client'
 import { useCryptoStore } from './crypto'
 import { usePoolStore } from './pool'
 import { useBasketStore } from './basket'
+import { forgetActivity } from '../utils/session'
 
 const TOKEN_KEY = 'vds_token'
 const USER_KEY = 'vds_user'
@@ -128,6 +129,9 @@ export const useAuthStore = defineStore('auth', {
      * 而是把别人的东西摆在了你面前。
      */
     forgetLocal() {
+      // ★ 活动时刻也要清（会话时效）：不清的话，换了个人进来、
+      //   盘上还留着上一个人的“最后活动”，5 分钟窗口会算错。
+      forgetActivity()
       // store 还没初始化时（比如极端早的 401）不能把登出流程搞崩，
       // 所以各自 try 一次。
       try {

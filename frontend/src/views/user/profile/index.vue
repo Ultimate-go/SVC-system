@@ -184,7 +184,7 @@ onMounted(() => {
         :closable="false"
         class="mb-3"
         title="私钥仅限本次登录使用"
-        description="私钥只保存在当前浏览器中，用您的密码解锁。刷新或退出登录后会自动清除，再次查看需重新登录"
+        description="私钥只保存在当前浏览器中，用您的口令解锁。闲置 5 分钟或退出登录后会自动清除，再次查看需重新登录"
       />
       <div class="kv">
         <div class="kv-row">
@@ -221,22 +221,22 @@ onMounted(() => {
     </div>
 
     <div class="panel">
-      <h4 class="sec-title">修改密码</h4>
+      <h4 class="sec-title">修改口令</h4>
       <el-form label-width="90px" class="pwd-form" @submit.prevent>
-        <el-form-item label="新密码">
+        <el-form-item label="新口令">
           <el-input v-model="pwdForm.password" type="password" show-password />
         </el-form-item>
-        <el-form-item label="确认密码">
+        <el-form-item label="确认口令">
           <el-input v-model="pwdForm.confirm" type="password" show-password />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :loading="changing" @click="changePassword">修改密码</el-button>
+          <el-button type="primary" :loading="changing" @click="changePassword">修改口令</el-button>
         </el-form-item>
       </el-form>
       <StageTimeline v-if="changeTimings" :timings="changeTimings" class="mt-3" />
       <details class="note-collapse">
         <summary>说明</summary>
-        <p class="note">修改密码会重新生成和保存密钥</p>
+        <p class="note">修改口令会重新生成并保存密钥</p>
       </details>
     </div>
   </div>

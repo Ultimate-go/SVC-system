@@ -21,7 +21,7 @@ const isDark = computed(() => theme.theme === 'dark')
       <div class="setting-row">
         <div>
           <div class="name">主题</div>
-          <div class="desc">深色为默认（答辩投影 + 演示气质）</div>
+          <div class="desc">默认深色</div>
         </div>
         <el-switch
           :model-value="isDark"
@@ -34,7 +34,7 @@ const isDark = computed(() => theme.theme === 'dark')
       <div class="setting-row">
         <div>
           <div class="name">表格密度</div>
-          <div class="desc">紧 = 行高更小，适合看更多数据</div>
+          <div class="desc">行高小更紧凑</div>
         </div>
         <el-radio-group :model-value="theme.density" @change="(v) => theme.setDensity(v)">
           <el-radio-button value="normal">松</el-radio-button>
@@ -54,8 +54,9 @@ const isDark = computed(() => theme.theme === 'dark')
         <div>
           <div class="name">哈希详略</div>
           <div class="desc">
-            详细 = 把每一块的分量指纹铺出来（停在指纹上显示完整十六进制）；
-            简略只给块号、下标与结论。文件详情 / 证据池 / 完整性验证三页共用这一个偏好
+            详细展示每一块的分量指纹（停在指纹上显示完整十六进制）；
+            简略只展示块号、下标与结论；
+            文件详情 / 证据池 / 完整性验证三页共用同一偏好
           </div>
         </div>
         <el-radio-group :model-value="theme.detailMode" @change="(v) => theme.setDetail(v)">

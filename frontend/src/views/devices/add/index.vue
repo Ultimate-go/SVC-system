@@ -43,9 +43,9 @@ async function copy(text) {
 
 <template>
   <div>
-    <PageHeader title="新增存储节点" subtitle="这一页不保存设置，只生成命令" />
+    <PageHeader title="新增存储节点" subtitle="本页不写入任何配置，仅生成启动命令与环境变量" />
 
-    <el-alert type="info" :closable="false" class="mb-3" title="后端没有「新增节点」接口：节点是独立进程，地址与令牌写在环境变量里；改台数在界面上改（重启后生效，数据不动）。" />
+    <el-alert type="info" :closable="false" class="mb-3" title="系统未提供「新增节点」接口：存储节点以独立进程运行，其地址与访问令牌由环境变量配置；集群台数在「存储节点」页修改，重启后生效，数据不受影响。" />
 
     <div class="panel form-panel">
       <el-form :model="form" label-width="110px">
@@ -64,7 +64,7 @@ async function copy(text) {
     <div v-if="generated" class="panel mt-3">
       <h4 class="sec-title">1 · 启动命令</h4>
       <pre class="cmd mono">{{ generated.runNodes }}</pre>
-      <h4 class="sec-title mt-3">2 · 环境变量（与上面的 id 一一对应）</h4>
+      <h4 class="sec-title mt-3">2 · 环境变量（须与上面的节点 id 一一对应）</h4>
       <pre class="cmd mono">{{ generated.urls }}
 {{ generated.ids }}
 {{ generated.tokenLine }}</pre>
@@ -73,9 +73,9 @@ async function copy(text) {
     <el-alert type="warning" :closable="false" class="mt-3" title="三条前提">
       <template #default>
         <ol class="premises">
-          <li>VDS_NODE_IDS 与 VDS_NODE_URLS 必须列出同样的节点，否则启动闸拒绝启动。</li>
-          <li>改台数在「集群」页改，重启后生效，数据一行都不动；单进程与跨进程模式的库仍然不能混用。</li>
-          <li>漏设环境变量会让后端静默退回单进程模式，然后被启动闸以「节点与协调者不同步」拒绝启动。</li>
+          <li>VDS_NODE_IDS 与 VDS_NODE_URLS 必须列出相同的节点集合，否则启动闸将拒绝启动。</li>
+          <li>集群台数在「存储节点」页修改，重启后生效，数据不受影响；单进程模式与跨进程模式的数据文件不可混用。</li>
+          <li>未配置环境变量时，后端会静默回退到单进程模式，随后被启动闸以「节点视图与协调者不同步」为由拒绝启动。</li>
         </ol>
       </template>
     </el-alert>

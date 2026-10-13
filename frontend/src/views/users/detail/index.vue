@@ -105,11 +105,12 @@ onMounted(load)
       </div>
 
       <el-alert
+        v-if="!isSelf"
         type="warning"
         :closable="false"
         class="mt-3"
-        title="改不了别人的口令"
-        description="私钥由账户本人口令保护，不支持重置他人口令。口令重置将导致既有密文无法解封，须由账户本人在「个人中心」执行。"
+        title="无法更改他人的登录口令"
+        description="私钥受账户本人的登录口令保护，不支持重置他人口令。口令重置将导致既有密文无法解封，必须由账户本人在「个人中心」执行。"
       />
     </div>
   </div>

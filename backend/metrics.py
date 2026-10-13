@@ -174,7 +174,6 @@ ACTION_NAMES = {
     "disagg": "证据分解",
     "por": "存储证明",
     "check": "全面自检",
-    "retry_push": "补推",
     "login": "登录",
     "create_user": "建用户",
     "rewrap": "改口令",

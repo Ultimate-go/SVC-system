@@ -58,13 +58,13 @@ export const routes = [
         path: 'devices',
         name: 'devices',
         component: () => import('../views/devices/list/index.vue'),
-        meta: { title: '设备' },
+        meta: { title: '存储节点' },
       },
       {
         path: 'devices/add',
         name: 'devices-add',
         component: () => import('../views/devices/add/index.vue'),
-        meta: { title: '新增节点', parent: { title: '设备', path: '/devices' } },
+        meta: { title: '新增节点', parent: { title: '存储节点', path: '/devices' } },
       },
       {
         path: 'devices/:id',
@@ -97,21 +97,21 @@ export const routes = [
         meta: { title: '文件详情' },
       },
       {
-        // ★ 2026-10-12：「更新文件」从「文件详情」里拆出来 —— 先选文件，再进它的更新页。
+        // ★ 2026-10-12：「变更文件」从「文件详情」里拆出来 —— 先选文件，再进它的变更页。
         //   下面这一页是列表，再下面那条复用详情组件（meta.ops=true 决定“形态”）。
         path: 'files/update',
         name: 'files-update',
         component: () => import('../views/files/update/index.vue'),
-        meta: { title: '更新文件' },
+        meta: { title: '变更文件' },
       },
       {
         path: 'files/update/:id',
         name: 'files-update-detail',
         component: () => import('../views/files/detail/index.vue'),
         meta: {
-          title: '更新文件 · 详情',
+          title: '变更文件 · 详情',
           ops: true,
-          parent: { title: '更新文件', path: '/files/update' },
+          parent: { title: '变更文件', path: '/files/update' },
         },
       },
       {

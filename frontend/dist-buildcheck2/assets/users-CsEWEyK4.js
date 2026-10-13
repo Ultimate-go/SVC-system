@@ -1,0 +1,1 @@
+import{t as e}from"./client-ByU4aThH.js";var t={list:()=>e.get(`/api/admin/users`),create:t=>e.post(`/api/admin/users`,t),patch:(t,n)=>e.patch(`/api/admin/users/${t}`,n),remove:t=>e.delete(`/api/admin/users/${t}`)};export{t};

@@ -73,55 +73,55 @@ const UPLOAD_STEPS = [
     key: '切块（split_segments）',
     name: '切块',
     en: 'CHUNK',
-    desc: '明文按段大小切开，每块独立处理；块号从这一刻起固定（人看是第 1 块起）。',
+    desc: '明文按段大小切分为若干分块，各分块独立处理；分块编号自此刻起固定（界面从 1 起编号）。',
   },
   {
     key: '生成密钥与 IV',
     name: '生成块密钥',
     en: 'KEYGEN',
-    desc: '每一块一把随机块密钥（SM4），块与块不共用 —— 改一块不会牵连别的块。',
+    desc: '每个分块使用一把独立的随机块密钥（SM4），分块之间不共用密钥 —— 改一块不会牵连别的块。',
   },
   {
     key: '逐块加密（SM4）',
     name: '逐块加密',
     en: 'ENCRYPT',
-    desc: 'SM4 把每块密文化。协调者（服务端）从这一步之后也看不到明文，拿到的只是密文。',
+    desc: 'SM4 将各分块加密为密文。自这一步起，协调者（服务端）不再接触明文，持有的仅为密文。',
   },
   {
     key: '封装块密钥（ECIES）',
     name: '封装块密钥',
     en: 'WRAP',
-    desc: '每把块密钥用「你自己的」SM2 公钥封一次再进库 —— 所以除了你（以及拿到你私钥的人），谁都解不开它。',
+    desc: '每把块密钥以「当前用户自己的」SM2 公钥封装后入库：除私钥持有者外，其他主体均无法解封装。',
   },
   {
     key: '算向量分量（SM3）',
     name: '算分量',
     en: 'DIGEST',
-    desc: '每块密文过一遍 SM3，得到它的公开分量 —— 这一块的指纹，由密文唯一决定，服务端改不了。',
+    desc: '对每个分块的密文计算 SM3，得到其公开分量：该分量由密文唯一确定，服务端无法篡改。',
   },
   {
     key: '承诺（push_update）',
     name: '形成承诺',
     en: 'COMMIT',
-    desc: '分量按块身份映射到素数并聚合，得到 δ = (U, C)：两个群元素，不管文件多大都是这么点。',
+    desc: '各分块的分量按其身份映射到素数并聚合，得到 δ = (U, C)：两个群元素，与文件大小无关。',
   },
   {
     key: '分发到节点',
     name: '分散存放',
     en: 'REPLICATE',
-    desc: '密文按副本铺到各节点。节点手里只有密文与块登记，没有能开它的钥匙。',
+    desc: '密文按副本因子分发至各存储节点。节点仅持有密文与分块登记，不具备解封所需的密钥。',
   },
   {
     key: '落库（新块与块登记）',
     name: '写入块账目',
     en: 'PERSIST',
-    desc: '每一块的位置、分量、IV、明文长度、以及封装好的块密钥各记一行 —— 以后改块、解密、取证都从这份账目出发。',
+    desc: '每个分块的位置、分量、IV、明文长度与已封装的块密钥各记一行：后续的更新、解密与取证均依据这份账目。',
   },
   {
     key: '落库（上传文件登记）',
     name: '登记入库',
     en: 'PERSIST',
-    desc: '文件与块登记写进库。从此任何一次验证都能只用 δ 与块编号独立复算，不用问服务端“是不是真的”。',
+    desc: '文件登记与分块登记写入数据库。此后任何一次验证只需 δ 与分块编号即可独立复算，无需采信服务端的自述。',
   },
 ]
 
@@ -604,8 +604,25 @@ async function doUpload() {
     ElMessage.success('上传完成')
     resetUpload()
     await load()
-  } catch {
-    // 出错就别把过程框留在屏幕上（错误已由拦截器原样弹出：503 写推失败、413 超限等）
+  } catch (e) {
+    // 出错就别把过程框留在屏幕上。
+    // ★ 503（部分节点没跟上，可能处于模拟损坏）：这**不是**上传失败 —— 数据已写到
+    //   其余节点；没推上去的那几台按约定直接丢弃（不补推）。用黄色 warning 弹框
+    //   （而不是拦截器那条红色 error），免得用户以为真报错了。
+    //   （上传请求带了 silent，所以拦截器不会再弹一次。）
+    const status = e?.response?.status
+    const detail = e?.response?.data?.detail || e?.message || '上传未完成'
+    if (status === 503) {
+      ElMessageBox.alert(detail, '部分节点没跟上', {
+        type: 'warning',
+        confirmButtonText: '知道了',
+        showClose: false,
+      })
+    } else if (detail) {
+      ElMessage.error(detail)
+    } else {
+      ElMessage.error('上传未完成：' + (e?.message || '未知错误'))
+    }
     processOpen.value = false
   } finally {
     clearInterval(elapsedTimer)
@@ -715,7 +732,7 @@ async function removeFile(row, { silent = false } = {}) {
   const parts = [
     `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块）。`,
     '删除不可撤销：这份文件的密文、封装过的块密钥与账目都会从库里、从节点上删掉。',
-    '别的文件不受影响 —— 每份文件各占自己的位置段，删它不会动到任何别人。',
+    '别的文件不受影响 —— 每份文件各占独立的位置段，删除该文件不会改动其他文件。',
   ]
   if (!silent) {
     try {
@@ -755,14 +772,18 @@ async function removeFile(row, { silent = false } = {}) {
   return true
 }
 
-/** 我能解密的那些文件（= 我自己的）——“一键”两个按钮的作用对象。 */
+/** 我能解密的那些文件（= 我自己的）——“一键删除”的作用对象。 */
 const mineFiles = computed(() => (files.value || []).filter((r) => r.can_decrypt))
+
+/** 列表里的全部文件（含他人的）——“一键入池”的作用对象。
+ *  入池只取公开凭证，不需要解密，所以不受“是不是我的文件”限制。 */
+const allFiles = computed(() => files.value || [])
 
 const poolAllBusy = ref(false)
 const removeAllBusy = ref(false)
 
 /**
- * 「一键入池」：把**自己全部**的文件各取一份证据收进证据池。
+ * 「一键入池」：把**列表里全部**的文件（含他人的）各取一份证据收进证据池。
  *
  * ★ 逐个串行，**不并发**：每次入池都要向“持有那几块的节点”取密文，
  *   并发打上去只会把节点压住，还可能撞上协调者的写锁。一份一份走，
@@ -772,7 +793,7 @@ const removeAllBusy = ref(false)
  *   就会把后面全卡住，而且用户不知道卡在哪。
  */
 async function poolAll() {
-  const list = mineFiles.value
+  const list = allFiles.value
   if (!list.length) return
   poolAllBusy.value = true
   let ok = 0
@@ -898,7 +919,6 @@ onMounted(load)
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>
       <div class="panel mb-3">
-        <h4 class="sec-title">上传文件</h4>
         <div class="upload-row">
           <el-upload
             ref="fileRef"
@@ -915,7 +935,7 @@ onMounted(load)
           </el-upload>
 
           <div class="upload-form">
-            <el-input v-model="uploadForm.fileKey" placeholder="文件标识 file_key（如 病历A）" />
+            <el-input v-model="uploadForm.fileKey" placeholder="文件标识 （如 测试文件.txt）" />
             <el-radio-group v-model="uploadForm.splitMode">
               <el-radio-button v-for="m in SPLIT_MODES" :key="m.value" :value="m.value">{{ m.label }}</el-radio-button>
             </el-radio-group>
@@ -1005,6 +1025,7 @@ onMounted(load)
           </el-collapse>
         </div>
 
+        <!-- 上传过程：后端每步的真实耗时，逐步一行；整块可收起。 -->
         <StageTimeline v-if="uploadTimings" :timings="uploadTimings" class="mt-3" />
       </div>
 
@@ -1015,10 +1036,10 @@ onMounted(load)
               <el-button
                 size="small"
                 :loading="poolAllBusy"
-                :disabled="!mineFiles.length"
+                :disabled="!allFiles.length"
                 @click="poolAll"
               >
-                一键入池（{{ mineFiles.length }} 份）
+                一键入池（{{ allFiles.length }} 份）
               </el-button>
               <el-button
                 size="small"
@@ -1099,7 +1120,7 @@ onMounted(load)
     <ProcessDialog
       v-model="processOpen"
       title="这次上传走了哪几步"
-      subtitle="动画跟着请求一起走：每步至少 0.5 秒，耗时长的步骤也会长一点。"
+      subtitle="动画与请求同时进行；各步展示时长按上一次的实测耗时估算，并设有上下限。"
       :steps="uploadSteps"
       :timings="lastUpload?.timings"
       :facts="uploadFacts"

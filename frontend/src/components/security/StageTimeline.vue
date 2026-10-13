@@ -41,29 +41,61 @@ const toneCss = {
 </script>
 
 <template>
-  <div class="stage-fill" v-if="perf.stages.length">
-    <div class="fill-track" :class="`is-${fillTone}`">
-      <span class="fill" :style="{ animationDuration: animMs + 'ms' }" />
-    </div>
-    <div class="fill-total mono">合计 {{ formatMs(perf.total_ms) }}</div>
+  <!-- 默认展开；点标题行可收起，左侧小三角随之旋转。 -->
+  <details v-if="perf.stages.length" class="stage-fill" open>
+    <summary class="fill-summary">
+      <span class="fill-tri" aria-hidden="true">▶</span>
+      <span class="fill-label">步骤耗时</span>
+      <span class="fill-meta mono">{{ perf.stages.length }} 步 · 合计 {{ formatMs(perf.total_ms) }}</span>
+    </summary>
 
-    <!-- 每一步单独一行：阶段名与该步耗时。 -->
-    <ol class="stage-rows">
-      <li v-for="(s, i) in perf.stages" :key="i" class="row">
-        <span class="dot" :style="{ background: toneCss[s.tone] }" />
-        <span class="name">{{ s.stage }}</span>
-        <span v-if="s.count > 1" class="count mono">×{{ s.count }}</span>
-        <span class="ms mono">{{ formatMs(s.ms) }}</span>
-      </li>
-    </ol>
-  </div>
+    <div class="fill-body">
+      <div class="fill-track" :class="`is-${fillTone}`">
+        <span class="fill" :style="{ animationDuration: animMs + 'ms' }" />
+      </div>
+
+      <!-- 每一步单独一行：阶段名与该步耗时。 -->
+      <ol class="stage-rows">
+        <li v-for="(s, i) in perf.stages" :key="i" class="row">
+          <span class="dot" :style="{ background: toneCss[s.tone] }" />
+          <span class="name">{{ s.stage }}</span>
+          <span v-if="s.count > 1" class="count mono">×{{ s.count }}</span>
+          <span class="ms mono">{{ formatMs(s.ms) }}</span>
+        </li>
+      </ol>
+    </div>
+  </details>
 </template>
 
 <style scoped>
 .stage-fill {
+  display: block;
+}
+/* ---------- 标题行：左侧小三角 + 步数与合计 ---------- */
+.fill-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.fill-summary::-webkit-details-marker { display: none; }
+.fill-tri {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-3);
+  transition: transform .18s ease;
+}
+details[open] > .fill-summary .fill-tri { transform: rotate(90deg); }
+.fill-meta { margin-left: auto; color: var(--text-3); }
+.fill-body {
   display: flex;
   flex-direction: column;
   gap: 9px;
+  margin-top: 9px;
 }
 /* ---------- 填充条：动画结束停在满格 ---------- */
 .fill-track {

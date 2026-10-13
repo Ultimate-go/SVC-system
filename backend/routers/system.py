@@ -104,58 +104,6 @@ def nodes(
     return mgr.node_report()
 
 
-@router.get("/nodes/pending")
-def nodes_pending(
-    _: UserRow = Depends(current_user),
-    mgr: StoreManager = Depends(get_manager),
-):
-    r"""有没有"写推失败了、还没补"的更新。
-
-    这是**真故障**（全网不一致），不是"慢"：已经有节点按新 δ 前进了，
-    另几台还在旧 δ 上 —— 这时读取可能少拿到块，写入会被闸住。
-
-    ★ **查它不设管理员门槛**，与"验证不受限"同一个理由：δ 本来就是公开的，
-    "全网摘要齐不齐"因此也是公开信息 —— 谁都该能看见"现在不一致"。
-    需要管理员的是**修**它（见下一个接口），那是写操作。
-
-    .. note::
-
-       读数与写入共用一把锁，所以这个接口看到的是一致的一瞬间的快照；
-       它**不会**去打扰各节点，纯本地账。
-    """
-    return mgr.pending_write()
-
-
-@router.post("/nodes/retry-push")
-def nodes_retry_push(
-    user: UserRow = Depends(require_admin),
-    mgr: StoreManager = Depends(get_manager),
-    db: Session = Depends(get_db),
-):
-    """**补推**：把上次没推成功的那次更新，只补推给没跟上的那几台。
-
-    ⚠ 为什么不是"重新传一次文件"：协调者的 δ 没推进，但**登记表已经分配过**
-    那批下标 —— 再传一次会拿到新下标，还会撞上"登记表游标与向量长度不一致"。
-    补推是唯一的出路。
-
-    ``ok=false`` 不是"没救"：把没通的机器弄活，再点一次即可
-    （已经补上的不会被重复打扰）。
-    """
-    with collect() as sw:
-        out = mgr.retry_push(manual=True)
-    audit(
-        db,
-        user.username,
-        "retry_push",
-        f"{out.get('op', '') or '—'} / {len(out.get('nodes', []))} 台未通",
-        ok=bool(out.get("ok")),
-        detail=str(out.get("detail", "")),
-    )
-    # ★ 阶段耗时：重新算摘要 / 只补推给没跟上的那几台 / 落库收尾
-    out["timings"] = sw.payload()
-    metrics.record("retry_push", sw.total_ms(), sw.rows())
-    return out
-
 @router.post("/por")
 def proof_of_storage(
     body: PoRIn,
@@ -199,5 +147,5 @@ def proof_of_storage(
         "asked_total": sum(s["asked"] for s in out["shares"]),
         "answered_total": sum(s["answered"] for s in out["shares"]),
         "nodes_down": [s["node_id"] for s in out["shares"] if s.get("unreachable")],
-        "verdict": "通过" if audit_ok else "不通过",
+        "verdict": "通过" if audit_ok else "未通过",
     }

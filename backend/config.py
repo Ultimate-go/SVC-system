@@ -765,17 +765,6 @@ class Settings:
     token_ttl_minutes: int = 12 * 60
     debug: bool = False
 
-    #: 写失败之后的**自动补推**（定时 + 次数上限）。
-    #:
-    #: ★ 间隔默认 5 秒是故意的：既要给“人工看到报警、先看看怎么回事”留出时间，
-    #:   也要让“必须看到 409 拦住下一次写”那类断言/演示步骤不被后台线程抢跑。
-    #: ★ 次数**有上限**也是故意的：无限重试会把“哪台一直不在线”这件事藏起来。
-    #:   用完就停在原地，待补推视图里会明说“已自动重试 N 次仍未成功，请人工处理”。
-    #:   人工在集群页点一次「补推」会把计数重新给满（见 `.manager.retry_push`）。
-    retry_auto: bool = True
-    retry_interval_s: float = 5.0
-    retry_max_attempts: int = 5
-
     def database_url(self) -> str:
         return f"sqlite:///{self.db_path.as_posix()}"
 

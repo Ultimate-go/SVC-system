@@ -70,7 +70,6 @@ from .models import (
     NodeBlobRow,
     NodeRegistryRow,
     NodeStateRow,
-    PendingWriteRow,
     ReplayRow,
     BlockHistoryRow,
     RevokedTokenRow,
@@ -194,28 +193,6 @@ class StoreManager:
         #: “按人撤销”的签发时刻阈值：``用户名 -> before_ts``（见 :meth:`revoke_user_tokens`）。
         #: 同样是缓存；0 表示“查过了，这个人没被按人撤销过”。
         self._revoked_users: dict[str, int] = {}
-        #: 写推失败时“还欠一步落库”的那个回调（见 :meth:`retry_push`）。
-        #:
-        #: ★ 为什么要有它：向量层的现场（``store._pending``）能保证
-        #:   **补推之后向量是自洽的**，但库里还什么都没有 —— 而重启时
-        #:   是从库重建向量的。少了这一步，补推反而会把系统搞成
-        #:   “重启就报节点与协调者不同步”。它是一个**闭包**，
-        #:   捕获了那次操作的全部参数（策略、块密钥密文、文件标识…）。
-        self._finish_cb: Callable[[], object] | None = None
-        #: 落库那一步需要的**纯数据**参数（现在只有上传用得上 ——
-        #: ``key_cts`` 是那次的块密钥密文，重做落库时必需）。
-        #: 没有它就不把现场落盘（见 :meth:`_save_pending_site`）。
-        self._finish_spec: dict | None = None
-        #: 盘上那份现场自救的进展/结论（一条给用户看的话）。
-        self._site_note: str = ""
-        #: 这次启动的现场是**从盘上恢复**的吗。
-        self._restored_site: bool = False
-        #: 守卫看到的"已经跑在前面"的节点（启动时算一次）。
-        self._startup_ahead: list[str] = []
-        #: 自动补推的后台线程与它的计数（见 :meth:`_kick_auto_retry`）。
-        self._auto_thread: threading.Thread | None = None
-        self._auto_attempts: int = 0
-        self._auto_note: str = ""
         #: 最近一次「改台数 → 搬块」的交代（见 :meth:`redistribute`）。
         #:
         #: ★ 只在内存里：它要回答的是"刚刚那次操作搬了什么"，而重启之后
@@ -276,13 +253,7 @@ class StoreManager:
                     ) from exc
                 self._reload(store, db)
                 self._joined_now = self._register_nodes(db)
-                # ★★ 盘上还留着「上次写失败时的现场」吗？守卫**必须先知道** ——
-                #    有现场时"节点跑在前面"是**预期**状态（它们在等补推），
-                #    而不是数据出错（旧版本会在这种时候报
-                #    「存储节点与协调者不同步，拒绝启动」把系统锁死）。
-                site = self._load_pending_site()
-                self._verify_nodes_at_startup(store, db, site=site)
-                self._restore_pending_site(store, site)
+                self._verify_nodes_at_startup(store, db)
 
             # ★ 故障演练：把真传输层包一层（见 :mod:`core.faults`）。
             #   默认名单是空的 ⇒ 对正常路径**零影响**：每个方法只是多一层
@@ -291,11 +262,6 @@ class StoreManager:
             self._install_fault_drill(store)
 
             self.session, self.store = sess, store
-            # ★ 现场是**从盘上恢复**的话，启动后自己先试几轮（用户什么都不用干
-            #   更好；不行就按老办法让他点「补推」）。放在这里而不是恢复当场：
-            #   后台线程要用 ``self.store``，而上面那几行之前它还是 ``None``。
-            if self._restored_site:
-                self._kick_auto_retry()
 
     # -------------------------------------------------------------------
     # 用户密钥（取代了原先的“ABE 参数”那一节）
@@ -641,30 +607,18 @@ class StoreManager:
             self._revoked_users.pop(row.sub, None)
 
     def keywrap_status(self) -> dict:
-        """给界面看的密钥模型现状。**故意把“私钥在哪”说清楚**。"""
+        """给界面看的密钥模型现状。
+
+        只回传**运行时状态**：账号数，以及其中已建成密钥对的数量。
+        「方案」「私钥存储位置」「解封位置」描述的是 ``core/keywrap.py`` 那一层
+        的实现约定，任何部署、任何时刻都相同 —— 那是方案常量，不是状态，
+        已移到前端 ``frontend/src/views/admin/dashboard/index.vue``。
+        """
         with self.db.session() as db:
             users = list(db.execute(select(UserRow)).scalars())
         return {
-            "scheme": "SM2-ECIES（封装块密钥）+ PBKDF2-HMAC-SM3（封装用户私钥）",
             "users": len(users),
             "user_keys": sum(1 for u in users if u.pub_key and u.sk_wrapped),
-            "sessions_with_key": len(self._keys),
-            "private_key_storage": "用登录口令派生的 KEK 封装后入库（users.sk_wrapped）",
-            "session_key_location": (
-                "★ 默认模型：服务端没有私钥 —— 登录不再解封，只把 "
-                "users.sk_wrapped 的密文交给浏览器；解密与验证都在浏览器里完成"
-                "（frontend/src/utils/crypto/）。"
-            ),
-            "note": (
-                "块密钥用文件所有者的 SM2 公钥封装；用户私钥用他自己的口令"
-                "包一层之后才入库。口令本身不落库、私钥明文从不落盘 ——"
-                "所以“数据库被拿走”拿到的只有解不开的密文。\n"
-                "  ★ 默认登录路径（server_key=false）「服务端不解封私钥」："
-                "它只把私钥密文交给浏览器，解封在浏览器里用口令完成 ——"
-                "此后服务端手里没有任何能解开文件的东西，"
-                "它就算作恶也只能交出一份过不了浏览器验证的应答。\n"
-                "  （显式传 server_key=true 才回到旧的服务端代管模型，仅供对比。）"
-            ),
         }
 
     def _check_segment_bytes(
@@ -709,8 +663,8 @@ class StoreManager:
             )
         return seg
 
-    def delta_fingerprint(self, file_id: tuple[str, str] | None = None) -> str:
-        """当前 δ 的短指纹（12 位十六进制）: ``sha256("U:C:n")[:12]``。
+    def delta_fingerprint(self, file_id: tuple[str, str]) -> str:
+        """某份文件当前 δ 的短指纹（12 位十六进制）: ``sha256("U:C:n")[:12]``。
 
         为什么必须有它、而不能只看 ``n``：**改块不改变 n，却会改变承诺 C**
         （见 :meth:`modify_block`）。证据是 δ 的函数，所以"n 没变"**不等于**
@@ -719,14 +673,8 @@ class StoreManager:
         它不是密码学承诺，只是给界面用的一把尺子。
         """
         store = self._require()
-        if file_id is not None:
-            d = store.delta_of(*file_id)
-            return hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()[:12]
-        each = sorted(
-            hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()
-            for d in store.deltas.values()
-        )
-        return hashlib.sha256("\n".join(each).encode()).hexdigest()[:12]
+        d = store.delta_of(*file_id)
+        return hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()[:12]
 
     def _make_transport(self) -> NodeTransport | None:
         """没配 ``node_urls`` → 单进程模式（返回 ``None``，由 ``VectorStore`` 自建）。"""
@@ -815,7 +763,6 @@ class StoreManager:
         所以放行不等于放宽：真正"少了数据"的机器仍然过不去。
         """
         if store.n == 0:
-            self._startup_ahead = []
             return
 
         bad: list[str] = []
@@ -830,17 +777,6 @@ class StoreManager:
             int(store.delta_of(*fid).offset): int(store.delta_of(*fid).n)
             for fid in store.files
         }
-        # ★★ 盘上那份「待补推现场」说的正是"哪份文件被推到了第几块"。有它的
-        #    时候"节点跑在前面"是**预期**状态（它们在等补推），不是数据出错
-        #    —— 旧版在这种时候报「存储节点与协调者不同步，拒绝启动」把系统锁死。
-        tolerate: dict[int, int] = {}
-        if site:
-            d = site.get("delta_new") or {}
-            if d.get("offset") is not None and d.get("n") is not None:
-                tolerate[int(d["offset"])] = int(d["n"])
-        #: 协调者**收敛之后**应有的样子（把那次待补推也算进去）。
-        want_after = {**want_n, **tolerate}
-        ahead: list[str] = []
         for row in store.transport.report():
             nid = row["node_id"]
             if row.get("unreachable"):
@@ -851,11 +787,6 @@ class StoreManager:
             got = {int(v["offset"]): int(v["n"]) for v in row.get("vectors", [])}
             if got == want_n:
                 in_sync.append(nid)
-            elif tolerate and got == want_after:
-                # ★ 它**已经收下**了那次“待补推”的更新 —— 这正是现场本身，
-                #   不是错。放行，但要记下来。（补推之后它会回到 want_n。）
-                ahead.append(nid)
-                continue
             elif not got and expect == 0:
                 # 新加入、还没分到任何块 —— 合法。块照样只落在它加入之后写入的那些上。
                 continue
@@ -867,10 +798,6 @@ class StoreManager:
                 continue
             if not row.get("valid", True):
                 bad.append(f"{nid} 声称持有的下标与实际密文对不上")
-
-        # 给 bootstrap 看：哪些节点是"已经在等补推"的（决定盘上那份现场
-        # 还要不要装回内存）。
-        self._startup_ahead = ahead
 
         if not bad and len(down) == len(store.node_ids):
             # 一台都没联系上 ⇒ 根本没东西可查，而且**令牌配错也是这个表现**
@@ -1415,16 +1342,10 @@ class StoreManager:
                     key_cts[pos] = wrap_key(pk_owner, key)
 
             def _finish() -> FileRow:
-                """把这次上传**落库** —— 正常路径与补推路径共用这一段。
-
-                ★ 为什么必须是闭包，而不是一段直写的代码：写推失败时协调者的
-                  **内存**里已经把现场留住了（补推就能收敛），但库里还什么都
-                  没有。若补推之后不补这一步，重启重建时会以"节点与协调者
-                  不同步"被拦下 —— 看起来像"补推把系统修坏了"，实际是账没记全。
-                  :meth:`retry_push` 补成功之后会把这里再调一次。
+                """把这次上传**落库**。
 
                 ★ 它**只读** ``store`` 的当前状态（不依赖上面那个 ``rec`` 变量）：
-                  两条路上拿到的必须是同一份数据，所以统一从 ``store.files`` 取。
+                  统一从 ``store.files`` 取，避免两份数据源漂移。
                 """
                 return self._finish_upload(owner, file_key, key_cts)
 
@@ -1441,8 +1362,6 @@ class StoreManager:
                 #   若传输层没带 payloads（`_pending is None`），重推根本无从谈起，
                 #   这时候再"补落库"就会造出一个**假的收敛** —— 库里有文件、
                 #   向量里却没有对应分量，下一句 store.check() 就当场抽你。
-                if store.pending_write() is not None:
-                    self._leave_pending(store, _finish, key_cts=key_cts)
                 raise
             except ValueError as exc:
                 msg = str(exc)
@@ -1451,7 +1370,7 @@ class StoreManager:
                 raise OutOfRange(msg) from exc
 
             with stage("落库（上传文件登记）"):
-                frow = self._finish_or_pending(_finish)
+                frow = self._persist_once(_finish)
             # 记一下这次上传把全局向量推到了哪里，方便排查
             assert store.n == n0 + frow.block_count
             return frow
@@ -1571,11 +1490,8 @@ class StoreManager:
             try:
                 store.modify(owner, file_key, block_idx, data, key_sink=sink)
             except WriteError:
-                # 改块比追加更不能"重来一次"（重来会换新密钥、新密文，
-                # 已经跟上的节点会当场拒）—— 所以现场必须留住，只能补推。
-                # 同上：只有真的留住了现场才把落库挂上去。
-                if store.pending_write() is not None:
-                    self._pending_finish = _finish
+                # 一台没跟上就是全网不一致，且改块不能“重来一次”（重来会换新密钥、新密文，
+                # 已经跟上的节点会当场拒）。方案约定：不留现场、不补推。
                 raise
             except (KeyError, IndexError) as exc:
                 raise NotFound(str(exc)) from exc
@@ -1583,7 +1499,7 @@ class StoreManager:
                 raise OutOfRange(str(exc)) from exc
 
             with stage("落库（新密文与块登记）"):
-                return self._finish_or_pending(_finish)
+                return self._persist_once(_finish)
 
     # -------------------------------------------------------------------
     # 版本留存与「回退到上一版」（用户 2026-10-12）
@@ -1820,13 +1736,7 @@ class StoreManager:
                 except ValueError as exc:
                     raise OutOfRange(str(exc)) from exc
                 except WriteError:
-                    # 与改块同理：回退更不能“重来一次”，现场必须留住、只能补推。
-                    if store.pending_write() is not None:
-                        self._pending_finish = (
-                            lambda bi=bi, row=row, before=before: self._finish_restore(
-                                owner, file_key, bi, row, before
-                            )
-                        )
+                    # 同改块：不留现场、不补推。
                     raise
                 version = self._finish_restore(owner, file_key, bi, row, before)
                 done.append(bi)
@@ -1961,9 +1871,7 @@ class StoreManager:
             try:
                 store.append(owner, file_key, data, key_sink=sink)
             except WriteError:
-                # 与上传/改块同理：向量那边留了现场，这里把落库也挂上去。
-                if store.pending_write() is not None:
-                    self._pending_finish = _finish
+                # 同上传：不留现场、不补推。
                 raise
             except (KeyError, IndexError) as exc:
                 raise NotFound(str(exc)) from exc
@@ -1972,7 +1880,7 @@ class StoreManager:
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
             with stage("落库（新块与块登记）"):
-                return self._finish_or_pending(_finish)
+                return self._persist_once(_finish)
 
     def truncate_file(self, owner: str, file_key: str, drop_blocks: int) -> dict:
         r"""删掉文件**末尾**的若干块（论文 §8.2 的 ``op = del``）。
@@ -2076,8 +1984,6 @@ class StoreManager:
             try:
                 store.truncate(owner, file_key, drop_blocks)
             except WriteError:
-                if store.pending_write() is not None:
-                    self._pending_finish = _finish
                 raise
             except KeyError as exc:
                 raise NotFound(str(exc)) from exc
@@ -2086,7 +1992,7 @@ class StoreManager:
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
             with stage("落库（删除登记）"):
-                out = self._finish_or_pending(_finish)
+                out = self._persist_once(_finish)
             out["dropped_from"] = n_before
             return out
 
@@ -2179,8 +2085,6 @@ class StoreManager:
             try:
                 got_K, got_doomed = store.delete_from(owner, file_key)
             except WriteError:
-                if store.pending_write() is not None:
-                    self._pending_finish = _finish
                 raise
             except KeyError as exc:
                 raise NotFound(str(exc)) from exc
@@ -2201,7 +2105,7 @@ class StoreManager:
                 )
 
             with stage("落库（删除上传文件）"):
-                out = self._finish_or_pending(_finish)
+                out = self._persist_once(_finish)
             out["dropped_from"] = n_before
             return out
 
@@ -2250,8 +2154,6 @@ class StoreManager:
                 #: 新方案里每份文件自己一条向量，所以这里只是一个总量；
                 #: 每份文件自己的 ``n`` / 指纹在下面的 ``files`` 里。
                 "delta_n": store.n,
-                #: 整库账目的指纹 —— 任何一份文件的 (U, C, n) 变了它都会变。
-                "delta_fp": self.delta_fingerprint(),
                 #: ★ 这次查询覆盖到哪些文件、各自是什么状态（前端按
                 #:   “文件 / 第几块”展示，并据此判断手里的旧证据作废没有）。
                 "files": [
@@ -2509,7 +2411,7 @@ class StoreManager:
             if not report.ok:
                 # 同样：会原样弹给前端，不用 Markdown 星号。
                 raise OutOfRange(
-                    f"分解出来的证据验不过：{report.message}\n"
+                    f"分解所得证据未通过验证：{report.message}\n"
                     f"  最可能的原因是「这份证据是在旧的 δ 上取的」——\n"
                     f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让"
                     f"之前取到的证据失效。\n"
@@ -2529,7 +2431,6 @@ class StoreManager:
             return {
                 #: 这份结论覆盖到的**全局位置总数**。
                 "delta_n": store.n,
-                "delta_fp": self.delta_fingerprint(),
                 "indices": list(K_set),
                 "values": [str(v) for v in F_K],
                 "proof": {
@@ -2637,9 +2538,9 @@ class StoreManager:
                     for fs in groups2
                 )
                 raise OutOfRange(
-                    f"这些卡来自不同的合并向量，没法合成一条结论"
-                    f"（一次结论要求它们共享同一个承诺 C）：{desc}。\n"
-                    "  要么把它们分开验，要么先用「聚合选中」统一到一条向量上。"
+                    "这些卡片分别绑定各自的文件承诺，无法合并为单次结论。"
+                    f"单次结论要求所有证据位于同一承诺 C 之下，当前分组为：{desc}。\n"
+                    "  可分组分别验证，也可先用「聚合选中」将它们归约到同一合并向量。"
                 )
             fids2 = sorted(next(iter(groups2)))
             crs_n, C, P, loc = store.universe_for(fids2)
@@ -2693,7 +2594,6 @@ class StoreManager:
             return {
                 #: 这份结论覆盖到的**全局位置总数**。
                 "delta_n": store.n,
-                "delta_fp": self.delta_fingerprint(),
                 #: 这次是在**哪条向量**上给的结论（跨文件的卡落在合并向量上）。
                 "universe_files": [f"{o}/{k}" for (o, k) in fids2],
                 "universe_n": len(P),
@@ -2711,137 +2611,34 @@ class StoreManager:
                 "agree": agree,
             }
 
-    def pending_write(self) -> dict:
-        """有没有“推失败了、还没补”的更新。
+    # -------------------------------------------------------------------
+    # 落库收尾
+    # -------------------------------------------------------------------
 
-        界面拿它决定要不要报——注意这是**真故障**（全网不一致），
-        不是“慢”：已经有节点按新 δ 前进了，另几台还在旧 δ 上。
+    def _persist_once(self, finish):
+        """落库（``db.add`` 式，非幂等）。
+
+        写路径的次序是「内存与节点先前进，落库在后」。落库自己抛错（磁盘满 /
+        ``SQLITE_BUSY`` / 唯一约束冲突）时，事务由 ``Database.session()`` 回滚，
+        这次写就到此为止 —— **不留现场、不补推**。
         """
-        with self._lock:
-            return {
-                "pending": self._require().pending_write(),
-                #: 向量层已补推、但落库那一步还欠着（正常不会有；
-                #: 它只在“补成功了、写库中途出了意外”时出现）。
-                "persist_pending": self._pending_finish is not None,
-                #: 这次启动有没有从**盘上**恢复上次失败留下的现场。
-                "restored": bool(self._restored_site),
-                #: 现场自救的进展/结论（一句话，直接给用户看）。
-                "site_note": self._site_note,
-                #: 自动补推的现状 —— 界面拿它告诉用户“别慌，还在自己试；
-                #: 试完了还没成，就该你上了”。
-                "auto": self.auto_retry_state(),
-            }
+        return finish()
+
 
     # -------------------------------------------------------------------
-    # 写失败后的**自动补推**
+    # 落库收尾
     # -------------------------------------------------------------------
-    #
-    # ★ `_pending_finish` 故意做成**属性**：它一共有 4 个设置点
-    #   （上传 / 改块 / 追加 / 截断各一处），而“留了现场就要踢一次自动补推”
-    #   这件事**每处都必须做**。写成属性之后只有这一处定义 —— 漏一处
-    #   在代码上就不可能发生了。
-
-    @property
-    def _pending_finish(self) -> Callable[[], object] | None:
-        return self._finish_cb
-
-    @_pending_finish.setter
-    def _pending_finish(self, cb: Callable[[], object] | None) -> None:
-        self._finish_cb = cb
-        if cb is not None:
-            self._kick_auto_retry()
-
-    def auto_retry_state(self) -> dict:
-        """自动补推的现状（给界面与测试看）。"""
-        alive = self._auto_thread is not None and self._auto_thread.is_alive()
-        return {
-            "enabled": bool(getattr(self.settings, "retry_auto", False)),
-            "running": bool(alive),
-            "attempts": int(self._auto_attempts),
-            "max_attempts": int(getattr(self.settings, "retry_max_attempts", 5) or 5),
-            "interval_s": float(getattr(self.settings, "retry_interval_s", 5.0) or 5.0),
-            "note": self._auto_note,
-        }
-
-    def _kick_auto_retry(self) -> None:
-        """写失败留下现场之后，起一个**后台线程**定时补推（有次数上限）。
-
-        为什么要它：写失败是**真故障**（全网不一致），只能靠“把没跟上的那几台
-        补上”来收敛。人工在集群页点「补推」当然行，但**没人点的时候系统会一直
-        卡在 409**（写路径被挡住），看起来像“坏了”。
-
-        为什么**有上限**：无限重试会把“哪台一直不在线”这件事藏起来。次数用完
-        就停在原地，并在待补推视图里明说“请人工处理” —— 「宁可吵不要哑」。
-
-        为什么**不引任务队列**：规划 §2.10 明确不引新依赖，而这件事只需要
-        “每隔几秒试一次、成功就退出”。线程是 daemon：进程退出不必等它。
-
-        已经有一个在跑就不重复起（否则连续几次写失败会起一堆线程）。
-        """
-        if not getattr(self.settings, "retry_auto", False):
-            return
-        if self._auto_thread is not None and self._auto_thread.is_alive():
-            return
-        self._auto_attempts = 0
-        self._auto_note = f"已开始自动补推（每 {self.auto_retry_state()['interval_s']} 秒一次）"
-        self._auto_thread = threading.Thread(
-            target=self._auto_retry_loop, name="vds-auto-retry", daemon=True
-        )
-        self._auto_thread.start()
-
-    def _auto_retry_loop(self) -> None:
-        """自动补推线程的全部逻辑（跑在后台线程里，不能把异常抛出去）。"""
-        state = self.auto_retry_state()
-        limit = max(1, int(state["max_attempts"]))
-        gap = max(0.05, float(state["interval_s"]))
-        while True:
-            time.sleep(gap)
-            try:
-                out = self.retry_push()
-            except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常打死整个进程
-                self._auto_note = f"第 {self._auto_attempts + 1} 次失败：{exc}"
-                self._auto_attempts += 1
-                if self._auto_attempts >= limit:
-                    return
-                continue
-            if out.get("pending") is None and not out.get("persist_pending"):
-                self._auto_note = f"已自动补齐（试了 {self._auto_attempts + 1} 次）"
-                self._auto_attempts += 1
-                return
-            who = "、".join((out.get("pending") or {}).get("nodes") or []) or "未知节点"
-            self._auto_attempts += 1
-            self._auto_note = (
-                f"自动补推第 {self._auto_attempts} 次仍未成功（{who}）"
-                + ("：次数已用完，请人工处理" if self._auto_attempts >= limit else "，稍后再试")
-            )
-            if self._auto_attempts >= limit:
-                return
 
     # -------------------------------------------------------------------
-    # 「待补推现场」的落盘 / 恢复（跨重启）
+    # 上传落库
     # -------------------------------------------------------------------
-    #
-    # ★★ 为什么要有这一段（用户报的"一次失败 + 重启 = 起不来"就是它）：
-    #
-    #   现场原来只在**内存**里 —— 向量那半在 ``store._pending``，落库那半在
-    #   ``self._finish_cb``。进程一没，现场就**永久丢失**，而节点上已经跟进的
-    #   那几台**不会回退**。于是重启时守卫看到"节点跑在前面"，报一句
-    #   「存储节点与协调者不同步，拒绝启动」就把整个系统锁死，唯一出路是
-    #   人工去每台节点上清那半段（``scripts/_node_forget_stray.py``）。
-    #
-    #   落盘之后重启就能接着办：守卫先知道"跑在前面"是**预期**（它们在等
-    #   补推），现场再被装回内存，「补推」一点就收住。
 
     def _finish_upload(self, owner: str, file_key: str, key_cts: Mapping) -> FileRow:
-        """把一次上传**落库** —— 正常路径、补推路径、**重启恢复路径**共用这一段。
+        """把一次上传**落库**。
 
-        ★ 为什么必须抽成方法（原来它是 ``upload`` 里的一个闭包）：闭包
-          **过不了重启** —— ``key_cts`` 只活在 ``upload`` 的栈上。而这一步
-          需要的全部输入只有三样：``store`` 的当前状态、``owner/file_key``、
-          ``key_cts``。所以它可以写成"参数齐全就能再跑一遍"的形式。
-
-        ★ 绝不能另写一份"恢复专用"的落库代码：两份实现会慢慢走偏，而走偏
-          只在**故障恢复**那条路上才看得见（本地全绿也发现不了）。
+        ★ 为什么抽成方法（原来它是 ``upload`` 里的一个闭包）：闭包过不了
+          重启 —— ``key_cts`` 只活在 ``upload`` 的栈上。而这一步需要的全部
+          输入只有三样：``store`` 的当前状态、``owner/file_key``、``key_cts``。
         """
         store = self._require()
         # JSON 往返之后字典的键会变成字符串 —— 在这里归一，别把这类坑漏下去。
@@ -2890,201 +2687,16 @@ class StoreManager:
             db.refresh(frow)
         return frow
 
-    def _leave_pending(self, store, finish, *, key_cts=None) -> None:
-        """写失败之后**留下现场**：待补推（向量）+ 待补落库（库）+ 落盘。
+    # -------------------------------------------------------------------
+    # 写失败的语义
+    # -------------------------------------------------------------------
+    #
+    # ★ 一次广播写只要有**一台**没跟上，全网就不一致：已经跟上的那几台 δ 已
+    #   经是新的了。方案约定：**不留现场、也不补推**，没推上去的副本直接丢弃
+    #   （见 ``core/store.py`` 里那几处 ``except TransportError``）。
+    #   所以写路径收到 ``WriteError`` 时只做一件事：把它翻成 503 告诉用户
+    #   “哪几台没跟上、已经写上的那几台不受影响”，不再挂任何待办。
 
-        ★ 为什么收口成一个方法：留现场这件事原来散在写路径各处，而
-          "落库那一步需要哪些参数"每处都不一样 —— 于是**新增第三件事**
-          （把现场落盘）就很容易漏掉某一处。收口之后只有这里一处定义。
-        """
-        self._finish_spec = {"kind": "upload", "key_cts": dict(key_cts or {})}
-        self._pending_finish = finish          # 属性 setter 会踢一次自动补推
-        self._save_pending_site(store)
-
-    def _save_pending_site(self, store=None) -> bool:
-        """把现场写到盘上（全库一行）。返回是否真的写了。
-
-        ★ 只写**两半都齐**的现场：向量那半（``store.export_pending()``）与
-          落库那半（``self._finish_spec``）。缺了落库那半还硬恢复的话，补推
-          会"向量收敛、库里还空着" —— 那是**假收敛**，比不恢复更坏（重启时
-          照样被守卫拦下，而且再没有补推路径能救）。所以缺一半就什么都不写，
-          按老办法（人工跑维护脚本）处理 —— 如实，不假装存住了。
-        """
-        store = self._require() if store is None else store
-        data = store.export_pending()
-        spec = self._finish_spec
-        if data is None or not spec:
-            return False
-        data["finish"] = {
-            "kind": str(spec.get("kind", "upload")),
-            "key_cts": {str(k): v for k, v in (spec.get("key_cts") or {}).items()},
-        }
-        payload = json.dumps(data, ensure_ascii=False)
-        with self.db.session() as db:
-            row = db.get(PendingWriteRow, 1)
-            if row is None:
-                db.add(PendingWriteRow(id=1, payload=payload))
-            else:
-                row.payload = payload
-            db.commit()
-        return True
-
-    def _load_pending_site(self) -> dict | None:
-        """读盘上的现场（**只读**，不碰 ``store`` —— 守卫要先用它放行）。"""
-        with self.db.session() as db:
-            row = db.get(PendingWriteRow, 1)
-            if row is None:
-                return None
-            try:
-                return json.loads(row.payload)
-            except Exception:  # noqa: BLE001 - 读不出来的现场不能拿去挡启动
-                return None
-
-    def _clear_pending_site(self) -> None:
-        """现场收敛（或判定为陈旧）之后把它从盘上抹掉。
-
-        ★ **不要**在这里清 ``_site_note``：抹盘的几个调用点（判定陈旧、
-          收敛成功）各自都可能刚写过一句话，清掉就等于把提示吞了 ——
-          界面于是显示"什么都没发生"，而实际发生了一次丢弃。
-        """
-        self._finish_spec = None
-        self._restored_site = False
-        try:
-            with self.db.session() as db:
-                db.execute(delete(PendingWriteRow))
-                db.commit()
-        except Exception as exc:  # noqa: BLE001
-            # 抹不掉不影响"这次补推已经成功"，但会让下次启动读到一个**陈旧**
-            # 现场 —— 所以必须留下痕迹（宁可吵不要哑）。
-            self._site_note = f"待补推现场没能从盘上抹掉（{type(exc).__name__}: {exc}）"
-
-    def _restore_pending_site(self, store: VectorStore, site: dict | None) -> None:
-        """把盘上的现场装回内存（向量那半 + 落库那半）。
-
-        ★ 只有在**确实还有节点跑在前面**时才恢复 —— 否则那一行就是陈旧的
-          （上次抹盘失败、或者已经人工收敛过），硬恢复会造出一个没有对应
-          事实的"待补推"，让界面一直报警。
-        """
-        if not site:
-            return
-        if not self._startup_ahead:
-            self._site_note = "盘上留着一份现场，但所有节点都已对齐 —— 判定为陈旧，已丢弃"
-            self._clear_pending_site()
-            return
-        finish = site.get("finish") or None
-        if not finish:
-            self._site_note = (
-                "盘上的现场缺了「落库」那一半，无法安全恢复（补推会造成账只记一半）"
-                " —— 保留在盘上，请人工处理（见 scripts/_node_forget_stray.py）"
-            )
-            return
-        try:
-            store.import_pending(site)
-        except Exception as exc:  # noqa: BLE001 - 恢复不了也要把话说清楚
-            self._site_note = (
-                f"盘上的现场恢复失败（{type(exc).__name__}: {exc}）—— 保留在盘上，请人工处理"
-            )
-            return
-        key_cts = {int(k): v for k, v in (finish.get("key_cts") or {}).items()}
-        owner, file_key = str(site["file_id"][0]), str(site["file_id"][1])
-        self._finish_spec = {"kind": str(finish.get("kind", "upload")), "key_cts": key_cts}
-        # ★ 这里直接写 ``_finish_cb`` 而**不走属性**：属性会踢自动补推，而这个
-        #   时候 ``self.store`` 还没挂上（bootstrap 末尾才挂）。启动末尾那一处
-        #   再补踢一次（它那时才是安全的）。
-        self._finish_cb = lambda: self._finish_upload(owner, file_key, key_cts)
-        self._restored_site = True
-        self._site_note = (
-            f"已恢复上次写失败的现场（{owner}/{file_key}，"
-            f"待补推 {len(site.get('K') or [])} 块）—— 点一次「补推」即可收敛"
-        )
-
-    def _finish_or_pending(self, finish):
-        """落库；**失败时把这一步挂成“待补落库”**，然后把异常抛出去。
-
-        ★★ 为什么必须留这一手（安全审计 S3）：
-
-        写路径的次序是“**内存与节点先前进**，落库在后”。如果 ``store`` 那边
-        已经成功、而落库自己抛错（磁盘满 / SQLITE_BUSY / 唯一约束冲突），
-        那一刻的状态是“向量已经动了、库里少一行” —— 而它
-        **既不是 ``WriteError``（那条路有现场），也不是干净失败（无副作用）**。
-
-        不留现场的后果：
-
-        * ``_reject_if_pending`` 拦不住后续写 —— 它们会在**错位的账**上继续写；
-        * 重启时 ``_reload`` 从库重建（**缺这一份**），而节点那边有 ⇒
-          ``_verify_nodes_at_startup`` 以“节点与协调者不同步”**拒绝启动**，
-          而这时**没有任何补推路径**能收敛（它既没有 pending，也没有干净回滚）。
-
-        挂到 ``_pending_finish`` 之后：「补推」会在收尾时把它补上
-        （见 :meth:`retry_push`），而 ``persist_pending`` 会让
-        ``_reject_if_pending`` 拦住后续写 —— 两条路都通了。
-
-        .. note::
-
-           ``_finish`` 是 ``db.add`` 式的（**非幂等**）。补落库能安全重试的
-           前提是“失败时事务没有提交”（``Database.session()`` 在异常时回滚）。
-           若失败发生在 ``commit()`` **之后**（极少），重试会撞唯一约束 ——
-           那种情况在 :meth:`retry_push` 里会被如实报成 ``persist_error``，
-           不会被静默当成成功。
-        """
-        try:
-            return finish()
-        except Exception:
-            self._pending_finish = finish
-            raise
-
-    def retry_push(self, *, manual: bool = False) -> dict:
-        """**补推**：把上次没推成功的那次更新，**只补推给没跟上的那几台**。
-
-        ★ 为什么不能“重新传一次文件”：协调者的 δ 没推进，但**登记表已经分配过**
-        那批下标 —— 再传一次会拿到新下标，而且会撞上“登记表游标与向量长度
-        不一致”。所以补推是唯一的出路（见 ``core/transport.py::WriteError``）。
-
-        ★ 补完向量**还要把那次操作欠下的落库补上**：库里如果一直是空的/
-        旧的，重启时是从库重建向量的，于是会以“节点与协调者不同步”被拦下 ——
-        看起来像“补推把系统修坏了”，实际上是账只记了一半。
-
-        ``ok=False`` 不是“没救了”：它表示“补了，但还有几台没通”——
-        把那儿台弄活再点一次即可（已经补上的不会被打扰）。
-        """
-        with self._lock:
-            if manual:
-                # 人工点了一次：把自动补推的计数**重新给满**（潜台词是
-                # “我刚去把机器修好了，再自动试几轮”）。★ 只有人工传 manual=True
-                # —— 后台线程自己不传，否则它会在自己的循环里反复给自己续命。
-                self._auto_attempts = 0
-            store = self._require()
-            out = store.retry_pending()
-            # ★★ 只要还有“欠着的落库”就补上 —— **不能**再要求 had_pending
-            #   （安全审计 S3）：落库失败那条路上，节点侧本来就是推成功的
-            #   （没有 pending），卡在库里的是那一行；要求 had_pending
-            #   会让它**永远补不上**，而重启时正是这种情况会被拒绝启动。
-            #
-            #   反向的假收敛这里不会发生：那种情况（**没有** _pending_finish
-            #   却去调 _finish()）压根进不来这个分支。
-            if out.get("ok") and self._pending_finish is not None:
-                finish, self._pending_finish = self._pending_finish, None
-                with stage("落库（补推收尾）"):
-                    try:
-                        finish()
-                    except Exception as exc:  # noqa: BLE001 - 要如实报出来
-                        # 补落库本身又失败了：把现场**放回去**（下次还能补），
-                        # 并让这次补推如实标成失败 —— 不能静默当成功。
-                        self._pending_finish = finish
-                        out["ok"] = False
-                        out["persisted"] = False
-                        out["persist_error"] = f"{type(exc).__name__}: {exc}"
-                        out["pending"] = store.pending_write()
-                        out["persist_pending"] = True
-                        return out
-                out["persisted"] = True
-            # ★ 向量与库都收敛了（没有待补推、也没有待补落库）⇒ 盘上那份现场
-            #   已经没用了，**必须抹掉** —— 留着它下次启动会读出一个陈旧现场。
-            if out.get("ok") and store.pending_write() is None and self._pending_finish is None:
-                self._clear_pending_site()
-            out["pending"] = store.pending_write()
-            out["persist_pending"] = self._pending_finish is not None
-            return out
 
     def _blocks_of(self, owner: str, file_key: str) -> dict[int, dict]:
         """取这份文件每块的 ``{block_idx: {key_ct}}``。
@@ -3747,7 +3359,7 @@ class StoreManager:
                 "lost_count": 0,
                 "degraded_blocks": 0,
                 "files_affected": [],
-                "note": "无故障：所有存储节点在线。",
+                "note": "无故障：全部存储节点在线。",
             }
         lost: list[dict] = []
         degraded = 0
@@ -3768,22 +3380,21 @@ class StoreManager:
             by_file[key] = by_file.get(key, 0) + 1
         if lost:
             note = (
-                f"如果这真是地震：{len(lost)} 块会永久丢失 —— 它们的每一份副本"
-                f"都在故障机器上，涉及 {len(by_file)} 份文件。"
-                f"这就是「副本数不够 + 不可逆故障」的后果。"
-                f"（本演练不删数据；点「恢复」立刻全部复原。）"
+                f"影响评估：{len(lost)} 个分块将永久丢失，其全部副本均位于故障节点，涉及 {len(by_file)} 份文件。"
+                f"成因是「副本数不足」与「不可逆故障」同时成立。"
+                f"（本演练不删除数据；点击「恢复」即可全部复原。）"
             )
         elif degraded:
             note = (
-                f"{degraded} 块的主副本出事，但都还有别的副本 —— "
-                f"读与验证会自动退到副本，现在一切照常可用。"
-                f"这正是多副本的意义：坏一台不出事。"
-                f"（本演练不删数据；点「恢复」立刻全部复原。）"
+                f"{degraded} 个分块的主副本不可用，但其余副本仍然在线 —— "
+                f"读取与验证会自动改用其余副本，当前功能不受影响。"
+                f"这正是多副本的意义：单节点故障不导致服务中断。"
+                f"（本演练不删除数据；点击「恢复」即可全部复原。）"
             )
         else:
             note = (
-                "故障机器上没有任何在用的块（可能它本来就没分到块）。"
-                "业务暂无影响。（本演练不删数据；点「恢复」立刻全部复原。）"
+                "故障节点上没有任何在用的分块（可能未分配到分块）。"
+                "业务功能不受影响。（本演练不删除数据；点击「恢复」即可全部复原。）"
             )
         return {
             "lost_blocks": lost,

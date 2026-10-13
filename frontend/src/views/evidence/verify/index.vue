@@ -225,7 +225,7 @@ async function loadFiles() {
     const live = new Set()
     for (const f of list) for (const i of f.indices || []) live.add(i)
     basket.syncLive([...live])
-    if (list.length && list[0].delta_fp) pool.syncDelta({ fp: list[0].delta_fp, n })
+    if (list.length) pool.syncDelta({ n })
 
     // 刷新后可能少了几份文件：把已经不在的人从勾选里摘掉
     pickedIds.value = pickedIds.value.filter((id) => list.some((f) => f.id === id))
@@ -571,50 +571,50 @@ const regIndex = ref('')
 /* ---------------------------------------------------------------------------
    验证过程弹框（★ 2026-10-12 用户要的）
    ---------------------------------------------------------------------------
-   验证的卖点不是“服务端说 OK”，而是**一个公开检验**自己能跑通。
-   所以把这几步摆出来，并且强调每一步“为什么是关键”。
+   检验完全由公开量完成：δ、π_I 与本地重算的分量即可判定，无需采信服务端的结论。
+   弹框逐步展示这些量是怎样产生的，以及每一步在链路上的作用。
    `key` 与后端 `with stage("…")` 的名字对齐；对不上就不显示耗时，不编数字。
 --------------------------------------------------------------------------- */
 const VERIFY_STEPS = [
   {
     name: '定下标集',
     en: 'SELECT',
-    desc: '只验你指定的这些块（人看是第几块）。一份证据只对它盖住的下标有效 —— 没盖住的块，说它“验证通过”不算数。',
+    desc: '仅验证指定的分块（按界面序号）。一份证据仅对其覆盖的下标有效：未被覆盖的分块，不能声称验证通过。',
   },
   {
     key: '探测各节点（report）',
     name: '探测节点',
     en: 'PROBE',
-    desc: '问一遗集群：这些块现在分别存在哪几台。节点会如实报自己存了什么，这句话后面要拿验证来对它。',
+    desc: '询问集群：这些分块当前分别由哪些节点持有。节点上报的持有情况仅作为线索，随后由验证加以核对。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '把这几块的密文拿回来 —— 拿回来的是密文，让协调者交明文它也给不出来。',
+    desc: '取回这些分块的密文。协调者仅持有密文，不具备提供明文的能力。',
   },
   {
     key: '取回分量与凭证',
     name: '重算分量',
     en: 'DIGEST',
-    desc: '浏览器拿密文自己重算每一块的公开分量（SM3），不看服务端报的那份。',
+    desc: '浏览器在本地依据密文重新计算每个分块的公开分量（SM3），不采用服务端上报的数值。',
   },
   {
     key: '聚合凭证',
     name: '聚合成一份证据',
     en: 'AGGREGATE',
-    desc: '把这几块的分量聚成一份证据 π_I：两个群元素 ≤ 256 字节 —— 覆盖 4 块还是 4 千块，都是这个大小。',
+    desc: '将这些分块的分量聚成一份证据 π_I：两个群元素、不超过 256 字节，与覆盖的分块数量无关。',
   },
   {
     key: '承诺验证（VerRetrieve）',
     name: '公开检验一次',
     en: 'VERIFY',
-    desc: '拿 δ 与 π_I 做一次公开检验。它不需要明文、不需要密钥，也不需要相信任何一方 —— 谁拿这几样东西都能自己重跑。',
+    desc: '以 δ 与 π_I 执行一次公开检验：无需明文、无需密钥，也无需信任任何一方，任何持有这些公开量的主体都能独立复算。',
   },
   {
     name: '结论',
     en: 'VERDICT',
-    desc: '通过 = 这些块还在、且与你上传那一版一致；不通过 = 有块被换/被删，或者交回来的密文对不上当前基准。',
+    desc: '通过表明这些分块存在且与上传版本一致；未通过表明存在被替换或删除的分块，或者返回的密文与当前基准不符。',
   },
 ]
 
@@ -685,7 +685,7 @@ async function runQuery() {
     processOpen.value = true
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
-    pool.syncDelta({ fp: data?.delta_fp, n: data?.delta_n })
+    pool.syncDelta({ n: data?.delta_n })
     // 收进证据池（标签用界面坐标写，池子里就不会冒出全局下标）
     pool.addCard({
       label: advancedMode.value
@@ -1199,7 +1199,7 @@ onMounted(loadFiles)
     <ProcessDialog
       v-model="processOpen"
       title="这次验证走了哪几步"
-      subtitle="结论谁都会给；这里的每一步都是能自己跑一遍的公开检验。"
+      subtitle="各步检验均可在本地依据公开量独立复算。"
       :steps="VERIFY_STEPS"
       :timings="lastVerify?.timings"
       :facts="verifyFacts"

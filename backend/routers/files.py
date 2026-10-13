@@ -73,39 +73,15 @@ def _write_failed(exc: WriteError) -> HTTPException:
     而是**全网暂时不一致** —— 而且此刻"重新上传一次"是**错**的修法
     （协调者的 δ 没推进，但登记表已经分配过那批下标了，重传会拿到新下标，
     并撞上"登记表游标与向量长度不一致"）。所以提示必须说清
-    "把机器弄活 → 补推"，否则拿到 503 的人第一反应就是重传。
+    "写失败就是失败了"，不要引导用户去重传或补推（那两者都会造出新的下标）。
     """
     who = "、".join(exc.nodes) or "未知节点"
     return HTTPException(
         status.HTTP_503_SERVICE_UNAVAILABLE,
-        f"有 {len(exc.nodes)} 台存储节点没跟上这次更新（{who}）—— "
-        f"全网摘要暂时不一致，已经跟上的那几台不会回退。"
-        f"协调者没有推进自己的账，但登记表已经分配过这批下标，"
-        f"所以不要重新上传（那会拿到新下标）。"
-        f"把没通的机器弄活之后，在「集群」页点一次「补推」即可收敛"
-        f"（POST /api/nodes/retry-push）；已经跟上的节点不会被重复打扰。",
-    )
-
-
-def _reject_if_pending(mgr: StoreManager) -> None:
-    """上一次写没推全 → **先别写**。
-
-    写推失败之后协调者的 δ 没有推进，但登记表**已经分配过**那批下标了。
-    这时候再写会撞上“登记表游标与向量长度不一致” —— 那是一句 RuntimeError，
-    到了客户端只是一个 500“服务器内部错误”，完全指不到该怎么办。
-    所以在这里把它变成一个能看懂的 409，并直说修法（补推）。
-    """
-    st = mgr.pending_write()
-    if not (st["pending"] or st["persist_pending"]):
-        return
-    pd = st["pending"] or {}
-    who = "、".join(pd.get("nodes", [])) or "（未记录）"
-    raise HTTPException(
-        status.HTTP_409_CONFLICT,
-        f"上一次写（{pd.get('op', '写推')}）还有 {len(pd.get('nodes', []))} 台存储节点没跟上（{who}），"
-        f"全网摘要尚未一致 —— 请先在「集群」页点一次「补推」"
-        f"（POST /api/nodes/retry-push），再继续写。"
-        f"不要重新上传：登记表已经分配过那批下标，重传会拿到新下标。",
+        f"{len(exc.nodes)} 台节点未完成本次写入（{who}），可能处于「模拟损坏」状态。"
+        f"文件数据已写入其余节点，但全网尚未达到一致，因此本次写入未被最终确认。"
+        f"未写入成功的副本已丢弃：上述节点上不存在该份数据，其余节点上的内容不受影响；"
+        f"后续验证会如实报告这些不一致。",
     )
 
 
@@ -171,17 +147,18 @@ def _file_public(row: FileRow, mgr: StoreManager) -> dict:
         #   所以任何一次上传都会让此前取到的证据全部失效（设计 B 的固有代价）。
         #   不标出来的话，界面上那些"验证通过"会一直是旧的结论。
         "delta_n": store.n,
-        # ★ 但只看 n 不够：**改块不改 n、却改承诺 C**（见 manager.modify_block）。
-        #   所以再给一个 δ 指纹；前端判"手里那张卡作废没有"要按它判。
-        "delta_fp": mgr.delta_fingerprint(),
         # ★ 这份文件在全局位置轴上占的段（追加会让它变成好几截）。
         #   文件列表的「位置段」列渲染的就是它；没有这几个字段，那一列只能是 "—"。
         "offset": int(_fd_row.offset),
         "n": int(_fd_row.n),
         "segments": [[int(a), int(b)] for a, b in _fd_row.segments],
-        #: 逐文件的 δ 指纹（与上面那个全局的分开）：判"这份文件的旧证据还行吗"用它。
+        #: 这份文件当前 δ 的短指纹。判"这份文件的旧证据还行吗"要按它判——
+        #  **只看 n 不够**：改块不改 n、却改承诺 C（见 manager.modify_block）。
         "file_delta_fp": mgr.delta_fingerprint((row.owner, row.file_key)),
-
+        #: 该文件承诺 δ = (U, C) 的**完整值**，转成十进制字符串再给前端
+        #  （U、C 是上千位整数，JSON 数字会被浏览器端 Number 丢精度，必须走字符串）。
+        "delta_U": str(_fd_row.U),
+        "delta_C": str(_fd_row.C),
     }
 
 
@@ -240,7 +217,6 @@ def upload(
                 "nodes 传了但没有一个有效的机器名（应当是逗号分隔，如 node-1,node-2）",
             )
 
-    _reject_if_pending(mgr)
     # ★ ``with collect()`` 开一段阶段秒表：下面这个调用里做的每一步
     #   （切块 / 逐块加密 / 算向量分量 / 封块密钥 / 承诺 / 分发 / 落库）
     #   都会被记下来，最后挂在响应的 ``timings`` 上给前端画进度条。
@@ -320,9 +296,9 @@ def patch_file(
     if row.owner != user.username:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "只有所有者能改这份文件 —— 改块要重新封装块密钥，"
-            "这与上传是同一级别的权限（管理员也不行）。\n"
-            "  注意：这不影响验证 —— 这份文件的完整性你照样能验。",
+            "仅文件所有者可以改写该文件：改写需要重新封装块密钥，"
+            "与上传属于同一权限级别（管理员亦不具备该权限）。\n"
+            "  注意：该限制不影响完整性验证 —— 你仍可验证此文件的完整性。",
         )
 
     if body.op == "zero":
@@ -359,7 +335,6 @@ def _do_modify(
     """
     assert body.block_idx is not None  # 由 FilePatchIn._required_fields 保证
     data = body.data()
-    _reject_if_pending(mgr)
     try:
         with collect() as sw:
             out = mgr.modify_block(row.owner, row.file_key, body.block_idx, data)
@@ -416,7 +391,6 @@ def _do_zero(
        连"这块被清过"也不从长度上泄露。
     """
     assert body.block_idx is not None  # 由 FilePatchIn._required_fields 保证
-    _reject_if_pending(mgr)
     try:
         with collect() as sw:
             out = mgr.zero_block(row.owner, row.file_key, body.block_idx)
@@ -479,7 +453,6 @@ def _do_append(
       都能解密，不会出现"前几块能读、后面追加的读不了"。
     """
     data = body.data()
-    _reject_if_pending(mgr)
     try:
         with collect() as sw:
             out = mgr.append_to_file(row.owner, row.file_key, data)
@@ -537,9 +510,8 @@ def _do_truncate(
     if body.drop_blocks is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "op=truncate 必须给 drop_blocks（要删掉末尾几块）",
+            "op=truncate 必须提供 drop_blocks（需截断的末尾分块数）",
         )
-    _reject_if_pending(mgr)
     try:
         with collect() as sw:
             out = mgr.truncate_file(row.owner, row.file_key, body.drop_blocks)
@@ -606,10 +578,9 @@ def delete_file(
     if row.owner != user.username:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "只有所有者能删这份文件 —— 它会把这份文件的块从全网真的删掉。\n"
-            "  注意：别的文件不受影响；验证也不受影响 —— 别的文件你照样能验。",
+            "仅文件所有者可以删除该文件：该操作会把本文件的全部分块从所有节点上实际删除。\n"
+            "  注意：其他文件不受影响；完整性验证亦不受影响 —— 其他文件仍可正常验证。",
         )
-    _reject_if_pending(mgr)
     owner, file_key = row.owner, row.file_key
     try:
         with collect() as sw:
@@ -749,7 +720,7 @@ def replay_route(
     if row.owner != user.username and user.role != "admin":
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "只有文件所有者能对这份文件做回滚演示",
+            "仅文件所有者可以对该文件执行回滚演示",
         )
     try:
         out = mgr.replay_arm(row.owner, row.file_key, body.block_idx, on=body.on)
@@ -811,9 +782,8 @@ def restore_route(
     if row.owner != user.username:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "只有所有者能回退自己文件的版本（回退会换回旧密文与旧块密钥）。",
+            "仅文件所有者可以回退本文件的版本（回退会恢复旧密文与旧块密钥）。",
         )
-    _reject_if_pending(mgr)
     try:
         with collect() as sw:
             out = mgr.restore_previous(row.owner, row.file_key, body.block_indices)
@@ -957,12 +927,11 @@ def decrypt(
         )
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "服务端这次会话里没有你的私钥 —— 这是「默认模型」：\n"
-            "  私钥在浏览器里用口令解封（登录响应里的 key_blob），"
-            "后端不解封、也不保存。\n"
-            "  要解密请走客户端路径：POST /api/files/{id}/cipher 取密文，"
-            "由浏览器解封块密钥并 SM4 解密。\n"
-            "  （想对比旧模型：登录时显式传 server_key=true。）",
+            "本次会话在服务端没有你的私钥 —— 这是「默认模型」的行为：\n"
+            "  私钥在浏览器内用口令解封（登录响应中的 key_blob），服务端不解封、也不保存。\n"
+            "  解密请使用客户端路径：POST /api/files/{id}/cipher 取回密文，"
+            "由浏览器解封块密钥并执行 SM4 解密。\n"
+            "  （如需对比旧模型：登录时显式传入 server_key=true。）",
         )
 
     try:
@@ -980,7 +949,7 @@ def decrypt(
         )
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            f"{exc}\n注意：这不影响验证 —— 那些块你照样可以验证完整性。",
+            f"{exc}\n注意：该限制不影响完整性验证 —— 这些分块仍可正常验证。",
         ) from exc
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc

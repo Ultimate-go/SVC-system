@@ -23,17 +23,16 @@ const CACHE_KEY = 'vds_pool'
 function loadCache() {
   try {
     const raw = sessionStorage.getItem(CACHE_KEY)
-    if (!raw) return { cards: [], selectedIds: [], currentN: null, currentFp: null, fileFps: {} }
+    if (!raw) return { cards: [], selectedIds: [], currentN: null, fileFps: {} }
     const o = JSON.parse(raw)
     return {
       cards: Array.isArray(o.cards) ? o.cards : [],
       selectedIds: Array.isArray(o.selectedIds) ? o.selectedIds : [],
       currentN: typeof o.currentN === 'number' ? o.currentN : null,
-      currentFp: typeof o.currentFp === 'string' ? o.currentFp : null,
       fileFps: o.fileFps && typeof o.fileFps === 'object' ? o.fileFps : {},
     }
   } catch {
-    return { cards: [], selectedIds: [], currentN: null, currentFp: null, fileFps: {} }
+    return { cards: [], selectedIds: [], currentN: null, fileFps: {} }
   }
 }
 
@@ -47,7 +46,6 @@ export const usePoolStore = defineStore('pool', {
     cards: [...cached.cards],
     selectedIds: [...cached.selectedIds],
     currentN: cached.currentN,
-    currentFp: cached.currentFp,
     /**
      * 每份文件**当前**的 δ 指纹：``"owner/file_key" -> fp``（从 ``/api/status`` 的
      * ``delta.files[]`` 来）。
@@ -66,12 +64,8 @@ export const usePoolStore = defineStore('pool', {
     /**
      * ★ 已作废的卡片 id 集合。
      *
-     * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**改块 / 清零 / 追加 / 截断**
+     * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**更新 / 清零 / 追加 / 截断**
      * 只改 C（在合并向量上）**不改全局位置总数 n** —— 所以只比 n 是抓不住改块的。
-     *
-     * ★★ 而且不能用“一个全局 fp”去比（以前就是这样）：δ 已经是**逐文件**的，
-     *   那个 `currentFp` 实际上被 `addCard` 写成了“**最后加的那张卡的**指纹”，
-     *   拿它去比别的卡只会得出“除了刚取的那张、其余全作废”。
      *
      *   正确的判据是：**这张卡覆盖的每一份文件，它当时的指纹与现在的比** ——
      *   任一份变了就说明这份文件动过了，这张卡上的证据跟着作废。
@@ -171,19 +165,14 @@ export const usePoolStore = defineStore('pool', {
         ts: Date.now(),
       }
       this.cards.push(card)
-      // ★ 只记 n，**不**写 fp（见 `staleIds` 的注释：拿“刚取的这张的 fp”
-      //   当全局指纹，会把除了它以外的卡全判成作废）。
+      // ★ 只记 n。
       this.syncDelta({ n: card.n })
       this._persist()
       return card
     },
 
-    syncDelta({ fp = null, n = null, fileFps = null } = {}) {
+    syncDelta({ n = null, fileFps = null } = {}) {
       let dirty = false
-      if (typeof fp === 'string' && fp && this.currentFp !== fp) {
-        this.currentFp = fp
-        dirty = true
-      }
       if (typeof n === 'number' && this.currentN !== n) {
         this.currentN = n
         dirty = true
@@ -252,7 +241,6 @@ export const usePoolStore = defineStore('pool', {
             cards: this.cards,
             selectedIds: this.selectedIds,
             currentN: this.currentN,
-            currentFp: this.currentFp,
             // ★ 一起存下来：否则刷新页面后判定“卡还有效吗”会先退化成只比 n，
             //   要等一次 /api/status 回来才恢复（那一瞬旧卡看着是好的）。
             fileFps: this.fileFps,

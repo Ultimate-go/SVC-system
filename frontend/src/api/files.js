@@ -11,7 +11,9 @@ export const filesApi = {
    */
   detail: (id, withElements = false) =>
     api.get(`/api/files/${id}`, withElements ? { params: { elements: 1 } } : undefined),
-  upload: (formData) => api.post('/api/files', formData),
+  // ★ silent：上传的 503（部分节点没跟上）由上传页用弹框单独呈现，
+  //   拦截器就别再弹一个被截断的红色 toast 了。
+  upload: (formData) => api.post('/api/files', formData, { silent: true }),
   patch: (id, body) => api.patch(`/api/files/${id}`, body),
   /**
    * 把某一**块**的内容换成**等长的全 0 字节**（只有所有者）。

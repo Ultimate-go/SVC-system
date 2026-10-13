@@ -12,9 +12,13 @@
  *
  * 三条纪律
  * --------
- * 1. **不落 localStorage**：私钥不进任何持久化存储。页面刷新 / 关标签页就没了，
- *    要再解一次（重新登录，或点「解锁」重输口令）。
- *    —— 存下来就等于把"口令封装私钥"这层保护又还回去了。
+ * 1. **不落 localStorage**：私钥不进任何**长期**存储。
+ *    页面刷新后要能接着用（用户要求：刷新不该把人踢回登录页），
+ *    所以存在 **sessionStorage**（同一个标签页、关标签即失效），
+ *    并且只接 **5 分钟的闲置窗口** —— 超出窗口就当没登录过，
+ *    与全站的会话时效是同一个数（见 utils/session.js）。
+ *    —— 存下来就等于把"口令封装私钥"这层保护又还回去了，
+ *       所以窗口期与作用域都收到最小。
  * 2. **不进 Pinia state**：state 会被 Vue 响应式代理与 devtools 序列化碰到。
  *    私钥放在模块级变量里，store 只暴露一个 `unlocked` 布尔。
  * 3. **不参与任何请求**：后端永远收不到 `sk`。要用它的地方（解块密钥、
@@ -29,6 +33,33 @@ import { unwrapPrivateKey, unwrapPrivateKeyAsync, wrapPrivateKey } from '../util
  * 页面一刷新就回到 `null` —— 这是设计，不是缺陷。
  */
 let _sk = null
+
+/**
+ * 跨刷新续用私钥的位置：**sessionStorage**（不是 localStorage）。
+ *
+ * 为什么不是 localStorage：那会让私钥活得跟"这台机器"一样久。
+ * sessionStorage 的作用域是**当前标签页**，关掉标签就没了；
+ * 再加上 5 分钟的闲置窗口（`SESSION_MAX_MS`），
+ * 把"刷新后还能接着用"与"不用就一直不在"两个要求同时满足。
+ */
+const SESSION_KEY = 'vds_sk_session'
+const SESSION_MAX_MS = 5 * 60 * 1000
+
+function saveSession(sk, username) {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ sk: String(sk), username, at: Date.now() }))
+  } catch {
+    /* 隐私模式下会抛异常：只是刷新后续用不了，不影响别的 */
+  }
+}
+
+function dropSession() {
+  try {
+    sessionStorage.removeItem(SESSION_KEY)
+  } catch {
+    /* 忽略 */
+  }
+}
 
 /**
  * 私钥的**最长寿命**（毫秒）：到点自动锁掉（安全审计 I9）。
@@ -98,6 +129,8 @@ function applyUnlocked(store, sk, username) {
   store.username = username
   store.unlockedAt = Date.now()
   store.error = ''
+  // 刷新后还能接着用（同一标签页、限 5 分钟窗口）
+  saveSession(sk, username)
   // 给它一个寿命（安全审计 I9）
   armExpiry(store)
 }
@@ -177,9 +210,46 @@ export const useCryptoStore = defineStore('crypto', {
     locked() {
       clearExpiry()
       _sk = null
+      dropSession()
       this.unlocked = false
       this.username = ''
       this.unlockedAt = 0
+    },
+
+    /**
+     * 刷新后把上一次解锁的私钥接回来。
+     *
+     * 三道闸门，任一不过就丢掉这份记录（返回 false）：
+     *   ① 只在当前标签页的 sessionStorage 里找；
+     *   ② 超过 5 分钟闲置窗口 —— 与全站会话时效同一个窗口；
+     *   ③ 账号对不上（别人在这个标签页登过）。
+     *
+     * @param {string} [username] 当前登录的用户名
+     * @returns {boolean} 是否成功接回
+     */
+    restore(username = '') {
+      if (_sk !== null) return false
+      let rec = null
+      try {
+        rec = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null')
+      } catch {
+        rec = null
+      }
+      if (!rec?.sk) return false
+      if (Date.now() - Number(rec.at || 0) > SESSION_MAX_MS) {
+        dropSession()
+        return false
+      }
+      if (username && rec.username && rec.username !== username) {
+        dropSession()
+        return false
+      }
+      _sk = BigInt(rec.sk)
+      this.unlocked = true
+      this.username = rec.username || username
+      this.unlockedAt = Date.now()
+      armExpiry(this)
+      return true
     },
 
     /**

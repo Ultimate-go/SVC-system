@@ -415,11 +415,10 @@ async function syncDelta() {
   try {
     const { data } = await systemApi.status()
     // ★★ 判“这张卡还有效吗”靠的是**每份文件**的 δ 指纹，不是长度：
-    //   改块 / 清零 / 追加 / 截断都只改 C，**不改全局位置总数 n** ——
+    //   更新 / 清零 / 追加 / 截断都只改 C，**不改全局位置总数 n** ——
     //   只比 n 的话，改完块池子里的卡看起来一切正常，实际已经验不过了。
     //   （以前这里传的是 `fp: null`，于是那条按指纹的判据从来没生效过。）
     pool.syncDelta({
-      fp: data?.delta?.fp ?? null,
       n: data.delta.n,
       fileFps: Object.fromEntries(
         (data?.delta?.files || []).map((f) => [`${f.owner}/${f.file_key}`, f.delta_fp]),
@@ -433,8 +432,6 @@ async function syncDelta() {
     //   永远显示不出来（安全审计 P4）。旧名保留在后备位，兼容可能的老响应。
     // ★ 顶层那个取回区已经删了（改用文件列表的「入池 / 一键入池」），
     //   `replica_factor` 暂时没有展示位，这里不再读它（那个 ref 也一并删了）。
-    // 也取指纹：status 没有 delta_fp，用 query 一个空集取不到 —— 直接用 n 与已有卡比对。
-    // 实际上 delta_fp 需要从某次 query 拿。这里从池子里已有的 fp 兜底。
   } catch {
     /* 忽略 */
   }
@@ -450,15 +447,15 @@ const aggregating = ref(false)
 /* ---------------------------------------------------------------------------
    聚合 / 分解 的过程弹框（★ 2026-10-12 用户要的）
    ---------------------------------------------------------------------------
-   这两件事是“设计 B”最少见也最值得讲的部分：聚合不是把两份证据拼起来（拼不起来），
-   而是把下标并起来、把承诺抬到一条合并向量上重新算一次。
+   聚合的语义是把下标并起来、把承诺抬到同一条合并向量上重新计算一次；
+   两份证据不能直接拼接 —— 每份证据只对它覆盖的下标有定义。
    `key` 与后端 `with stage("…")` 的名字对齐，对不上就不显示耗时。
 --------------------------------------------------------------------------- */
 const AGG_STEPS = [
   {
     name: '并下标集',
     en: 'UNION',
-    desc: '把所选卡片覆盖的块号合并为一个集合。两份证据不能直接相加：每份证据只对它覆盖的下标有定义。',
+    desc: '将所选卡片覆盖的分块编号合并为一个集合。每份证据仅对其覆盖的下标有定义，因此不能按同一语义叠加两份证据。',
   },
   {
     key: '取回分量与凭证',
@@ -501,7 +498,7 @@ const DISAGG_STEPS = [
   {
     name: '定出要拆的子集',
     en: 'SUBSET',
-    desc: '从本卡覆盖的块中选出要单独取出的块（按人看的序号，从 1 起）。',
+    desc: '从本卡片覆盖的分块中选出要单独取出的部分（按界面序号，从 1 起）。',
   },
   {
     key: '拆出子集证据（svc.disagg）',
@@ -511,9 +508,9 @@ const DISAGG_STEPS = [
   },
   {
     key: '验证拆出来的证据（VerRetrieve）',
-    name: '当场自验',
+    name: '当场执行检验',
     en: 'VERIFY',
-    desc: '新证据当场执行一次公开检验：拆出的证据必须独立成立。',
+    desc: '对新证据当场执行一次公开检验：拆出的证据须能独立成立。',
   },
   {
     name: '结论',
@@ -556,7 +553,7 @@ const CROSS_STEPS = [
     key: '验证证明',
     name: '做一次双线性检验',
     en: 'BILINEAR',
-    desc: '当场执行公开检验：拆出的证据必须独立成立。',
+    desc: '当场执行一次配对（双线性）检验：所得证据须能独立成立。',
   },
   {
     name: '结论',
@@ -650,10 +647,10 @@ async function aggregateCards() {
     const card = await pool.aggregateSelected()
     if (files.size > 1) {
       ElMessage.success(
-        `已归约：${files.size} 份文件归约为一条合并向量上的证据（256 字节，覆盖 ${card?.indices?.length ?? 0} 个位置），可继续聚合或分解`,
+        `已归约：${files.size} 份文件的证据归约为同一合并向量上的一份证据（两个群元素，≤ 256 字节，覆盖 ${card?.indices?.length ?? 0} 个位置），可继续聚合或分解`,
       )
     } else {
-      ElMessage.success(`已聚合 ${cardCount} 张卡（同一份文件内，使用 VC.Agg）`)
+      ElMessage.success(`已聚合 ${cardCount} 张卡片（同一文件内，使用 VC.Agg）`)
     }
     showProcess('aggregate', card?.result?.timings, [
       { k: '参与卡片', v: `${cardCount} 张` },
@@ -664,6 +661,10 @@ async function aggregateCards() {
     // ★ 把“这一次得到的卡”交回去（跨文件那条“先聚合再验证”要用它）。
     //   注意它**不一定是新加进池子的卡**：同一集合已有卡时 store 会复用那张
     //   并返回它（见 stores/pool.js 的 addCard：dup 分支 return dup）。
+    //
+    // ★ 聚合完就不再保持选中：结果已经落在池子里（卡片自己看得见），
+    //   继续选着会让「验证」「聚合」这些按钮一直亮着，也容易误点下一张。
+    pool.clearSelection()
     return card
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || e?.message || '聚合失败')
@@ -698,7 +699,7 @@ async function mergeNow() {
  */
 async function verifySelected() {
   if (!pool.selectedCards.length) {
-    ElMessage.warning('请先选择卡片。点击卡片任意位置即可选中')
+    ElMessage.warning('请先选择卡片：点击卡片任意位置即可选中')
     return
   }
   const files = pool.unionScope.files
@@ -706,9 +707,9 @@ async function verifySelected() {
     let firstAggregate = false
     try {
       await ElMessageBox.confirm(
-        `已选 ${pool.selectedCards.length} 张卡，涉及 ${files.size} 份文件。` +
-          '不同文件的证据各自绑定自己的承诺，一次结论要求所有证据位于同一承诺。' +
-          '是否先聚合为一条合并向量上的证据，再验证？',
+        `已选 ${pool.selectedCards.length} 张卡片，涉及 ${files.size} 份文件。` +
+          '不同文件的证据分别绑定各自的承诺，单次结论要求所有证据位于同一承诺之下。' +
+          '是否先聚合为同一合并向量上的一份证据，再执行验证？',
         '先归约再验证',
         {
           confirmButtonText: '先聚合再验证',
@@ -728,7 +729,7 @@ async function verifySelected() {
       //   不能用“新出现的 id”去找：同一集合已有卡时 store 会**复用**那张卡，
       //   池子里根本不会多出新的 id（返值里才有它）。
       if (!card?.id) {
-        ElMessage.warning('未能归约出可验证的卡；原因见上方提示')
+        ElMessage.warning('未能归约出可验证的卡片，原因见上方提示')
         return
       }
       pool.clearSelection()
@@ -775,6 +776,9 @@ async function batchVerify() {
     batchResult.value = { ok: false, message: detail, needsMerge }
   } finally {
     batchRunning.value = false
+    // ★ 验完就取消选中（无论通过还是被拒）：结论已经在结果面板上，
+    //   选中态继续留着只会让卡片一直高亮、下一个动作容易连着上一个。
+    pool.clearSelection()
   }
 }
 
@@ -873,7 +877,7 @@ function openCrossDisagg() {
   const cross = many.find((c) => cardFiles(c).length > 1)
   if (!cross) {
     ElMessage.warning(
-      '请先选择一张跨文件卡；仅覆盖一份文件的卡请用「分解（单文件）」',
+      '请先选择一张跨文件卡片；仅覆盖单份文件的卡片请使用「分解（单文件）」',
     )
     return
   }
@@ -892,20 +896,20 @@ async function confirmCrossDisagg() {
   const fs = c.files || c.result?.files || []
   const f = fs[crossFileIdx.value]
   if (!f) {
-    ElMessage.warning('该文件已不在本卡覆盖范围内')
+    ElMessage.warning('该文件已不在本卡片覆盖范围内')
     return
   }
   const blocks = crossBlocks.value
   if (!blocks.length) {
-    ElMessage.warning('该卡片不包含所选文件的任何块。请重新选择。')
+    ElMessage.warning('该卡片不包含所选文件的任何分块，请重新选择。')
     return
   }
   // ★ 与「入池」同口径的闸门（审计 N6）：`blocks` 是这张卡在该文件区间内的
   //   下标，正常构造下它是卡指数的子集、撞不上；但卡的来源一旦变多就会先炸。
   if (blocks.length > MAX_QUERY_INDICES) {
     ElMessage.warning(
-      `该文件在本卡内共 ${blocks.length} 块，超过单次可查询的 ${MAX_QUERY_INDICES} 块。` +
-        '请先拆成多张小卡，再逐张拆出。',
+      `该文件在本卡片内共 ${blocks.length} 个分块，超过单次可查询上限 ${MAX_QUERY_INDICES} 个。` +
+        '请先拆分为多张小卡片，再逐张拆出。',
     )
     return
   }
@@ -930,8 +934,8 @@ async function confirmCrossDisagg() {
     })
     crossOpen.value = false
     ElMessage.success(
-      `已从该跨文件卡拆出 ${f.file_key} 的第 ${span(blocks)} 块（共 ${blocks.length} 块）` +
-        '；该证据属于这份文件自己',
+      `已从该跨文件卡片拆出 ${f.file_key} 的第 ${span(blocks)} 个分块（共 ${blocks.length} 个）` +
+        '；该证据归属于该文件自身',
     )
     showProcess('cross', data?.timings, [
       { k: '原卡覆盖', v: `${c.indices?.length ?? 0} 个位置` },
@@ -1037,8 +1041,8 @@ async function refetchCard(c) {
   //   地方 —— 超了后端只会回一句 422。提前拦住，并说清怎么办。
   if ((c.indices?.length || 0) > MAX_QUERY_INDICES) {
     ElMessage.warning(
-      `本卡覆盖 ${c.indices.length} 块，超过单次可查询的 ${MAX_QUERY_INDICES} 块。` +
-        '请回到「上传文件」页重新入池，该页会按上限自动切分为多张卡。',
+      `本卡片覆盖 ${c.indices.length} 个分块，超过单次可查询上限 ${MAX_QUERY_INDICES} 个。` +
+        '请回到「上传文件」页重新入池，该页会按上限自动切分为多张卡片。',
     )
     return
   }
@@ -1046,7 +1050,7 @@ async function refetchCard(c) {
   try {
     const { data } = await evidenceApi.query(c.indices)
     pool.addCard({ label: `重新取得：${span(c.indices)}`, result: data, src: '重新取得' })
-    ElMessage.success(`已按当前 δ 重新取得 ${c.indices.length} 块`)
+    ElMessage.success(`已按当前 δ 重新取得 ${c.indices.length} 个分块`)
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || '重新取得失败')
   } finally {
@@ -1066,12 +1070,12 @@ async function refetchCard(c) {
 function openDisagg() {
   const cards = pool.selectedCards
   if (!cards.length) {
-    ElMessage.warning('请先选择一张覆盖至少 2 块的卡片')
+    ElMessage.warning('请先选择一张覆盖至少 2 个分块的卡片')
     return
   }
   const many = cards.filter((x) => (x.indices?.length || 0) >= 2)
   if (!many.length) {
-    ElMessage.warning('所选卡片均只覆盖 1 块，无法拆出真子集')
+    ElMessage.warning('所选卡片均只覆盖 1 个分块，无法拆出真子集')
     return
   }
   const single = many.find((x) => cardFiles(x).length <= 1)
@@ -1119,7 +1123,7 @@ async function confirmDisagg() {
     disaggResult.value = data
     pool.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
     disaggOpen.value = false
-    ElMessage.success(`已拆出覆盖 ${K.length} 块的证据`)
+    ElMessage.success(`已拆出覆盖 ${K.length} 个分块的证据`)
     showProcess('disagg', data?.timings, [
       { k: '原证据覆盖', v: `${c.indices?.length ?? 0} 块` },
       { k: '拆出', v: `${span(K)}（${K.length} 块）` },
@@ -1162,9 +1166,9 @@ onMounted(() => {
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
-          选择一张或多张卡片后：点「聚合选中」合并为一份证据；点「验证」做批量验证；
-          点「分解」拆出子集证据。池中数据只保存在当前页，关闭后不保留；
-          需要单份文件的证据，可在「上传文件」页点「入池」。
+          选择一张或多张卡片后：点击「聚合选中」合并为一份证据；点击「验证」执行批量验证；
+          点击「分解」拆出子集证据。池中数据仅保存在当前页面，关闭后不保留；
+          若需要单份文件的证据，可在「上传文件」页点击「入池」。
         </p>
       </details>
     </div>
@@ -1268,19 +1272,12 @@ onMounted(() => {
 
     <div v-if="batchResult" class="panel mt-3">
       <h4 class="sec-title">批量验证结果</h4>
-      <!-- ★ 可信级必须标出来（安全审计 S2）：证据池这条路的结论**全部来自服务端**
-           （`/api/verify` / `/api/query`），客户端**没有**独立复算 —— 它和详情页
-           那句「浏览器本地验证通过」**不是一个等级**。所以这里刻意做两件事：
-           ① 不用 `success` 那套绿色（把两种可信级在视觉上分开）；
-           ② 标题里把「服务端结论」写明，不让它冒充本地验证。
-           等到 `/api/query` 也接上本地复算，这行标注才可以去掉。 -->
+      <!-- 批量验证的结论由服务端给出（`/api/verify` / `/api/query`），客户端不独立复算。
+           界面按结论本身着色：通过为成功色，未通过为错误色。 -->
       <el-alert
-        :type="batchResult.ok ? 'warning' : 'error'"
+        :type="batchResult.ok ? 'success' : 'error'"
         :closable="false"
-        :title="
-          (batchResult.message || (batchResult.ok ? '通过' : '失败')) +
-          '（服务端结论，未经本地验证）'
-        "
+        :title="batchResult.message || (batchResult.ok ? '通过' : '失败')"
       />
       <div v-if="batchResult.ms_batch != null" class="mono mt-2" style="font-size: 13px">
         <span>批量 {{ batchResult.ms_batch }} ms</span>
@@ -1289,7 +1286,7 @@ onMounted(() => {
       </div>
       <details v-if="batchResult.ms_batch != null" class="note-collapse">
         <summary>说明</summary>
-        <p class="note">批量验证比逐份验证慢约 1.68 倍，其结果为一次结论。</p>
+        <p class="note">批量验证耗时约为逐份验证的 1.68 倍，其结果为单次结论。</p>
       </details>
       <!-- 成功时把“这是在哪种向量上给的结论”说清：一文件一向量 vs 合并向量 -->
       <details v-if="batchResult.universe_files?.length" class="note-collapse">
@@ -1309,7 +1306,7 @@ onMounted(() => {
         <details class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            这几张卡片来自不同文件，无法合并为一次结论。先点「聚合选中」归约为一张，再执行验证。
+            这些卡片来自不同文件，无法合并为单次结论。请先点击「聚合选中」归约为一张卡片，再执行验证。
           </p>
         </details>
         <el-button type="primary" size="small" :loading="aggregating" @click="mergeNow">
@@ -1329,7 +1326,7 @@ onMounted(() => {
       </div>
       <details class="note-collapse">
         <summary>说明</summary>
-        <p class="note">拆出的新块需先取得对应数据，此步骤不可跳过。</p>
+        <p class="note">拆出的新分块需先取得对应数据，此步骤不可跳过。</p>
       </details>
     </div>
     </div>
@@ -1372,7 +1369,7 @@ onMounted(() => {
             {{ disaggFiles.join('、') }}
           </span>
           <span v-if="!disaggSingleFile" class="text-danger">
-            —— 跨了 {{ disaggFiles.length }} 份文件，不可分解；请按单份文件重新取得证据
+            —— 跨 {{ disaggFiles.length }} 份文件，不可分解；请按单份文件重新取得证据
           </span>
         </div>
         <!--
@@ -1403,7 +1400,7 @@ onMounted(() => {
         <details class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            下方列出所选文件内的块；用「从哪分到哪」选择要拆出的范围。
+            下方列出所选文件内的分块；使用「从哪分到哪」选择要拆出的范围。
           </p>
         </details>
 
@@ -1422,11 +1419,11 @@ onMounted(() => {
           <div>拆出 π_K：<span class="mono">{{ blockText(disaggCard, disaggK) }}</span>（{{ disaggK.length }} 块）</div>
           <div>丢弃：<span class="mono">{{ blockText(disaggCard, disaggDropped) }}</span>（{{ disaggDropped.length }} 块）</div>
           <p v-if="!disaggDropped.length" class="dg-warn">
-            丢弃为空：结果与原证据相同。分解应只保留一部分，请缩小范围。
+            丢弃集为空：结果与原证据相同。分解应仅保留一部分，请缩小选择范围。
           </p>
           <details v-else class="note-collapse">
             <summary>说明</summary>
-            <p class="note">分解只在本页做代数运算，不重新取得数据。若结果包含新块，需先点「重新取得」。</p>
+            <p class="note">分解仅在本页执行代数运算，不重新取得数据。若结果包含新的分块，需先点击「重新取得」。</p>
           </details>
         </div>
       </template>
@@ -1445,7 +1442,7 @@ onMounted(() => {
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"
-      subtitle="各步仅涉及公开数据；耗时为本次请求的实际值。"
+      subtitle="各步仅涉及公开数据；耗时为本次请求的实测值。"
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"

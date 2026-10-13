@@ -557,8 +557,8 @@ section("8. ★ 跨进程：故障节点必须**真的**联系不上（否则写
 # ★★ 这一条盯的是**第三个**坑（本轮实测发现）：
 #    演练只在协调者这一侧标记"不可达"，而节点进程**还活着** ——
 #    内层不包一层，就会照常把更新推过去、还拿到 200，于是写入**成功**，
-#    待补推现场永远建不起来，面板承诺的「改块 / 追加 / 截断 会被拦下」是假的，
-#    「补推」这条路在演示里根本走不到。
+#    面板承诺的「改块 / 追加 / 截断 会被拦下」是假的，
+#    也没法验证"失败清单确实点到了那几台"。
 class _CrossProc:
     """模仿 ``HttpTransport``：所有请求都过 ``_request``，广播写逐台收集失败。"""
 
@@ -637,7 +637,7 @@ check("★★ 掉线期间广播写**失败**（而不是假成功）", isinstan
       type(_err).__name__)
 if isinstance(_err, WriteError):
     check("★★ 失败清单点名了那台节点", _err.nodes == ["x2"], str(_err.nodes))
-    check("★★ 带上了补推要用的那份负载",
+    check("★★ 失败清单里带着那台“没送出去”的请求体",
           (_err.payloads.get("x2") or {}).get("mark") == "payload-for-x2",
           str(_err.payloads)[:120])
     check("★ 健康的那台确实收到了这次写，故障那台一次都没发出去",
@@ -646,7 +646,7 @@ if isinstance(_err, WriteError):
 _ft.restore()
 check("★ 恢复之后它又联系得上了", _catch(lambda: _ft.retrieve("x2", 0, [0])) is None)
 _inner.sent.clear()
-check("★★ 恢复之后广播写恢复成功（「补推」就是这一步）",
+check("★★ 恢复之后广播写恢复成功",
       _catch(lambda: _append(_ft)) is None)
 check("★ 恢复后两台都收到了",
       _inner.sent == {"x1": 1, "x2": 1}, str(_inner.sent))

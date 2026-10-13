@@ -94,7 +94,7 @@ api.interceptors.response.use(
       //    第一次打开页面」会先弹一句吓人的「令牌无效」）——
       //
       //    ① 登录接口自己返回的（skipAuthRedirect）= 口令错了。
-      //       必须把后端那句话原样弹出来，用户才知道是密码问题；
+      //       必须把后端那句话原样弹出来，用户才知道是口令问题；
       //    ② 其余一切 401 = **这次会话已经没了**：令牌过期（12 小时），
       //       或后端重启后换了一把 JWT 签名密钥（``backend/config.py`` 的
       //       ``secret_key`` 每次启动随机生成，这是设计如此，不是故障）。
@@ -112,6 +112,11 @@ api.interceptors.response.use(
       ElMessage.error(detail || '无访问权限')
     } else if (status === 413) {
       ElMessage.error(detail || '文件超出大小上限')
+    } else if (status === 503) {
+      // ★ 本系统里 503 只来自「写推时部分节点没跟上」（FaultyTransport 故障演练
+      //   或真有节点掉线）。**不留现场、也不补推**：没推上去的副本直接丢弃，
+      //   所以用 warning（黄）提示，而不是 error（红）。
+      ElMessage.warning(detail || '部分节点没跟上，没推上去的副本已丢弃')
     } else if (detail) {
       ElMessage.error(detail)
     } else if (err.code === 'ECONNABORTED') {

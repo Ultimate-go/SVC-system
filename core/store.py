@@ -792,10 +792,8 @@ class VectorStore:
             #   而改块比追加**更不能**“重来一次” —— 重来会生成新的块密钥与新的
             #   密文，已经跟上的那几台会当场拒（它们算出的摘要已经是新值）。
             #   而且上面那行 ``key_sink`` 已经把**新**密钥交出去了，
-            #   所以“回滚”根本无从谈起 —— 补推是**唯一**的出路。
-            self._pending = (
-                {"error": exc, **context} if getattr(exc, "payloads", None) else None
-            )
+            #   所以“回滚”也无从谈起。方案约定：不留现场、不补推 ——
+            #   没推上去的那几台就是没有这份新值。
             raise
 
         # 节点都跟上之后才动自己的账 —— 与 upload / append 同一顺序、同一段代码。
@@ -902,13 +900,11 @@ class VectorStore:
                     witness=pushed.witness,
                     blobs={nid: {gidx: ciphertext} for nid in holders},
                 )
-        except TransportError as exc:
+        except TransportError:
             # 与 modify / append 同一处理：一台没跟上，全网就不一致；
             # 而回退更不能“重来一次”（重来还是同一份旧密文，但已经跟上的
-            # 节点会因为它与当前值相同而拒绝重复应用）。所以现场留住、只补推。
-            self._pending = (
-                {"error": exc, **context} if getattr(exc, "payloads", None) else None
-            )
+            # 节点会因为它与当前值相同而拒绝重复应用）。
+            # 方案约定：不留现场、不补推 —— 没推上去的节点就是没有这份新值。
             raise
 
         self._pending = None
@@ -1149,13 +1145,10 @@ class VectorStore:
             #   没跟上的还是旧的，而**协调者自己不推进**（下面那几行没执行）。
             #   更麻烦的是：登记表**已经分配过**这批下标，所以"再传一次文件"
             #   是错的（会撞上"登记表游标与向量长度不一致"）。
-            #   唯一正确的修法是**把同一份更新补推给那几台**。
-            #
-            #   传输层能补推时（带了 payloads）就把现场留下来，供 retry_pending() 用。
-            can_retry = bool(getattr(exc, "payloads", None))
-            self._pending = {"error": exc, **context} if can_retry else None
-            if not can_retry and context.get("kind", "add") == "add":
-                # ★★ 补推无从谈起（同进程传输、或故障演练直接拦下的写）
+            #   ★ 方案约定：写失败**不留现场、也不补推** —— 没推上去的副本直接丢弃。
+            #     传输层即使带回了 payloads（可以重发那几台），也不再保留它。
+            if context.get("kind", "add") == "add":
+                # ★★ 这里“补推无从谈起”（同进程传输、或故障演练直接拦下的写）
                 #    ⇒ 这次写**永远不会完成**，但登记表**已经分配过**这批位置了。
                 #    不退回去的话，协调者手里就留下"有位置、没分量"的脏账，
                 #    之后任何要读值的操作（改块 / 自检 / 一次性承诺复核）都会以
@@ -1337,13 +1330,11 @@ class VectorStore:
             self.transport.apply_delete(
                 delta_new=pushed.delta, op_delta=op_delta, witness=pushed.witness
             )
-        except TransportError as exc:
-            # 与 _append / modify 同一套：一台没跟上就留现场，等补推
-            # （**不能**靠“重来一次”：交回过的节点再收到同一批 del 会被
-            #   摘要闸拒掉 —— 已经跟上的那几台 δ 已经是新的了）
-            self._pending = (
-                {"error": exc, **context} if getattr(exc, "payloads", None) else None
-            )
+        except TransportError:
+            # 与 _append / modify 同一套：一台没跟上就意味着全网不一致；
+            # **不能**靠“重来一次”：交回过的节点再收到同一批 del 会被
+            # 摘要闸拒掉（已经跟上的那几台 δ 已经是新的了）。
+            # 方案约定：不留现场、不补推 —— 已经删掉的那几台就是删掉了。
             raise
 
         self._pending = None
@@ -2700,7 +2691,7 @@ class VectorStore:
             return {
                 **base,
                 "ok": False,
-                "message": "没有任何一台节点回答到挑战里的下标 —— 数据可能已经没了",
+                "message": "没有任何节点对挑战中的下标作出应答 —— 数据可能已丢失",
                 "proof_size_bytes": 0,
             }
 
@@ -2717,7 +2708,7 @@ class VectorStore:
             return {
                 **base,
                 "ok": False,
-                "message": f"挑战没被收齐，缺下标 {missing[:12]}"
+                "message": f"挑战未收齐，缺少下标 {missing[:12]}"
                 f"{'…' if len(missing) > 12 else ''}",
                 "proof_size_bytes": proof_bytes(agg.pi_Q.S_I, agg.pi_Q.Lambda_I)
                 if agg.has_proof()
@@ -2800,24 +2791,6 @@ class VectorStore:
             problems = self.registry.check()
         if problems:
             raise ValueError("位置段登记表自检不过：" + "；".join(problems))
-
-        if self._pending is not None:
-            # ★★ 待补推窗口：这次写**还没完成**（有一台没跟上，协调者在等「补推」）。
-            #    此刻向量**本来**就是不一致的：跟上的那几台 δ 已经推前，
-            #    协调者的账没动，而登记表已经分配过那批下标。
-            #
-            #    不在这里拦住的话，自检会报一句「持有者账实不符：没人持有 [48]」
-            #    或「node-2 停在 n=5，而协调者是 n=4」—— 听起来像账真的坏了，
-            #    真正的原因却只是一次没推完的写，而且**修法完全不同**
-            #    （自检修不了它；要恢复机器 + 点「补推」）。
-            _err = self._pending.get("error")
-            _bad = list(getattr(_err, "nodes", ()) or ())
-            raise ValueError(
-                f"上一次写还没收敛（{len(_bad)} 台存储节点没跟上："
-                f"{'、'.join(_bad) or '（未记录）'}）—— 现在自检必然报「账实不符」，"
-                f"因为登记表已经分配过那批下标、而协调者还没推进自己的账。"
-                f"这不是数据损坏：把没通的机器弄活、点一次「补推」收敛之后再自检。"
-            )
 
         with stage("逐台核对节点视图"):
             report = self.transport.report(verify=True)

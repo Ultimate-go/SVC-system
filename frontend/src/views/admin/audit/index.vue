@@ -5,7 +5,6 @@
  * - GET /api/admin/audit 为服务端分页，返回 {items, total, page, page_size, pages}。
  *   默认每页 10 条，可选 10/20/50；支持页码与跳转到指定页。
  *   过滤条件：
- *     target   精确匹配「所有者 / 文件标识」，用于回放某一份文件的完整记录
  *     actor    精确匹配操作者；查询类动作只能按此过滤（它们不挂在具体文件上）
  *     action   精确匹配动作名（下拉选项取自库中出现过的值）
  *     ok       仅成功 / 仅被拒
@@ -46,7 +45,6 @@ const rows = ref([])
 //: 筛选条件。**空值一律不发**（见 buildParams）——发空串会让后端把
 //: 它当成"要匹配空字符串"，结果是永远查不到东西。
 const filters = reactive({
-  target: '',
   actor: '',
   action: '',
   status: '', // '' | 'ok' | 'denied'
@@ -152,7 +150,6 @@ const ACTION_LABEL = {
   query: '查询',
   query_files: '查文件列表',
   verify_batch: '批量验证',
-  retry_push: '补推副本',
   user_create: '建用户',
   user_patch: '改用户',
   user_delete: '删用户',
@@ -170,11 +167,9 @@ function actionLabel(a) {
 /** 收集非空筛选项为请求参数。空串、空数组与未选项一律不发送。 */
 function buildParams() {
   const params = { page: pager.page, page_size: pager.pageSize }
-  const t = filters.target.trim()
   const a = filters.actor.trim()
   const act = filters.action
   const q = filters.q.trim()
-  if (t) params.target = t
   if (a) params.actor = a
   if (act) params.action = act
   if (filters.status === 'ok') params.ok = true
@@ -188,14 +183,13 @@ function buildParams() {
 /** 当前是否存在筛选条件；用于「重置」按钮高亮与空态文案。 */
 const hasFilter = computed(
   () =>
-    !!(filters.target.trim() || filters.actor.trim() || filters.action ||
+    !!(filters.actor.trim() || filters.action ||
        filters.status || filters.q.trim() || since.value || until.value),
 )
 
 /** 当前筛选条件的摘要文本，显示在结果数旁。 */
 const filterSummary = computed(() => {
   const bits = []
-  if (filters.target.trim()) bits.push(`对象=${filters.target.trim()}`)
   if (filters.actor.trim()) bits.push(`操作者=${filters.actor.trim()}`)
   if (filters.action) bits.push(`动作=${actionLabel(filters.action)}`)
   if (filters.status === 'ok') bits.push('仅成功')
@@ -290,7 +284,6 @@ function doJump() {
 }
 
 function reset() {
-  filters.target = ''
   filters.actor = ''
   filters.action = ''
   filters.status = ''
@@ -365,12 +358,11 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="审计流水" subtitle="只记元数据，不含明文、密钥、密文" />
+    <PageHeader title="审计流水"  />
 
-    <!-- 第一行：两个精确匹配输入 + 动作 + 状态 -->
+    <!-- 第一行：操作者 + 动作 + 状态 -->
     <div class="panel filter">
-      <el-input v-model="filters.target" placeholder="按对象回放（所有者/文件标识，精确匹配）" clearable style="width: 300px" @keyup.enter="load" />
-      <el-input v-model="filters.actor" placeholder="按操作者回放（精确匹配）" clearable style="width: 240px" @keyup.enter="load" />
+      <el-input v-model="filters.actor" placeholder="操作者" clearable style="width: 240px" @keyup.enter="load" />
       <el-select v-model="filters.action" placeholder="动作" clearable style="width: 150px" @change="load">
         <el-option
           v-for="o in actionOptions"
@@ -418,14 +410,11 @@ onMounted(() => {
         <el-button size="small" @click="quickRange('7d')">近 7 天</el-button>
         <el-button size="small" @click="quickRange('today')">今天</el-button>
       </el-button-group>
-      <el-input v-model="filters.q" placeholder="关键字（人 / 动作 / 对象 / 说明 / 备注）" clearable style="width: 260px" @keyup.enter="load" />
+      <el-input v-model="filters.q" placeholder="关键字（人 / 动作 / 对象 / 说明 / 备注）" clearable style="width: 280px" @keyup.enter="load" />
       <el-button @click="load">查询</el-button>
     </div>
 
-    <p class="replay-note">
-      查询类动作（query / verify / por）只能按操作者查：它们按全局下标记录，不挂在某个文件上。
-      时间按<b>本地时间</b>填写，由后端换算；区间为左闭右开。
-    </p>
+
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <div v-else class="panel">
