@@ -89,15 +89,71 @@ const PRINCIPLES = {
     ],
   },
   verify: {
-    headline: '两条检查相互配合，零信任地判定内容未被篡改',
-    blocks: [
-      { t: '检查①：结构合法性', d: '$S(I)^{E(I)} = U_n$。该检查把 $S(I)$ 唯一确定为 $U_n$ 的 $E(I)$ 次根，不涉及任何数据值。' },
-      { t: '检查②：内容一致性', d: '$C = \\Lambda(I)^{E(I)} \\cdot \\prod_{i \\in I} S_i^{v_i}$（$i$ 取遍 $I$）。它把承诺 $C$、声明的值 $v(I)$ 与证据 $\\Lambda(I)$ 相互关联。' },
-      { t: '两者缺一不可', d: '只保留②，敌手可任意选取 $S(I)$ 来凑等式；只保留①，等式右端可被随意替换。① 之所以站得住，依赖低阶假设 —— 敌手无法用一个低阶元素同时满足两条检查，而这样的元素并不对应真实的向量。' },
-      { t: '位置绑定', d: '承诺者无法对同一位置 $i$ 给出两份都能通过验证、但取值不同的打开结果，因此节点无法事后否认它保存过的内容。其安全性归约到强 RSA 假设；在动态更新场景下还需更强的 Strong DPR 假设，以排除「通过多次更新累积出一次非法开方」的路径。' },
-      { t: '零信任与常数大小', d: '客户端仅需保存一个常数大小的摘要，即可验证聚合后的那一份证据，从而确认取回的块均未被篡改，无需信任任何一台服务器。' },
+    /*
+     * ★ 这张卡内容最多，弹框里带**页签**：验证本体 / 证据聚合 / 证据分解。
+     *   页签只在这一张卡上出现 —— 其他五张没有 tabs，模板会退回单页。
+     *   公式取自已发货的实现（svc/scheme.py 的 open_subvector / verify /
+     *   disagg / agg 四个函数的文档，那几段直接引了论文 §5.2 与清单 #22~#24）。
+     */
+    tabs: [
+      {
+        key: 'ver',
+        label: '完整性验证',
+        headline: '两条检查相互配合，零信任地判定内容未被篡改',
+        blocks: [
+          { t: '检查①：结构合法性', d: '要求 $S(I)^{E(I)} = U_n$。该检查把 $S(I)$ 唯一确定为 $U_n$ 的 $E(I)$ 次根，不涉及任何数据值。它之所以必要：验证方并不持有单个 $S_i$，后者是从 $S(I)$ 现场重构的；若不先把 $S(I)$ 锁死，敌手可以任选一个 $S(I)$ 去凑第②式。' },
+          { t: '检查②：内容一致性', d: '要求 $C = \\Lambda(I)^{E(I)} \\cdot \\prod_{i \\in I} S_i^{v_i}$（$i$ 取遍 $I$）。它把承诺 $C$、声明的值 $v(I)$ 与证据 $\\Lambda(I)$ 相互关联。' },
+          { t: '两者缺一不可', d: '只保留②，敌手可任意选取 $S(I)$ 来凑等式；只保留①，等式右端可被随意替换。① 之所以站得住，依赖低阶假设 —— 敌手无法用一个低阶元素同时满足两条检查，而这样的元素并不对应真实的向量。' },
+          { t: '公共可验证', d: '验证过程不需要任何秘密：$N$、$g$、素数映射、摘要 $\\delta$ 与证据 $\\pi$ 全部是公开量（或由被验证方交付）。因此任何登录用户都能验证任意位置的完整性，包括不属于自己的文件 —— 「解密受限」与「验证不受限」由此分开：前者靠密钥，后者靠承诺。' },
+          { t: '位置绑定', d: '承诺者无法对同一位置 $i$ 给出两份都能通过验证、但取值不同的打开结果，因此节点无法事后否认它保存过的内容。其安全性归约到强 RSA 假设；在动态更新场景下还需更强的 Strong DPR 假设，以排除「通过多次更新累积出一次非法开方」的路径。' },
+          { t: '失败环节名', d: '验证失败时返回的不是一句笼统的结论，而是环节码：载荷形状、第①式、第②式各对应一个码。前后端各维护一张对照表必然分叉，因此名字只从枚举一处派生。' },
+          { t: '零信任与常数大小', d: '客户端仅需保存一个常数大小的摘要，即可验证聚合后的那一份证据，从而确认取回的块均未被篡改，无需信任任何一台服务器。' },
+        ],
+        formulas: [
+          '$S(I)^{E(I)} = U_n \\bmod N$',
+          '$C = \\Lambda(I)^{E(I)} \\cdot \\prod_{i \\in I} S_i^{v_i} \\bmod N$',
+          '$S_i = S(I)^{\\,E(I)/e_i}$　（$i \\in I$；由 $S(I)$ 现场重构，无需预先持有）',
+        ],
+      },
+      {
+        key: 'agg',
+        label: '证据聚合',
+        headline: '同一承诺下，两份不相交的证据可合并为一份，大小仍为两个群元素',
+        blocks: [
+          { t: '前提：同一承诺、位置集合不相交', d: '可聚合性定义在同一个承诺 $C$ 之上：两份证据必须验在同一个 $C$ 上，且 $I \\cap J = \\varnothing$。存在重叠时先用分解把重叠部分从其中一份上消掉，再合并。' },
+          { t: '合并 $S$：Shamir 技巧', d: '已知同一底数的 $1/E(I)$ 次根与 $1/E(J)$ 次根，且 $\\gcd(E(I), E(J)) = 1$（不相交保证这一点），由扩展欧几里得求出 $a \\cdot E(I) + b \\cdot E(J) = 1$，即可合成 $1/[E(I) \\cdot E(J)]$ 次根。实现内置两道自检：同源（两个根必须来自同一个底数）与互素，缺一则拒绝合并。被篡改的证据因此拼不出一份能通过验证的证据。' },
+          { t: '合并 $\\Lambda$：先除交叉项', d: '$\\Lambda(I)$ 中属于 $J$ 的那部分是 $1/E(I)$ 次方，而合并后该部分应当是 $1/[E(I) \\cdot E(J)]$ 次方，次数不匹配，直接相乘会重复计数。所以先各自除掉本方的交叉项 $\\prod_{j \\in J} \\varphi_j^{v_j}$，再由 Shamir 技巧把两个残项合并。' },
+          { t: '群除法，而不是指数相减', d: '群阶 $\\varphi(N)$ 不可得，指数上的运算必须在整数层完成：把 $1/E(I)$ 与 $1/[E(I) \\cdot E(J)]$ 写在一起相减是没有意义的。而 $\\prod \\varphi_j^{v_j}$ 本身就是一个能算出来的群元素，直接做群除法即可。' },
+          { t: '增量可聚合', d: '合并结果仍是一份合法的子向量打开证据，因此可以继续参与合并：合并次数不限、顺序任意、结果逐位相同。这是这套承诺能用于“一次取证覆盖多块”的基础。' },
+          { t: '本项目的边界', d: '每份文件各有自己的摘要与承诺，而 $\\Lambda$ 的支撑集又是本文件位置集合的补集 —— 跨文件时两份证据没有共同的 $C$，交叉项也无从抵消。所以跨文件检索改为在合并位置集上重算一份证据，代价与涉及文件的总位置数同阶。' },
+        ],
+        formulas: [
+          '$I \\cap J = \\varnothing$，　$K = I \\cup J$',
+          '$S(K) = \\mathrm{ShamirTrick}(S(I),\\ S(J),\\ E(I),\\ E(J))$，　$a \\cdot E(I) + b \\cdot E(J) = 1$',
+          '$\\rho_I = \\Lambda(I) / \\prod_{j \\in J} \\varphi_j^{v_j}$，　$\\varphi_j = S(K)^{\\,E(J)/e_j}$',
+          '$\\Lambda(K) = \\mathrm{ShamirTrick}(\\rho_I,\\ \\sigma_J,\\ E(I),\\ E(J))$',
+        ],
+      },
+      {
+        key: 'disagg',
+        label: '证据分解',
+        headline: '从覆盖大集合的证据里拆出子集的证据，而不必重新向节点取证',
+        blocks: [
+          { t: '用途', d: '已有一份覆盖 $I$ 的证据，而实际只需要其中一部分位置时，直接拆出覆盖 $K \\subseteq I$ 的那份，无需重新发起检索。界面上的「分解」按钮走的就是这条路径。' },
+          { t: '第一步：把 $S$ 收到子集', d: '$S(K) = S(I)^{E(I \\setminus K)}$。$E(I \\setminus K)$ 是整数，所以这一步只是一次普通模幂，不涉及任何求根。' },
+          { t: '第二步：把拆掉的位置逐个加回摘要', d: '对每个 $j \\in I \\setminus K$ 计算 $\\chi_j = S(I)^{\\,E(I \\setminus K)/e_j} = g^{\\,E/[E(K) \\cdot e_j]}$。它就是 $\\Lambda(K)$ 定义里「$j \\notin K$ 且 $j \\in I$」那一部分。' },
+          { t: '第三步：凑齐 $\\Lambda(K)$', d: '由两部分相乘（群乘法）构成：来自 $j \\notin I$ 那些位置的 $\\Lambda(I)^{E(I \\setminus K)}$，加上来自 $j \\in I \\setminus K$ 那些位置的 $\\prod_{j \\in I \\setminus K} \\chi_j^{v_j}$。两者合起来正好是完整的 $\\Lambda(K)$。' },
+          { t: '实现的等价改写', d: '论文公式要求一次 $O(\\ell |E| \\log |E|)$ 的批量求根。实现改用逐个 add_back：视角是 $\\pi_I = d(v \\setminus I)$、目标是 $d(v \\setminus K)$，而 $I \\setminus K$ 正是要加回来的那些位置，于是逐个加回即可。代价降到 $O(\\ell |E|)$，结果与论文公式逐项对应。' },
+          { t: '与聚合互逆', d: '分解把大集合拆小、聚合把小集合并大。两者配合可以处理任意形状的集合运算：例如先把一侧的重叠部分分解掉，再把两份聚合起来，即得到并集的证据。' },
+        ],
+        formulas: [
+          '$K \\subseteq I$',
+          '$S(K) = S(I)^{\\,E(I \\setminus K)}$',
+          '$\\chi_j = S(I)^{\\,E(I \\setminus K)/e_j} = g^{\\,E/[E(K) \\cdot e_j]}$　（$j \\in I \\setminus K$）',
+          '$\\Lambda(K) = \\Lambda(I)^{\\,E(I \\setminus K)} \\cdot \\prod_{j \\in I \\setminus K} \\chi_j^{v_j}$',
+        ],
+      },
     ],
-    formulas: ['$S(I)^{E(I)} = U_n \\bmod N$', '$C = \\Lambda(I)^{E(I)} \\cdot \\prod_{i \\in I} S_i^{v_i} \\bmod N$'],
   },
 }
 
@@ -111,6 +167,21 @@ const dialogOpen = computed({
 })
 const currentStage = computed(() => STAGES.find((s) => s.key === openKey.value) || null)
 const currentPrinciple = computed(() => (openKey.value ? PRINCIPLES[openKey.value] : null))
+
+/**
+ * 带页签的卡片（目前只有「完整性验证」）。
+ *
+ * ``tabs`` 存在 ⇒ 弹框里出现页签条，内容按页渲染；
+ * 其余卡片没有这个字段 ⇒ ``shownPage`` 退回整份 principle，与改动前完全一致。
+ */
+const activeTab = ref(0)
+const tabs = computed(() => currentPrinciple.value?.tabs || null)
+const shownPage = computed(() => {
+  const list = tabs.value
+  if (!list || !list.length) return currentPrinciple.value
+  return list[Math.min(activeTab.value, list.length - 1)]
+})
+
 const currentIndex = computed(() => {
   const i = STAGES.findIndex((s) => s.key === openKey.value)
   return i < 0 ? 1 : i + 1
@@ -121,6 +192,7 @@ const TONE_COLOR = { cyan: '#22d3ee', blue: '#60a5fa', violet: '#a78bfa', green:
 const toneColor = computed(() => TONE_COLOR[currentStage.value?.tone] || '#22d3ee')
 
 function openPrinciple(key) {
+  activeTab.value = 0 // ★ 每次打开都从第一页开始（弹框 destroy-on-close，但 ref 还在）
   openKey.value = key
 }
 </script>
@@ -229,19 +301,37 @@ function openPrinciple(key) {
               {{ currentStage?.label }}
               <span class="pd-en mono">{{ currentStage?.en }}</span>
             </div>
-            <div class="pd-sub">{{ currentPrinciple?.headline }}</div>
+            <div class="pd-sub">{{ shownPage?.headline }}</div>
           </div>
         </div>
       </template>
 
-      <div v-if="currentPrinciple" class="pd-body">
-        <div v-for="(b, i) in currentPrinciple.blocks" :key="i" class="pd-block">
-          <h5>{{ b.t }}</h5>
+      <div v-if="shownPage" class="pd-body">
+        <!-- ★ 换页：只在有多页的卡片上出现（其余卡片没有 tabs） -->
+        <div v-if="tabs" class="pd-tabs" role="tablist">
+          <button
+            v-for="(t, i) in tabs"
+            :key="t.key"
+            type="button"
+            class="pd-tab"
+            :class="{ 'is-on': i === activeTab }"
+            role="tab"
+            :aria-selected="i === activeTab"
+            @click="activeTab = i"
+          >
+            <span class="pd-tab-i mono">0{{ i + 1 }}</span>{{ t.label }}
+          </button>
+        </div>
+
+        <div v-for="(b, i) in shownPage.blocks" :key="i" class="pd-block">
+          <!-- ★ 小结标题也走 rich()：这两页的标题里有 $S$ / $\Lambda$ 这类记号。
+               ★ 段落里不写 Markdown 粗体（界面文案规范禁用，渲染器也不处理）。 -->
+          <h5 v-html="rich(b.t)"></h5>
           <p v-html="rich(b.d)"></p>
         </div>
 
-        <div v-if="currentPrinciple.formulas && currentPrinciple.formulas.length" class="pd-formulas">
-          <div v-for="(f, i) in currentPrinciple.formulas" :key="i" class="pd-f" v-html="rich(f)" />
+        <div v-if="shownPage.formulas && shownPage.formulas.length" class="pd-formulas">
+          <div v-for="(f, i) in shownPage.formulas" :key="i" class="pd-f" v-html="rich(f)" />
         </div>
       </div>
     </el-dialog>
@@ -557,6 +647,44 @@ function openPrinciple(key) {
 .pd-title { display: flex; align-items: baseline; gap: 8px; font-size: 17px; font-weight: 600; color: var(--text-1); }
 .pd-en { font-size: 13px; letter-spacing: .12em; color: var(--stage-color); }
 .pd-sub { margin-top: 4px; font-size: 13.5px; line-height: 1.6; color: var(--text-2); }
+
+/* 页签（只有带 tabs 的卡片才渲染）。用自绘而非 el-tabs：页数固定、
+   配色要跟着 stage 颜色走，自绘更可控，也不引入额外的样式覆盖。 */
+.pd-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--stage-color) 20%, var(--line));
+}
+.pd-tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color .16s ease, background .16s ease;
+}
+.pd-tab:hover { color: var(--text-1); }
+.pd-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--stage-color) 60%, transparent);
+  outline-offset: 1px;
+}
+.pd-tab.is-on {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--stage-color) 16%, var(--bg-panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--stage-color) 40%, transparent);
+}
+.pd-tab-i { color: var(--stage-color); font-size: 13px; letter-spacing: .06em; }
 
 .pd-body { display: flex; flex-direction: column; gap: 14px; }
 .pd-block h5 {
