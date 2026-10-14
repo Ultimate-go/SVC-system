@@ -33,6 +33,13 @@ const props = defineProps({
   /** 底部参数列表 [{ k, v }]；取值由调用方保证为真值。 */
   facts: { type: Array, default: () => [] },
   /**
+   * 端到端耗时（毫秒，可选）：从点击到结果返回的墙钟时间。
+   *
+   * ★ 传了就先报它：弹框和页面其它地方（阶段耗时条、上传按钮旁）必须是同一个数。
+   * ★ 不传则只报后端埋点值，并仍标注“后端埋点”，不与端到端混说。
+   */
+  e2eMs: { type: Number, default: null },
+  /**
    * 请求是否仍在进行中。
    *
    * 不变式：父组件在发起请求的同时以 `pending = true` 打开本框，动画按预估
@@ -222,7 +229,12 @@ onBeforeUnmount(stop)
     </div>
 
     <p v-if="timings" class="total mono text-3">
-      总耗时 {{ formatMs(totalMs) }}<template v-if="stepMsSum"> · 各步合计 {{ formatMs(stepMsSum) }}</template>
+      <template v-if="e2eMs">
+        端到端 {{ formatMs(e2eMs) }} · 后端埋点 {{ formatMs(totalMs) }}<template v-if="stepMsSum"> · 各步合计 {{ formatMs(stepMsSum) }}</template>
+      </template>
+      <template v-else>
+        总耗时 {{ formatMs(totalMs) }}<template v-if="stepMsSum"> · 各步合计 {{ formatMs(stepMsSum) }}</template>
+      </template>
     </p>
 
     <template #footer>

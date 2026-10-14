@@ -126,8 +126,9 @@ onMounted(load)
 
 <style scoped>
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 /* PoR 那块的四段说明（安全审计之后补的“这按钮到底在干什么”） */

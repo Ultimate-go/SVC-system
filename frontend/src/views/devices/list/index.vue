@@ -125,8 +125,8 @@ async function runDrill(action, mode = 'down') {
     } else {
       ElMessage.warning(
         mode === 'destroyed'
-          ? '已模拟永久损毁（不可逆），影响范围见下方；可在「完整性验证」或「变更文件」页继续观察'
-          : '已模拟掉线（可恢复），影响范围见下方；可在「完整性验证」或「变更文件」页继续观察',
+          ? '已模拟永久损毁（不可逆），影响范围见下方；可在「完整性验证」或「更新文件」页继续观察'
+          : '已模拟掉线（可恢复），影响范围见下方；可在「完整性验证」或「更新文件」页继续观察',
       )
     }
     await load()
@@ -342,8 +342,9 @@ async function refreshAll() {
   gap: 12px;
 }
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .note {

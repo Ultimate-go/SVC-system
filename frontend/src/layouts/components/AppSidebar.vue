@@ -39,13 +39,12 @@ function toggle() {
  *   管理类页面进去的频次低，平铺两格既占地方，也和核心项混在一起。
  */
 const core = {
-  label: '核心',
   items: [
     { path: '/', name: 'dashboard', icon: 'dashboard', label: '总览', exact: true },
     { path: '/files', name: 'files', icon: 'file', label: '上传文件' },
     // ★ 2026-10-12：「变更文件」紧跟在「上传文件」后面（同一件事的下一半 ——
     //   先传进来，之后要改就进这一页），与「完整性验证」并列。
-    { path: '/files/update', name: 'files-update', icon: 'refresh', label: '变更文件' },
+    { path: '/files/update', name: 'files-update', icon: 'refresh', label: '更新文件' },
     { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },
     { path: '/evidence/pool', name: 'pool', icon: 'list', label: '证据池' },
     // ★ 2026-10-13：菜单名统一为「存储节点」（页面标题、面包屑同步）。
@@ -121,7 +120,6 @@ function go(item) {
     </div>
 
     <nav class="nav">
-      <div class="nav-label"><span class="nav-label-txt">{{ core.label }}</span></div>
       <button
         v-for="item in core.items"
         :key="item.path"
@@ -130,13 +128,13 @@ function go(item) {
         :title="item.label"
         @click="go(item)"
       >
-        <Icon :name="item.icon" :size="16" />
+        <Icon :name="item.icon" :size="17" />
         <span class="nav-item-txt">{{ item.label }}</span>
       </button>
 
       <!-- 管理员控制台：点标题行展开 / 收起，展开后是它下面的两页。 -->
       <template v-if="isAdmin">
-        <div class="nav-label"><span class="nav-label-txt">管理</span></div>
+        <div class="nav-divider" />
         <button
           class="nav-item nav-parent"
           :class="{ active: consoleActive, open: consoleOpen }"
@@ -144,7 +142,7 @@ function go(item) {
           :aria-expanded="consoleOpen ? 'true' : 'false'"
           @click="toggleConsole"
         >
-          <Icon :name="adminConsole.icon" :size="16" />
+          <Icon :name="adminConsole.icon" :size="17" />
           <span class="nav-item-txt">{{ adminConsole.label }}</span>
           <Icon class="nav-caret" name="chevronRight" :size="13" />
         </button>
@@ -157,7 +155,7 @@ function go(item) {
             :title="item.label"
             @click="go(item)"
           >
-            <Icon :name="item.icon" :size="16" />
+            <Icon :name="item.icon" :size="17" />
             <span class="nav-item-txt">{{ item.label }}</span>
           </button>
         </div>
@@ -236,24 +234,25 @@ function go(item) {
   overflow-x: hidden;
   padding: 12px 8px;
 }
-.nav-label {
-  font-size: 13px;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 12px 12px 6px;
+/* 分组分隔：原来这里是「核心」「管理」两行小标题（2026-10-14 去掉文字），
+   现在只留一条细线 —— 分组感还在，但不占一行字的高度。
+   第一组（核心）在栏顶，不需要线。 */
+.nav-divider {
+  height: 1px;
+  margin: 12px 12px 10px;
+  background: var(--line);
 }
 .nav-item {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 9px 12px;
+  padding: 10px 12px;
   margin-bottom: 2px;
   border: none;
   background: transparent;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 14px;
   font-family: inherit;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -346,7 +345,6 @@ function go(item) {
    ★ 用 max-width 而不是 width：可过渡，且不会和 flex 争宽度。
    ★ 必须 display:inline-block：inline 元素上 width/max-width 是不生效的。 */
 .brand-name,
-.nav-label-txt,
 .nav-item-txt {
   display: inline-block;
   white-space: nowrap;
@@ -375,17 +373,14 @@ function go(item) {
   padding-right: 0;
 }
 .sidebar:not(.open) .brand-name,
-.sidebar:not(.open) .nav-label-txt,
 .sidebar:not(.open) .nav-item-txt {
   max-width: 0;
   opacity: 0;
 }
-.sidebar:not(.open) .nav-label {
-  height: 1px;
-  padding: 0;
-  margin: 12px 16px 10px;
-  background: var(--line);
-  overflow: hidden;
+/* 图标轨里的分隔线：内边距对齐图标中线那一列（与 .nav 的 8px 相加 = 16px） */
+.sidebar:not(.open) .nav-divider {
+  margin-left: 16px;
+  margin-right: 16px;
 }
 /* 图标轨里放不下箭头：标题行那个箭头隐藏（展开/收起的开关仍在右上角） */
 .sidebar:not(.open) .nav-caret {

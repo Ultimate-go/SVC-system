@@ -52,14 +52,14 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="变更文件">
+    <PageHeader title="更新文件">
       <el-button :loading="loading" @click="load">刷新</el-button>
     </PageHeader>
 
     <div class="panel mb-3">
       <div class="head">
         <div>
-          <p class="lead">选择一份文件进入变更视图：内容更新、置零、追加、截断，以及浏览器本地的解密与完整性验证。</p>
+          <p class="lead">选择一份文件进入更新视图：内容更新、置零、追加、截断，以及浏览器本地的解密与完整性验证。</p>
           <p class="sub">
             上述四类写操作均会改写密文，并使版本号递增 1；写权限仅限文件所有者，非所有者文件不可进入。
           </p>
@@ -97,7 +97,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="操作" width="130" align="center">
           <template #default="{ row }">
-            <el-button size="small" type="primary" :disabled="!row.is_mine" @click="enter(row)">进入变更</el-button>
+            <el-button size="small" type="primary" :disabled="!row.is_mine" @click="enter(row)">进入更新</el-button>
           </template>
         </el-table-column>
         <template #empty>

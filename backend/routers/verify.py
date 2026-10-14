@@ -181,24 +181,3 @@ def evidence_disagg(
     metrics.record("disagg", sw.total_ms(), sw.rows())
     return out
 
-
-@router.get("/registry/{global_index}")
-def registry_info(
-    global_index: int,
-    _: UserRow = Depends(current_user),
-    mgr: StoreManager = Depends(get_manager),
-):
-    """全局下标 → "这是谁的第几块、存在哪台服务器"。
-
-    登记表是这套方案的基础设施：全局位置**必须唯一**，而
-    ``(用户, 文件, 块序号)`` 三元组的哈希只能当**查表的键**，
-    不能取模当索引（会碰撞，而碰撞会让 ``shamir_trick`` 静默算错）。
-    """
-    try:
-        return mgr.registry_info(global_index)
-    except KeyError as exc:
-        # ★ 用 ``exc.args[0]`` 而不是 ``str(exc)``：``str(KeyError)`` 会把消息
-        #   再包一层引号，界面上就变成 `"'全局位置 99999 不属于任何文件…'"`。
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, exc.args[0] if exc.args else str(exc)
-        ) from exc

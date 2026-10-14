@@ -118,8 +118,9 @@ onMounted(load)
 
 <style scoped>
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .kv {

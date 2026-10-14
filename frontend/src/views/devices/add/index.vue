@@ -87,8 +87,9 @@ async function copy(text) {
   max-width: 560px;
 }
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 10px;
 }
 .cmd {

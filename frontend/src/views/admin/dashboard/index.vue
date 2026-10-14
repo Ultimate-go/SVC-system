@@ -558,8 +558,9 @@ onMounted(() => {
 .grid :deep(.stat-card .unit) { font-size: 15px; }
 .grid :deep(.stat-card .hint) { font-size: 13px; }
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .delta-row {

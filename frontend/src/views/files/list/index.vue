@@ -1026,7 +1026,7 @@ onMounted(load)
         </div>
 
         <!-- 上传过程：后端每步的真实耗时，逐步一行；整块可收起。 -->
-        <StageTimeline v-if="uploadTimings" :timings="uploadTimings" class="mt-3" />
+        <StageTimeline v-if="uploadTimings" :timings="uploadTimings" :total-ms="uploadElapsed" class="mt-3" />
       </div>
 
       <div class="panel">
@@ -1124,6 +1124,7 @@ onMounted(load)
       :steps="uploadSteps"
       :timings="lastUpload?.timings"
       :facts="uploadFacts"
+      :e2e-ms="uploadElapsed"
       :pending="processPending"
     />
   </div>
@@ -1144,8 +1145,9 @@ onMounted(load)
   background: var(--bg-raised, rgba(0, 0, 0, 0.08));
 }
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .upload-row {

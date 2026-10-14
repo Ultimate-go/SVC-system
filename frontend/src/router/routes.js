@@ -102,16 +102,16 @@ export const routes = [
         path: 'files/update',
         name: 'files-update',
         component: () => import('../views/files/update/index.vue'),
-        meta: { title: '变更文件' },
+        meta: { title: '更新文件' },
       },
       {
         path: 'files/update/:id',
         name: 'files-update-detail',
         component: () => import('../views/files/detail/index.vue'),
         meta: {
-          title: '变更文件 · 详情',
+          title: '更新文件 · 详情',
           ops: true,
-          parent: { title: '变更文件', path: '/files/update' },
+          parent: { title: '更新文件', path: '/files/update' },
         },
       },
       {

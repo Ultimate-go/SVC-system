@@ -3194,25 +3194,6 @@ class StoreManager:
             except ValueError as exc:
                 raise Conflict(str(exc)) from exc
 
-    def registry_info(self, global_index: int) -> dict:
-        """全局下标 → "这是谁的第几块、存在哪台"。"""
-        store = self._require()
-        ref = store.describe(global_index)
-        d = store.delta_of(ref.owner, ref.file_key)
-        return {
-            "global_index": global_index,
-            "owner": ref.owner,
-            "file_key": ref.file_key,
-            "block_idx": ref.block_idx,
-            #: ★ 新架构：把位置翻成「文件 / 第几块」所需的全部信息
-            "offset": int(d.offset),
-            "n": int(d.n),
-            "delta_fp": self.delta_fingerprint((ref.owner, ref.file_key)),
-            "holder": store.holder_of(global_index),
-            #: 全部持有者（主副本在前）。单副本时就是 ``[holder]``。
-            "replicas": list(store.replicas_of(global_index)),
-        }
-
     def list_files(self) -> list[dict]:
         """所有文件 —— **验证不受限**，所以列表不按所有者过滤。
 

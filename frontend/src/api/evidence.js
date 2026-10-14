@@ -14,5 +14,4 @@ export const evidenceApi = {
   verifyBatch: (items, locate = true, compare = true) =>
     api.post('/api/query/verify-batch', { items, locate, compare }),
   disagg: (body) => api.post('/api/evidence/disagg', body),
-  registry: (globalIndex) => api.get(`/api/registry/${globalIndex}`),
 }

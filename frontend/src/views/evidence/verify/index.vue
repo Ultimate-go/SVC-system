@@ -5,15 +5,13 @@
  * - **选文件 + 填第几块**验证（块号支持 0-3, 8 区间语法）+ 允许部分结果开关。
  *   ★ 全局下标是**内部坐标**，只留在"高级"里 —— 主路径上不让它出现。
  * - 展示结论（承诺验证的 code_name）、proof.size_bytes、holders、refs、missing。
- * - 「按指标筛选文件」：所有者、文件标识（包含 / 精确）、块数区间、大小区间、
- *   版本下限、只看我能解密的、只看还没收进集合的……筛出来的是一份**文件清单**
- *   （只 ``GET /api/files``，不取数据、不验证）。
+ * - 「按指标筛选文件」：所有者、文件标识（包含 / 精确）、块数区间、大小区间，
+ *   筛出来的是一份**文件清单**（只 ``GET /api/files``，不取数据、不验证）。
  * - 「集合」：勾中的文件（的每一块）收进一份**清单**，清单存在 localStorage 里，
  *   关掉浏览器再回来还在。集合里每一块都记着"它是谁的第几块"（详情里看）。
  *   点「验证集合里的全部块」才真的去取数据 —— **一次** ``POST /api/query``
  *   把整个集合验一遍，并给出报告。
  * - 「按文件 + 第几块验证」：选文件、填块号（支持 0-3, 8 区间语法）。
- * - 「查登记表」（高级）：全局下标 → 谁的第几块 —— 它本身就是个看内部坐标的工具。
  * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
  *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
@@ -21,12 +19,11 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
-import { useAuthStore } from '../../../stores/auth'
 import { useBasketStore } from '../../../stores/basket'
 import { usePoolStore } from '../../../stores/pool'
 import { useThemeStore } from '../../../stores/theme'
 import { systemApi } from '../../../api/system'
-import { fmtBytes, span, humanList, humanIdx } from '../../../utils/format'
+import { fmtBytes, span, humanList } from '../../../utils/format'
 import { MAX_QUERY_INDICES } from '../../../utils/constants'
 // ★ 界面上要的是"第几块"（parseBlockRange）；全局下标只是**高级**里的逃生口
 import { parseBlockRange, parseIndexRange } from '../../../utils/validate'
@@ -40,16 +37,17 @@ import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 const pool = usePoolStore()
 const theme = useThemeStore()
 const basket = useBasketStore()
-const auth = useAuthStore()
-/** 当前登录名 —— 「只看我的」这类预设要用。 */
-const myName = computed(() => auth.username)
 /** 详细模式：把逐块分量铺出来（简略模式只给结论）。 */
 const detailed = computed(() => theme.detailMode === 'detail')
 
 const indicesInput = ref('0-3, 8')
+/** 逐块归属列表默认展开的最大条数：条数超过它就默认收起（点标题展开）。 */
+const REF_OPEN_MAX = 8
 const allowPartial = ref(false)
 const running = ref(false)
 const result = ref(null)
+/** 端到端耗时（毫秒）：从点下「验证」到结果返回，含浏览器端重算与网络往返。 */
+const verifyTotalMs = ref(0)
 
 /* ---- 验证入口：**选文件 + 第几块**（主交互）----
  *
@@ -73,7 +71,7 @@ const advancedMode = ref(false)
 // 多指标筛选（只列文件：不取数据、不验证）
 // ---------------------------------------------------------------------------
 
-//: 筛选项的初值 —— 「重置筛选」就是把它整体盖回去。
+//: 筛选项的初值（每一项留空 = 这一项不参与筛选）。
 const FILTER_DEFAULTS = {
   owner: '',
   keyText: '',
@@ -84,11 +82,6 @@ const FILTER_DEFAULTS = {
   //: 大小区间单位用 **KB**：让用户填字节既难读也难填
   minKB: null,
   maxKB: null,
-  minVersion: null,
-  onlyDecryptable: false,
-  excludeBasket: false,
-  onlyTail: false,
-  sortBy: 'id',
 }
 
 //: 每一项留空 = 这一项不参与筛选（不填就全都要，这是最不容易出错的默认）。
@@ -112,44 +105,20 @@ const owners = computed(() => [...new Set(allFiles.value.map((f) => f.owner))].s
  *  于是 `s + undefined` 让整句变成“共 NaN 块”。改与列表页同一口径：`block_count`。 */
 const totalBlocks = computed(() => allFiles.value.reduce((s, f) => s + (f.block_count || 0), 0))
 
-/**
- * 当前**存活下标的最大值**（所有文件 ``last_index`` 里最大的那个）。
- *
- * ★★ 判“这份文件能不能**整份删掉**”要看它，**不能**用 `blocks - 1`：
- *   删过中间那份文件之后会留下空洞（段永不回收），于是 `blocks` 会
- *   **小于**某个仍然有效的 `last_index` —— 结果唯一那份删得动的文件反而
- *   被标成“不可删”，“只看末尾可删”这个筛选恒为空（审计 F4，实测复现）。
- *
- *   ``slots_allocated``（= `registry.next_offset`）也不能当它用：
- *   那是“下一个待分配的槽位”，比存活最大值还大。
- */
-const maxLiveIndex = computed(() =>
-  allFiles.value.reduce((m, f) => Math.max(m, Number(f.last_index ?? -1)), -1),
-)
-
 //: 拉取框里最多铺多少个文件芯片，剩下的折成一句「还有 N 份…」。
 const PULL_CHIP_MAX = 24
 const pullChips = computed(() => allFiles.value.slice(0, PULL_CHIP_MAX))
 const pullRest = computed(() => Math.max(0, allFiles.value.length - PULL_CHIP_MAX))
 
 /**
- * 给每个文件补两个**派生字段**（后端不提供，前端算）：
- *
- * * ``inBasket`` —— 这份文件已经有多少块在集合里；
- * * ``tailDeletable`` —— 它能不能**整份删掉**（该文件拥有当前**存活**下标的最大值）。
- *   方案只允许从向量末尾往前删，所以只有“排在最后”的那份文件删得动
- *   （见后端 files.py 的删除说明）。判据必须是 ``maxLiveIndex``，
- *   不是 `blocks - 1` —— 理由见上面那段。
+ * 给每个文件补一个**派生字段**（后端不提供，前端算）：
+ * ``inBasket`` —— 这份文件已经有多少块在集合里。
  */
 const rows = computed(() =>
-  allFiles.value.map((f) => {
-    const indices = f.indices || []
-    return {
-      ...f,
-      inBasket: basket.countOf(indices),
-      tailDeletable: indices.length > 0 && Number(f.last_index) === maxLiveIndex.value,
-    }
-  }),
+  allFiles.value.map((f) => ({
+    ...f,
+    inBasket: basket.countOf(f.indices || []),
+  })),
 )
 
 function hitKeyword(f) {
@@ -172,27 +141,10 @@ const filtered = computed(() => {
     if (!hitKeyword(f)) return false
     if (!hitRange(f.block_count, filters.minBlocks, filters.maxBlocks)) return false
     if (!hitRange((f.total_bytes || 0) / 1024, filters.minKB, filters.maxKB)) return false
-    if (
-      filters.minVersion !== null &&
-      filters.minVersion !== '' &&
-      f.version < Number(filters.minVersion)
-    ) {
-      return false
-    }
-    if (filters.onlyDecryptable && !f.can_decrypt) return false
-    // 「还没收完」= 它的块还没全在集合里（已全在的那种收进去也没用）
-    if (filters.excludeBasket && f.inBasket >= (f.indices || []).length) return false
-    if (filters.onlyTail && !f.tailDeletable) return false
     return true
   })
-  const by = {
-    id: (a, b) => a.id - b.id,
-    blocks: (a, b) => b.block_count - a.block_count || a.id - b.id,
-    bytes: (a, b) => (b.total_bytes || 0) - (a.total_bytes || 0) || a.id - b.id,
-    version: (a, b) => b.version - a.version || a.id - b.id,
-    basket: (a, b) => b.inBasket - a.inBasket || a.id - b.id,
-  }
-  return out.sort(by[filters.sortBy] || by.id)
+  // 固定按登记编号排序（原先的「排序」下拉已移除）。
+  return out.sort((a, b) => a.id - b.id)
 })
 
 const pickedRows = computed(() => filtered.value.filter((f) => pickedIds.value.includes(f.id)))
@@ -251,22 +203,6 @@ function clearPicks() {
   pickedIds.value = []
 }
 
-function resetFilters() {
-  Object.assign(filters, FILTER_DEFAULTS)
-}
-
-//: 常用的一键预设 —— 让"多指标"不至于变成"每次都要手填一堆条件"。
-function presetMine() {
-  resetFilters()
-  filters.owner = myName.value
-}
-
-function presetAllInBasketTail() {
-  resetFilters()
-  filters.onlyTail = true
-  filters.excludeBasket = true
-}
-
 /** 把勾中的文件（每一块）收进集合。 */
 function addPickedToBasket() {
   if (!pickedRows.value.length) {
@@ -298,6 +234,8 @@ const basketAllowPartial = ref(false)
 const basketRunning = ref(false)
 const basketResult = ref(null)
 const basketError = ref('')
+/** 端到端耗时（毫秒）：集合验证从点击到结果返回。 */
+const basketTotalMs = ref(0)
 
 /** 主界面**极简**：只给"多少块、几份文件"和几个下标芯片；详情要展开才铺。 */
 // ★ 主界面给的是**界面坐标**（哪份文件的第几块），不再铺内部坐标（全局位置）——
@@ -351,6 +289,7 @@ async function verifyBasket() {
   //   它会在「合并位置集」上重算一份证据（秒级），响应里逐文件回 ``files[]``。
   //   （早先这里拦了 ``fileCount > 1`` —— 那是把 ``verify_batch`` / ``disagg``
   //    的限制错安到了这条路径上，结果把「多块 / 跨文件先收进集合再验」堵死了。）
+  const t0 = performance.now()
   basketRunning.value = true
   basketResult.value = null
   basketError.value = ''
@@ -368,6 +307,7 @@ async function verifyBasket() {
   } catch (e) {
     basketError.value = e?.response?.data?.detail || e?.message || '验证失败'
   } finally {
+    basketTotalMs.value = Math.round(performance.now() - t0)
     basketRunning.value = false
   }
 }
@@ -442,7 +382,7 @@ function addToBasket() {
 }
 
 /**
- * 文件列表里的「只收几块…」：就地弹一个输入框，只把这几块收进集合。
+ * 文件列表里的「选择收录」：就地弹一个输入框，只把这几块收进集合。
  *
  * 不另开弹窗组件 —— 要填的东西就一个“第几块”，用 Element Plus 自带的
  * ``ElMessageBox.prompt`` 最省事，也不会再多一块需要维护的 UI。
@@ -452,7 +392,7 @@ async function addBlocksPrompt(f) {
   try {
     const r = await ElMessageBox.prompt(
       `这份文件共 ${f.block_count} 块。填第几块（如 0-3, 8），只把这几块收进集合。`,
-      `只收几块：${f.owner} / ${f.file_key}`,
+      `选择收录：${f.owner} / ${f.file_key}`,
       {
         confirmButtonText: '收进集合',
         cancelButtonText: '取消',
@@ -566,8 +506,6 @@ const basketHolderCount = computed(
   () => new Set(Object.values(basketResult.value?.holders || {})).size,
 )
 
-const regIndex = ref('')
-
 /* ---------------------------------------------------------------------------
    验证过程弹框（★ 2026-10-12 用户要的）
    ---------------------------------------------------------------------------
@@ -631,9 +569,6 @@ const verifyFacts = computed(() => {
   if (d.delta_fp) out.push({ k: 'δ 指纹', v: String(d.delta_fp) })
   return out
 })
-const regResult = ref(null)
-const regRunning = ref(false)
-
 async function runQuery() {
   // 「高级」里填的是全局下标；主路径上填的是"第几块"。
   let indices = null
@@ -668,6 +603,7 @@ async function runQuery() {
     }
   }
 
+  const t0 = performance.now()
   running.value = true
   result.value = null
   try {
@@ -697,6 +633,7 @@ async function runQuery() {
   } catch (e) {
     result.value = { ok: false, verify: { ok: false, code_name: '', message: e?.response?.data?.detail || '查询失败' } }
   } finally {
+    verifyTotalMs.value = Math.round(performance.now() - t0)
     running.value = false
   }
 }
@@ -753,33 +690,13 @@ const resultFiles = computed(() => {
 })
 
 
-async function runRegistry() {
-  // ★ 界面上填的是**1 起**的槽位号（与全项目其它地方口径一致）；内部减 1 再查。
-  const shown = Number(regIndex.value)
-  if (!Number.isInteger(shown) || shown < 1) {
-    ElMessage.warning('请输入槽位号（从 1 开始）')
-    return
-  }
-  const i = shown - 1
-  regRunning.value = true
-  regResult.value = null
-  try {
-    const { data } = await evidenceApi.registry(i)
-    regResult.value = data
-  } catch (e) {
-    regResult.value = { error: e?.response?.data?.detail || '查不到' }
-  } finally {
-    regRunning.value = false
-  }
-}
-
 // 进入页面即自动拉取文件列表（列表是所有后续操作的前提）。
 onMounted(loadFiles)
 </script>
 
 <template>
   <div class="verify-page">
-    <PageHeader title="完整性验证" subtitle="公开验证；解密需所有权" />
+    <PageHeader title="完整性验证" subtitle="验证公开；解密需所有权" />
 
     <!-- ============================================================= -->
     <!-- ⓪ 拉取文件列表（单独一块，放最上面）                            -->
@@ -810,9 +727,7 @@ onMounted(loadFiles)
           </span>
           <span v-if="pullRest" class="pull-chip mono text-3">还有 {{ pullRest }} 份…</span>
         </div>
-        <p class="text-3" style="font-size: 13px; margin: 8px 0 0">
-          下面「按指标筛选文件」用的就是这份清单 —— 筛选全在前端，不会再请求后端。
-        </p>
+     
       </template>
 
       <div v-else-if="filesLoading" class="text-3" style="font-size: 13px">正在拉取…</div>
@@ -898,16 +813,24 @@ onMounted(loadFiles)
           />
           <p v-else class="note">点「详细」逐块看分量指纹（悬浮任意指纹显示完整十六进制）。</p>
         </div>
-        <div v-if="result.refs?.length" class="refs mt-2">
-          <div v-for="r in result.refs" :key="r.global_index" class="ref-row">
-            <span class="mono">第 {{ r.block_idx }} 块</span>
-            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
-            <span class="mono text-3">holder: {{ result.holders?.[r.global_index] }}</span>
+        <!-- 逐块归属：块数多时默认收起，展开后限高滚动。 -->
+        <details v-if="result.refs?.length" class="refs-collapse" :open="result.refs.length <= REF_OPEN_MAX">
+          <summary>
+            <span class="tri" aria-hidden="true">▶</span>
+            逐块归属（{{ result.refs.length }} 块）
+          </summary>
+          <div class="refs mt-2">
+            <div v-for="r in result.refs" :key="r.global_index" class="ref-row">
+              <span class="mono">第 {{ r.block_idx }} 块</span>
+              <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
+              <span class="mono text-3">holder: {{ result.holders?.[r.global_index] }}</span>
+            </div>
           </div>
-        </div>
+        </details>
         <StageTimeline
           v-if="result.timings"
           :timings="result.timings"
+          :total-ms="verifyTotalMs"
           :state="result.verify?.ok === false ? 'fail' : 'ok'"
           class="mt-2"
         />
@@ -923,8 +846,9 @@ onMounted(loadFiles)
     </div>
 
     <!-- ============================================================= -->
-    <!-- ② 按指标筛选文件                                                -->
+    <!-- ② 筛选文件 + 集合：一左一右两栏（窄屏自动折成一列）              -->
     <!-- ============================================================= -->
+    <div class="two-col">
     <div class="panel mb-3">
       <div class="sec-head">
         <h4 class="sec-title">按指标筛选文件</h4>
@@ -972,41 +896,6 @@ onMounted(loadFiles)
             <el-input-number v-model="filters.maxKB" :min="0" :controls="false" placeholder="上限" />
           </div>
         </div>
-
-        <div class="flt">
-          <span class="flt-lbl">版本 ≥</span>
-          <el-input-number
-            v-model="filters.minVersion"
-            :min="0"
-            :controls="false"
-            placeholder="不限"
-            style="width: 100%"
-          />
-        </div>
-
-        <div class="flt">
-          <span class="flt-lbl">排序</span>
-          <el-select v-model="filters.sortBy" style="width: 100%">
-            <el-option label="按编号" value="id" />
-            <el-option label="按块数" value="blocks" />
-            <el-option label="按大小" value="bytes" />
-            <el-option label="按版本" value="version" />
-            <el-option label="按已入集合" value="basket" />
-          </el-select>
-        </div>
-      </div>
-
-      <div class="flt-switches">
-        <el-checkbox v-model="filters.onlyDecryptable">只看我能解密的</el-checkbox>
-        <el-checkbox v-model="filters.excludeBasket">只看还没全收进集合的</el-checkbox>
-        <el-checkbox v-model="filters.onlyTail">只看能整份删掉的（排在向量末尾）</el-checkbox>
-      </div>
-
-      <div class="flt-presets">
-        <span class="flt-lbl" style="width: auto">快捷</span>
-        <el-button size="small" @click="presetMine">只看我的</el-button>
-        <el-button size="small" @click="presetAllInBasketTail">末尾且未入集合</el-button>
-        <el-button size="small" @click="resetFilters">重置筛选</el-button>
       </div>
 
       <template v-if="allFiles.length">
@@ -1021,16 +910,15 @@ onMounted(loadFiles)
 
         <div class="match-list">
           <div v-for="f in filtered" :key="f.id" class="file-row">
-            <el-checkbox :model-value="pickedIds.includes(f.id)" @change="togglePick(f.id)">
-              <span class="mono">{{ f.owner }} / {{ f.file_key }}</span>
-            </el-checkbox>
+            <el-checkbox :model-value="pickedIds.includes(f.id)" @change="togglePick(f.id)" />
+            <span class="mono f-owner" :title="f.owner">（{{ f.owner }}）</span>
+            <span class="mono f-name" :title="f.file_key">{{ f.file_key }}</span>
             <span class="mono text-2">{{ f.block_count }} 块</span>
             <span class="mono text-2">{{ fmtBytes(f.total_bytes) }}</span>
             <span class="mono text-3">v{{ f.version }}</span>
-            <span v-if="f.can_decrypt" class="tag-ok">可解密</span>
-            <span v-if="f.inBasket" class="tag-ok mono">已入集合 {{ f.inBasket }}/{{ f.block_count }}</span>
-            <el-button link type="primary" size="small" @click="basket.addFile(f)">收整份</el-button>
-            <el-button link type="primary" size="small" @click="addBlocksPrompt(f)">只收几块…</el-button>
+            <span class="mono tag-ok">已入集合 {{ f.inBasket }}/{{ f.block_count }}</span>
+            <el-button link type="primary" size="small" @click="basket.addFile(f)">完整收录</el-button>
+            <el-button link type="primary" size="small" @click="addBlocksPrompt(f)">选择收录</el-button>
           </div>
         </div>
 
@@ -1050,7 +938,7 @@ onMounted(loadFiles)
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
-          用上面的条件筛选文件，勾选后点「把勾选的…收进集合」，或点每行的「收整份」「只收几块…」
+          用上面的条件筛选文件，勾选后点「把勾选的…收进集合」，或点每行的「完整收录」「选择收录」
           把文件收进集合。收集完成后到下方「集合」统一验证。
         </p>
       </details>
@@ -1116,7 +1004,23 @@ onMounted(loadFiles)
 
       <div v-if="basketError" class="file-error">{{ basketError }}</div>
 
-      <div v-if="basketResult" class="mt-3">
+      <details class="note-collapse">
+        <summary>说明</summary>
+        <p class="note">
+          把要验证的块收进集合后，点「验证集合里的全部块」，一次验完集合里的所有块，结果显示在下方。
+        </p>
+      </details>
+    </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- ③ 集合验证结果：单独占一行（结论 + 报告 + 逐块归属 + 耗时）      -->
+    <!-- ============================================================= -->
+    <div v-if="basketResult" class="panel mb-3">
+      <div class="sec-head">
+        <h4 class="sec-title">集合验证结果</h4>
+        <span class="step-tag">一次结论</span>
+      </div>
         <VerifyResult :result="basketResult" />
         <div class="cur-file">
           <span class="cur-lbl">报告</span>
@@ -1138,61 +1042,26 @@ onMounted(loadFiles)
             :title="`这次的结论没覆盖集合里的 ${basketMissed.length} 块：${basketText(basketMissed)}`"
           />
         </div>
-        <div v-if="detailed || basketDetailed" class="refs mt-2">
-          <div v-for="r in basketRefs" :key="r.global_index" class="ref-row">
-            <span class="mono">第 {{ r.block_idx }} 块</span>
-            <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
-            <span class="mono text-3">holder: {{ r.holder }}</span>
+        <details v-if="basketRefs.length" class="refs-collapse" :open="basketRefs.length <= REF_OPEN_MAX">
+          <summary>
+            <span class="tri" aria-hidden="true">▶</span>
+            逐块归属（{{ basketRefs.length }} 块）
+          </summary>
+          <div class="refs mt-2">
+            <div v-for="r in basketRefs" :key="r.global_index" class="ref-row">
+              <span class="mono">第 {{ r.block_idx }} 块</span>
+              <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
+              <span class="mono text-3">holder: {{ r.holder }}</span>
+            </div>
           </div>
-        </div>
+        </details>
         <BlockFingerprints
           v-if="detailed"
           :indices="basketResult.indices || []"
           :values="basketResult.values || []"
           :refs="basketResult.refs || []"
         />
-        <StageTimeline v-if="basketResult.timings" :timings="basketResult.timings" class="mt-2" />
-      </div>
-
-      <details class="note-collapse">
-        <summary>说明</summary>
-        <p class="note">
-          把要验证的块收进集合后，点「验证集合里的全部块」，一次验完集合里的所有块，结果显示在下方。
-        </p>
-      </details>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- ④ 查存储槽位（内部坐标工具，排最后）                            -->
-    <!-- ============================================================= -->
-    <div class="panel mb-3">
-      <div class="sec-head">
-        <h4 class="sec-title">查存储槽位</h4>
-        <span class="step-tag">内部坐标</span>
-      </div>
-      <div class="query-form">
-        <el-input v-model="regIndex" placeholder="槽位号（从 1 开始）" style="width: 160px" />
-        <el-button type="primary" :loading="regRunning" @click="runRegistry">查询</el-button>
-      </div>
-      <div v-if="regResult" class="mt-3">
-        <template v-if="!regResult.error">
-          <div class="mono text-1" style="font-size: 13px">
-            槽位 {{ humanIdx(regResult.global_index) }} → {{ regResult.owner }} / {{ regResult.file_key }} 的第 {{ humanIdx(regResult.block_idx) }} 块
-          </div>
-          <div class="text-2 mono" style="font-size: 13px">
-            holder: {{ regResult.holder }} · replicas: {{ (regResult.replicas || []).join(', ') }}
-          </div>
-        </template>
-        <div v-else class="text-danger">{{ regResult.error }}</div>
-      </div>
-
-      <details class="note-collapse">
-        <summary>说明</summary>
-        <p class="note">
-          输入存储槽位号，点「查询」，查看该槽位存放的是哪个文件的哪一块、存放在哪些节点。
-          这是排查用的辅助工具，常规验证不需要用到。
-        </p>
-      </details>
+        <StageTimeline v-if="basketResult.timings" :timings="basketResult.timings" :total-ms="basketTotalMs" class="mt-2" />
     </div>
 
     <!-- 验证过程：逐步讲清“这个结论是怎么得到的”（耗时对齐真实阶段名）。 -->
@@ -1203,14 +1072,16 @@ onMounted(loadFiles)
       :steps="VERIFY_STEPS"
       :timings="lastVerify?.timings"
       :facts="verifyFacts"
+      :e2e-ms="verifyTotalMs"
     />
   </div>
 </template>
 
 <style scoped>
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 12px;
 }
 .query-form {
@@ -1334,8 +1205,10 @@ onMounted(loadFiles)
    所以不管窗口多宽，控件都落在同一条竖线上，不会错落地挤在一起。
    `auto-fill` + `minmax` 让它自己决定一行放几组（窄屏就少放几组）。 */
 .filters {
+  /* ★ 固定两列：第一行“所有者 / 文件标识”，第二行“块数 / 大小”。两边宽度变了
+     也不重排（原来是 auto-fill，左栏一变宽就会变成三列）。 */
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 20px;
   align-items: center;
 }
@@ -1368,30 +1241,57 @@ onMounted(loadFiles)
   flex: 1 1 0;
   min-width: 0;
 }
-/* 开关类条件：用一条细分隔线与上面的数值型隔开，免得混成一堆。 */
-.flt-switches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 18px;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px dashed rgba(127, 127, 127, 0.28);
+
+/* 筛选 + 集合：一左一右两栏，左栏约占 2/3，右栏 1/3；两栏**高度始终一致**。 */
+.two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
 }
-.flt-presets {
+.two-col > .panel { margin-bottom: 0; }
+@media (max-width: 1180px) {
+  .two-col { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 1080px) {
+  .two-col { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 逐块归属：条数多时默认收起，展开后限高滚动（不让它把页面撞长）。 */
+.refs-collapse { margin-top: 10px; }
+.refs-collapse > summary {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-.file-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
   font-size: 13px;
-  padding: 2px 0;
+  color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
 }
+.refs-collapse > summary::-webkit-details-marker { display: none; }
+.refs-collapse .tri { font-size: 10px; color: var(--text-3); transition: transform 0.18s ease; }
+.refs-collapse[open] > summary .tri { transform: rotate(90deg); }
+.refs-collapse .refs { max-height: 300px; overflow: auto; }
+/* 每行留白随内容自适应：行高固定，但上下留白给足，不挤在一起。 */
+.refs .ref-row { padding: 3px 0; line-height: 1.7; }
+/* 一行一份文件：每列定宽，上下逐列对齐；名字列吃掉剩余空间，
+   过长时未尾省略（鼠标悬浮 title 里给全名）。 */
+.file-row {
+  display: grid;
+  grid-template-columns: 20px 84px minmax(0, 1fr) 58px 72px 42px 126px max-content max-content;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  padding: 3px 0;
+}
+.file-row .f-owner,
+.file-row .f-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row .f-owner { color: var(--text-3); }
 .tag-ok {
   color: var(--accent);
   font-size: 13px;

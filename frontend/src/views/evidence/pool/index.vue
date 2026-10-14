@@ -148,6 +148,8 @@ function toggleCard(card) {
 
 const batchRunning = ref(false)
 const batchResult = ref(null)
+/** 端到端耗时（毫秒）：一次批量验证从点击到结果返回。 */
+const batchTotalMs = ref(0)
 
 /* ---- 取回：**选文件 + 第几块**（主交互）----
  *
@@ -627,11 +629,13 @@ const TITLE_BY_KIND = {
 const processOpen = ref(false)
 const processKind = ref('aggregate')
 const processTimings = ref(null)
+/** 本次过程弹框对应的端到端耗时（没计时就是 null，弹框退回后端口径）。 */
+const processE2eMs = ref(null)
 const processFacts = ref([])
 const processSteps = computed(() => STEPS_BY_KIND[processKind.value] || AGG_STEPS)
 const processTitle = computed(() => TITLE_BY_KIND[processKind.value] || '处理过程')
 
-function showProcess(kind, timings, facts) {
+function showProcess(kind, timings, facts, e2eMs = null) {
   processKind.value = kind
   processTimings.value = timings || null
   processFacts.value = facts || []
@@ -745,6 +749,7 @@ async function batchVerify() {
     ElMessage.warning('请先选择卡片')
     return
   }
+  const t0 = performance.now()
   batchRunning.value = true
   batchResult.value = null
   try {
@@ -766,7 +771,7 @@ async function batchVerify() {
         k: '结论覆盖范围',
         v: `${data?.universe_n ?? 0} 个位置 / ${(data?.universe_files || []).length} 份文件`,
       },
-    ])
+    ], Math.round(performance.now() - t0))
   } catch (e) {
     const detail = e?.response?.data?.detail || '批量验证失败'
     // ★ 只有“卡来自不同宇宙”时后端才拒绝 —— 这不是故障（Def. 29 要求同一个承诺 C），
@@ -775,6 +780,7 @@ async function batchVerify() {
     const needsMerge = /只支持「一份文件」|跨了\s*\d+\s*份文件|不同的合并向量/.test(detail)
     batchResult.value = { ok: false, message: detail, needsMerge }
   } finally {
+    batchTotalMs.value = Math.round(performance.now() - t0)
     batchRunning.value = false
     // ★ 验完就取消选中（无论通过还是被拒）：结论已经在结果面板上，
     //   选中态继续留着只会让卡片一直高亮、下一个动作容易连着上一个。
@@ -1314,7 +1320,7 @@ onMounted(() => {
         </el-button>
       </template>
       <el-alert v-if="batchResult.agree === false" type="error" :closable="false" class="mt-2" title="两套结论不一致（通常表示实现存在缺陷）" />
-      <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" class="mt-2" />
+      <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" :total-ms="batchTotalMs" class="mt-2" />
     </div>
 
     <div v-if="disaggResult" class="panel mt-3">
@@ -1446,6 +1452,7 @@ onMounted(() => {
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"
+      :e2e-ms="processE2eMs"
     />
   </div>
 </template>
@@ -1514,8 +1521,9 @@ onMounted(() => {
   margin: 6px 0 0;
 }
 .group-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
+  color: var(--text-1);
   margin: 0 0 4px;
 }
 .group-note {
@@ -1589,8 +1597,9 @@ onMounted(() => {
   padding: 8px 10px;
 }
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 12px;
 }
 .sep {

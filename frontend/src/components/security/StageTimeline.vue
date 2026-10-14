@@ -14,11 +14,34 @@ import { buildPerf, formatMs } from '../../utils/timing'
 
 const props = defineProps({
   timings: { type: Object, default: null },
+  /**
+   * 端到端耗时（毫秒）：从用户点击到结果返回的墙钟时间，由调用方计时后传入。
+   *
+   * ★ 传了就用它 —— 同一个操作在界面上只允许有一个“总耗時”数字：
+   *   上传按钮旁写“已用 4.9 s”，这里就不能写另一个数。
+   * ★ 不传（如详情页写操作、改口令）：退回后端埋点的 total_ms，标题写「合计」，
+   *   含义是各阶段埋点之和（与下方逐行相加可以对照）。
+   */
+  totalMs: { type: Number, default: null },
   /** 结论态：''（中性）/ 'ok' / 'fail'；只影响填充条颜色。 */
   state: { type: String, default: '' },
 })
 
 const perf = computed(() => buildPerf(props.timings))
+
+/** 各阶段埋点之和（只用于悬浮说明，不影响标题里显示的那个数）。 */
+const stepSum = computed(() => perf.value.stages.reduce((a, s) => a + (Number(s.ms) || 0), 0))
+
+const hasTotal = computed(() => typeof props.totalMs === 'number' && props.totalMs > 0)
+/** 标题里那个数：优先端到端墙钟，退路是后端 total_ms。 */
+const shownTotal = computed(() => (hasTotal.value ? props.totalMs : perf.value.total_ms))
+const totalLabel = computed(() => (hasTotal.value ? '总耗时' : '合计'))
+/** 悬浮说明：把三个口径都写清楚，避免“这个数怎么对不上”的疑问。 */
+const metaHint = computed(() => {
+  const parts = [`各步合计 ${formatMs(stepSum.value)}`, `后端埋点总计 ${formatMs(perf.value.total_ms)}`]
+  if (hasTotal.value) parts.unshift(`端到端（含浏览器端加解密与网络往返）${formatMs(props.totalMs)}`)
+  return parts.join(' · ')
+})
 
 /** 填充动画时长：按实际总耗时缩放，夹在 0.5~1.6 秒内。 */
 const animMs = computed(() => {
@@ -46,7 +69,7 @@ const toneCss = {
     <summary class="fill-summary">
       <span class="fill-tri" aria-hidden="true">▶</span>
       <span class="fill-label">步骤耗时</span>
-      <span class="fill-meta mono">{{ perf.stages.length }} 步 · 合计 {{ formatMs(perf.total_ms) }}</span>
+      <span class="fill-meta mono" :title="metaHint">{{ perf.stages.length }} 步 · {{ totalLabel }} {{ formatMs(shownTotal) }}</span>
     </summary>
 
     <div class="fill-body">

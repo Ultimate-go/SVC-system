@@ -65,7 +65,7 @@ const pageTitle = computed(() =>
   file.value
     ? `${file.value.owner} / ${file.value.file_key}`
     : showOps.value
-      ? '变更文件'
+      ? '更新文件'
       : '文件详情',
 )
 
@@ -929,7 +929,6 @@ onMounted(load)
       </div>
 
       <div v-if="showOps" class="panel mb-3">
-        <h4 class="sec-title">变更文件操作</h4>
         <el-alert
           v-if="!isMine"
           type="info"
@@ -938,7 +937,7 @@ onMounted(load)
           title="当前账号不是该文件的所有者 —— 可读，不可写"
           description="块密钥以文件所有者的 SM2 公钥封装，其他主体（包括管理员）均无法解封装，因而无法修改。该限制来自密码学上的不可行性，与权限设置无关。"
         />
-        <el-tabs v-else v-model="activeOp">
+        <el-tabs v-else v-model="activeOp" class="ops-tabs">
           <el-tab-pane label="更新" name="modify">
             <div class="write-form">
               <div>
@@ -1235,8 +1234,9 @@ onMounted(load)
 
 <style scoped>
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .sec-head {
@@ -1414,6 +1414,49 @@ onMounted(load)
 }
 .kv .v.fp-link:disabled { color: var(--text-3); cursor: default; border-bottom-style: dotted; }
 .kv .v.fp-link:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+
+/* 四个写操作（更新 / 追加 / 截断 / 置零）：做成小卡片，选中的那张拿出来。
+   字号比正文大一号；悬停上浮、选中亮起并带光晕，替换掉默认的下划线指示器。 */
+.ops-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
+.ops-tabs :deep(.el-tabs__nav-wrap::after) { display: none; }
+.ops-tabs :deep(.el-tabs__active-bar) { display: none; }
+.ops-tabs :deep(.el-tabs__item) {
+  height: 34px;
+  line-height: 34px;
+  /* ★ 必须带 !important：Element Plus 会把**首项**的左侧、**末项**的右侧内边距
+     单独清零（原本是为了让下划线指示器贴边）。做成卡片之后这会让「更新」偏左、
+     「截断」偏右 —— 那两条规则的选不中（首项实际不是 :first-child，
+     active-bar 占了一位），所以只能整项盖掉。 */
+  padding: 0 16px !important;
+  margin-right: 8px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  transition: transform 0.18s ease, color 0.18s ease, background 0.18s ease,
+    border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.ops-tabs :deep(.el-tabs__item:hover) {
+  color: var(--text-1);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+.ops-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* ★ Element Plus 会把**首项**的左侧与**末项**的右侧内边距清零（原本是为了让
+   下划线指示器贴边）；改成卡片之后，这会让「更新」偏左、「截断」偏右 —— 已在
+   上面用 !important 一并盖掉，这里不再需要伪类规则。 */
+@media (prefers-reduced-motion: reduce) {
+  .ops-tabs :deep(.el-tabs__item) { transition: none; }
+  .ops-tabs :deep(.el-tabs__item:hover) { transform: none; }
+}
 </style>
 
 <!--

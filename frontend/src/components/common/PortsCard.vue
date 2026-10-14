@@ -496,8 +496,9 @@ defineExpose({ refresh: load })
    而这张卡片用的是与 NodeCountCard 同一套写法（`.panel` / `.note` 那些
    是全局样式，不用重复定义）。定义与 views/admin/dashboard 里那份保持一致。 */
 .sec-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
   margin-bottom: 14px;
 }
 .deploy-head {
