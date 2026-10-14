@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import time
+import hashlib
 from dataclasses import dataclass
 
 # 让中文在 Windows 控制台上正常输出
@@ -76,6 +77,16 @@ def payload(nbytes: int, tag: int) -> bytes:
     return bytes(out)
 
 
+def fp_of(store, file_id: tuple[str, str]) -> str:
+    """δ 指纹：``sha256("U:C:n")[:12]`` —— 与后端 / 界面**同一把尺子**。
+
+    ★ 为什么需要它：改块**不改变 n**，却会改变承诺 C。所以“看 n 没变就以为
+      证据还行”是错的 —— 界面上的作废判据用的就是这个指纹。
+    """
+    d = store.delta_of(*file_id)
+    return hashlib.sha256(f"{d.U}:{d.C}:{d.n}".encode()).hexdigest()[:12]
+
+
 @dataclass
 class Sample:
     q: int
@@ -119,9 +130,10 @@ force_utf8_console()
 
 
 def main() -> int:
-    head("VDS 可验证分布式存储系统 —— 设计 B（全系统一条向量）")
+    head("VDS 可验证分布式存储系统 —— 一文件一向量")
     print("论文依据：ASIACRYPT 2020 / eprint 2020/149 §5.2 + §8.2")
-    print("设计决定：① 全系统一条向量（一个证据可横跨多个文件）")
+    print("设计决定：① 每份文件一条**独立**向量（新建/改动一份不触碰别人的摘要；")
+    print("            跨文件取证在合并位置集上重算一份证据）")
     print("          ② 验证不受限（δ 公开）", end="")
     print("  ③ 解密受限（每块的块密钥用**所有者的公钥**封，只有他解得开）")
 
@@ -246,6 +258,51 @@ def main() -> int:
     print(f"  ★ 一份聚合成一体的证据覆盖了 {len({(x.owner) for x in r.refs})} 个用户"
           f"、{len({(x.file_key) for x in r.refs})} 个文件、{len(sel)} 个块")
     print(f"  总耗时 {t.take():.1f} ms")
+
+    # -- 5b. 更新：三条路径 -----------------------------------------------
+    sub("5b. 更新：改一块 / 追加 / 截断 —— 代价只与改动量相关")
+    tgt = ("zhangsan", "case-内科")
+    # 先记下“别人”的指纹：一整套更新跑完要证明它们一个字节没变。
+    others = [("lisi", "report-A"), ("wangwu", "note")]
+    fp_before = {k: fp_of(store, k) for k in others}
+
+    box_upd = key_cts[tgt]
+
+    def sink_into(pos: int, key: bytes) -> None:
+        """更新的新块密钥**就地封装**（与上传同一条纪律：明文密钥不落任何地方）。
+
+        用的是这份文件所有者的公钥 —— 所以“改完之后谁能解密”与上传时一致。
+        """
+        box_upd[pos] = wrap_key(pks[tgt[0]], key)
+
+    d_before = store.delta_of(*tgt)
+    t = Timer()
+    with t:
+        store.modify(*tgt, 0, payload(900, 71), key_sink=sink_into)
+    d_after = store.delta_of(*tgt)
+    print(
+        f"  改第 1 块（新内容 900 B，不超过单块上限）：块数 {d_before.n} → {d_after.n}（不变），"
+        f"δ 指纹 {fp_of(store, tgt)}　{t.take():.0f} ms"
+    )
+    print("     ↑ 只换那一块的密文与块密钥；其余块的密文 / 密钥 / IV 一个字都没动")
+
+    t = Timer()
+    with t:
+        rec_ap = store.append(*tgt, payload(2600, 72), key_sink=sink_into)
+    n_ap = store.delta_of(*tgt).n
+    print(f"  追加 2600 B：块数 {d_after.n} → {n_ap}　{t.take():.0f} ms")
+    print("     ↑ 已有块一个字节都不动，只新增末尾几块")
+
+    t = Timer()
+    with t:
+        K, _rec_tr = store.truncate(*tgt, n_ap - d_after.n)
+    n_tr = store.delta_of(*tgt).n
+    print(f"  截断回原块数：块数 {n_ap} → {n_tr}，删掉下标 {list(K)}　{t.take():.0f} ms")
+
+    untouched = all(fp_of(store, k) == fp_before[k] for k in others)
+    print(f"  别的文件在整段更新里**一个字节没动**：{untouched} ✓")
+    print("  ★ 三条路径都只动“动了的那几块”，所以代价与文件大小无关 ——")
+    print("    这是「每块一把密钥、一个 IV」换来的（块与块彼此不牽连）。")
 
     # -- 6. 性能指标 -------------------------------------------------------
     sub("6. 性能指标（题目要求的那几项，现场实测）")
@@ -471,7 +528,22 @@ def main() -> int:
     print("        没有 tag 的话，改一位只会解出另一个块密钥 ——")
     print("        表现是“文件内容是乱的”，而不是“这里被篡改了”。")
 
+    # -- 8d. 存储证明（PoR）-----------------------------------------------
+    sub("8d. 存储证明：不下载任何内容，确认各节点还存着它那份")
+    t = Timer()
+    with t:
+        por = store.pos_audit(file_id=("zhangsan", "case-内科"), lambda_pos=4)
+    print(
+        f"  挑战 4 个随机位置 → {'通过' if por.get('ok') else '失败'}"
+        f"　{t.take():.0f} ms"
+    )
+    print("  ★ 与“查询”问的不是同一件事：这里**一个字节内容都没取回**，")
+    print("    只让各节点按自己那段算出份额，聚合后验一次 —— 用来发现")
+    print("    “收了存储费用却把数据丢了”那种节点；证明大小与参与节点数无关。")
+
     # -- 9. 自检 -----------------------------------------------------------
+
+
     sub("9. 全面自检")
     t = Timer()
     with t:

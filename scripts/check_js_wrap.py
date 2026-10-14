@@ -8,14 +8,14 @@
 
 `frontend/tests/crypto-vectors.json` 里的 ``user_keys`` 只覆盖了
 「Python 封 → JS 解」这一个方向。本脚本反过来跑一遍：
-读前端测试落盘的 ``logs/js-wrapped.json``，用
+读前端测试落盘的 ``vds-js-wrapped.json``（在**系统临时目录**里），用
 :func:`core.keywrap.unwrap_private_key` 去解。
 
 用法
 ----
 ::
 
-    npm --prefix frontend test          # 产出 logs/js-wrapped.json
+    npm --prefix frontend test          # 产出系统临时目录里的 vds-js-wrapped.json
     python -X utf8 scripts/check_js_wrap.py
 """
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +37,7 @@ from core.keywrap import (  # noqa: E402
 )
 from core.sm2 import public_key_of  # noqa: E402
 
-SRC = ROOT / "logs" / "js-wrapped.json"
+SRC = Path(tempfile.gettempdir()) / "vds-js-wrapped.json"
 
 
 def main() -> int:

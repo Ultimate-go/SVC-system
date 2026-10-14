@@ -1,11 +1,13 @@
-"""``VectorStore`` —— 设计 B（全系统一条向量）的**协调者**。
+"""``VectorStore`` —— **协调者**（每份文件一条独立向量）。
 
 它做什么
 --------
-1. **全局向量** —— 全系统唯一的 :math:`V`，所有用户的所有文件按上传顺序追加到末尾；
-2. **登记表** —— :class:`~core.registry.BlockRegistry` 记录"哪一块在向量上的哪个位置"；
+1. **各文件自己的向量与摘要** —— :meth:`delta_of` 给出该文件的 :math:`\\delta`；
+   位置由各文件的身份派生（见 :class:`core.session.IdentityPrimeView`），
+   所以新建或改动一份文件**不触碰**别人的摘要；
+2. **登记表** —— :class:`~core.registry.SegmentRegistry` 记录"哪一块在向量上的哪个位置"；
 3. **分片决策** —— 哪个新位置归哪台服务器；
-4. **检索与验证** —— 向服务器要内容与证据，聚合成**一份**，对着全局 δ 验证。
+4. **检索与验证** —— 向服务器要内容与证据，聚合成**一份**，对着该文件的 :math:`\\delta` 验证。
 
 它**不做什么**（这是"节点进程化"后的关键区别）
 ---------------------------------------------
@@ -83,14 +85,14 @@ from .crypto import (
     vector_element,
 )
 from .node_state import NodeState, span
-from .registry import BlockRef, BlockRegistry, SegmentRegistry
+from .registry import BlockRef, SegmentRegistry
 from .session import GlobalSession
 from .timing import stage
 from .transport import LocalTransport, NodeTransport, TransportError
 
 __all__ = ["VectorStore", "PlainKeyStore", "FileRecord", "QueryResult"]
 
-#: 默认的存储服务器台数。设计 B 下"台数"与文件无关 —— 它是全网的分片数。
+#: 默认的存储服务器台数。"台数"与文件无关 —— 它是全网的分片数。
 DEFAULT_NODE_IDS: tuple[str, ...] = ("node-1", "node-2", "node-3", "node-4")
 
 
@@ -135,37 +137,6 @@ class FileRecord:
             f"{self.block_count} 块, {self.total_bytes} 字节)"
         )
 
-
-def _record_data(rec: FileRecord) -> dict:
-    """``FileRecord`` → 纯数据（供 :meth:`VectorStore.export_pending`）。
-
-    IV 用十六进制存 —— **它不是秘密**（见 :class:`FileRecord` 的文档）；
-    真正要保护的是**块密钥**，而它只存在 ``blocks.key_ct`` 那列里。
-    """
-    return {
-        "owner": str(rec.owner),
-        "file_key": str(rec.file_key),
-        "indices": [int(i) for i in rec.indices],
-        "ivs": [bytes(iv).hex() for iv in rec.ivs],
-        "plain_lengths": [int(x) for x in rec.plain_lengths],
-        "total_bytes": int(rec.total_bytes),
-        "segment_bytes": int(rec.segment_bytes),
-        "content_digest": str(rec.content_digest),
-    }
-
-
-def _record_from_data(d: Mapping) -> FileRecord:
-    """:func:`_record_data` 的逆运算。"""
-    return FileRecord(
-        owner=str(d["owner"]),
-        file_key=str(d["file_key"]),
-        indices=tuple(int(i) for i in d["indices"]),
-        ivs=[bytes.fromhex(str(h)) for h in d["ivs"]],
-        plain_lengths=[int(x) for x in d["plain_lengths"]],
-        total_bytes=int(d["total_bytes"]),
-        segment_bytes=int(d["segment_bytes"]),
-        content_digest=str(d["content_digest"]),
-    )
 
 
 def proof_bytes(S_I: int, Lambda_I: int) -> int:
@@ -252,11 +223,6 @@ class VectorStore:
         "_replicas",
         "_offset",
         "replica_factor",
-        #: 写失败时留住的现场（见 retry_pending）。★ 有 __slots__ 的类**新增字段
-        #: 必须写在这里**，否则赋值时直接 AttributeError（我在这一步上踩过一次：
-        #: 忘了加，于是 100+ 个用例一起报 "'PlainKeyStore' object has no attribute
-        #: '_pending'"）。
-        "_pending",
     )
 
     def __init__(
@@ -298,8 +264,7 @@ class VectorStore:
         self.transport = transport
         self.segment_bytes = int(segment_bytes)
         self.replica_factor = int(replica_factor)
-        # ★ 新方案：每份文件占自己一段（或几段）位置，段永不回收。
-        #   ``BlockRegistry``（要求“下标全系统密集唯一”）换成 ``SegmentRegistry``。
+        # ★ 每份文件占自己一段（或几段）位置，段永不回收。
         self.registry = SegmentRegistry()
         #: ★ 新方案：**每份文件各自的摘要**。设计 B 里这里是 ``self.delta``（一条），
         #: 每次上传都会推进它，并让所有节点的份额一起失效；现在每份文件独立，
@@ -313,8 +278,6 @@ class VectorStore:
         #: 全局下标 -> **全部**持有者（主副本在前）。副本数 > 1 时才有意义。
         self._replicas: dict[int, tuple[str, ...]] = {}
         self._offset: int = 0
-        #: 上一次写失败时留住的现场（见 :meth:`retry_pending`）。``None`` = 没有待补推的。
-        self._pending: dict | None = None
 
     # -------------------------------------------------------------------
     # 按文件取摘要
@@ -535,7 +498,7 @@ class VectorStore:
         return getter(node_id)
 
     # -------------------------------------------------------------------
-    # 上传 —— 追加到全局向量
+    # 上传 —— 追加到这份文件自己的向量
     # -------------------------------------------------------------------
 
     def upload(
@@ -548,7 +511,7 @@ class VectorStore:
         segment_bytes: int | None = None,
         nodes: Sequence[str] | None = None,
     ) -> FileRecord:
-        """加密 + 分块 + 承诺 + 分发，把新块追加到全局向量末尾。
+        """加密 + 分块 + 承诺 + 分发，把新块追加到**这份文件**的向量末尾。
 
         :param key_sink: ``key_sink(pos, key)`` —— 每生成一把块密钥就交出去一次。
             **必传，没有默认值**：本类**不保管任何密钥**，调用方必须显式
@@ -629,9 +592,9 @@ class VectorStore:
         offset, _seg = self.registry.alloc(owner, file_key, len(elements))
         K = tuple(range(offset, offset + len(elements)))
 
-        # ★ FileRecord 要在**推之前**就造好，并把"登记它"作为收尾回调交给
-        #   _append —— 这样写推失败时，补推成功之后那份文件才会真的出现
-        #   （否则向量是自洽的，但系统里"没有这个文件"）。
+        # ★ FileRecord 先造好，把"登记它"作为收尾回调交给 _append：
+        #   只有写推成功之后它才会被登记进 :attr:`files` —— 写失败时
+        #   这次上传就当作没发生过，系统里不会有这个文件。
         rec = FileRecord(
             owner=owner,
             file_key=file_key,
@@ -653,9 +616,6 @@ class VectorStore:
             K=K,
             pool=nodes,
             on_success=_register,
-            # ★ 纯数据版的收尾说明（见 :meth:`export_pending`）——
-            #   进程没了之后靠它把 ``_register`` 原样重建出来。
-            restore={"kind": "file", "record": _record_data(rec)},
         )
         return rec
 
@@ -753,7 +713,7 @@ class VectorStore:
         holders = self.replicas_of(gidx)
 
         def _patch_record() -> None:
-            """新 IV / 新长度回到文件账目上（正常路径与补推路径共用）。"""
+            """新 IV / 新长度回到文件账目上。"""
             rec.ivs[block_idx] = iv_new
             rec.plain_lengths[block_idx] = len(plaintext)
             rec.total_bytes = sum(rec.plain_lengths)
@@ -769,13 +729,6 @@ class VectorStore:
             "K": (gidx,),
             "elements": (v_new,),
             "on_success": _patch_record,
-            # ★ 纯数据版收尾说明（见 :meth:`export_pending`）。
-            "restore": {
-                "kind": "iv",
-                "block_idx": int(block_idx),
-                "iv": bytes(iv_new).hex(),
-                "plain_len": len(plaintext),
-            },
         }
 
         # 每一份副本都要拿到新密文 —— 只推一份的话，从别的副本读到的就是旧内容
@@ -792,13 +745,12 @@ class VectorStore:
             #   而改块比追加**更不能**“重来一次” —— 重来会生成新的块密钥与新的
             #   密文，已经跟上的那几台会当场拒（它们算出的摘要已经是新值）。
             #   而且上面那行 ``key_sink`` 已经把**新**密钥交出去了，
-            #   所以“回滚”也无从谈起。方案约定：不留现场、不补推 ——
+            #   所以“回滚”也无从谈起。方案约定：写失败即作废 ——
             #   没推上去的那几台就是没有这份新值。
             raise
 
         # 节点都跟上之后才动自己的账 —— 与 upload / append 同一顺序、同一段代码。
         # 反过来的话，「本地记录改了、节点没收到」会让协调者比实际存储更乐观。
-        self._pending = None
         self._absorb_pushed(context)
         return iv_new, len(plaintext)
 
@@ -884,12 +836,6 @@ class VectorStore:
             "K": (gidx,),
             "elements": (v_new,),
             "on_success": _patch_record,
-            "restore": {
-                "kind": "iv",
-                "block_idx": int(block_idx),
-                "iv": iv_new.hex(),
-                "plain_len": int(plain_len),
-            },
         }
 
         try:
@@ -904,10 +850,9 @@ class VectorStore:
             # 与 modify / append 同一处理：一台没跟上，全网就不一致；
             # 而回退更不能“重来一次”（重来还是同一份旧密文，但已经跟上的
             # 节点会因为它与当前值相同而拒绝重复应用）。
-            # 方案约定：不留现场、不补推 —— 没推上去的节点就是没有这份新值。
+            # 方案约定：写失败即作废 —— 没推上去的节点就是没有这份新值。
             raise
 
-        self._pending = None
         self._absorb_pushed(context)
         return iv_new, int(plain_len)
 
@@ -1008,7 +953,7 @@ class VectorStore:
         # ★ 跟着**这份文件自己已有的机器**走（见 _pool_of）。
         #   否则“我当初只勾了 1、2 号”，一次追加就会把新块漏到没勾的机器上。
         def _extend() -> None:
-            """把新块接到这份文件的账目上（正常路径与补推路径共用）。"""
+            """把新块接到这份文件的账目上。"""
             rec.indices = rec.indices + K
             rec.ivs.extend(ivs)
             rec.plain_lengths.extend(lens)
@@ -1021,12 +966,6 @@ class VectorStore:
             K=K,
             pool=pool,
             on_success=_extend,
-            restore={
-                "kind": "extend",
-                "ivs": [bytes(iv).hex() for iv in ivs],
-                "lens": list(lens),
-                "add_bytes": len(plaintext),
-            },
         )
         return rec
 
@@ -1043,7 +982,6 @@ class VectorStore:
         K: tuple[int, ...],
         pool: Sequence[str] | None = None,
         on_success: Callable[[], None] | None = None,
-        restore: Mapping | None = None,
     ) -> None:
         """推进**这份文件**的摘要。
 
@@ -1054,9 +992,8 @@ class VectorStore:
             **文件内局部下标**，函数内部自己算（见 ``K_local``）——
             两者长得一样但含义不同，混用**不会报错**，只会算出另一个素数的向量。
         :param on_success: 这次追加**自己的收尾**（登记 :class:`FileRecord`、
-            把新块接到文件账目上…）。它在**账目推进之后**被调用 ——
-            正常路径在下面调，补推路径在 :meth:`retry_pending` 里调。
-            抽成回调是为了让“补推成功”与“第一次就成功”走**同一段**收尾代码。
+            把新块接到文件账目上…）。它在**账目推进之后**被调用（见
+            :meth:`_absorb_pushed`）。
         """
         delta_old = self._delta_before(file_id, K)
         k = len(elements)
@@ -1110,9 +1047,9 @@ class VectorStore:
                 nid: {j: ct_of[j] for j in seg} for nid, seg in assignments.items() if seg
             }
 
-        # ★ 这份 context 是"这次操作的全部收尾信息"：正常路径立刻用它，
-        #   失败时它会连着 error 一起留在 _pending 里，等补推成功再用。
-        #   两条路共用同一份 —— 所以不会出现"补推出来的账少一半"。
+        # ★ 这份 context 是"这次操作的全部收尾信息"：写推成功之后由
+        #   :meth:`_absorb_pushed` 一次用掉。失败时它直接丢弃 ——
+        #   那次操作当作没发生过（登记表也退回去，见下面的 ``_rollback_add``）。
         context = {
             # ★ 显式标出操作种类。以前靠“缺省就是 add” —— 而那让
             #   “失败时要不要回退登记表”这种判据变成了猜谜（踩过：
@@ -1124,9 +1061,6 @@ class VectorStore:
             "K": K,
             "elements": elements,
             "on_success": on_success,
-            # ★ ``on_success`` 是个闭包，**过不了重启**；``restore`` 是它的
-            #   纯数据版（见 :meth:`export_pending`），两者必须产生同一结果。
-            "restore": restore,
         }
 
         try:
@@ -1140,16 +1074,15 @@ class VectorStore:
                     assignments=assignments,
                     blobs=blobs,
                 )
-        except TransportError as exc:
+        except TransportError:
             # ★ 一次追加只要有**一台**没跟上，全网就不一致了：已经跟上的 δ 已经是新的，
             #   没跟上的还是旧的，而**协调者自己不推进**（下面那几行没执行）。
             #   更麻烦的是：登记表**已经分配过**这批下标，所以"再传一次文件"
             #   是错的（会撞上"登记表游标与向量长度不一致"）。
-            #   ★ 方案约定：写失败**不留现场、也不补推** —— 没推上去的副本直接丢弃。
-            #     传输层即使带回了 payloads（可以重发那几台），也不再保留它。
+            #   ★ 方案约定：写失败**不留现场、也不重发** —— 没推上去的副本直接丢弃，
+            #     并把已分配的位置退回登记表，这次写当作从未发生。
             if context.get("kind", "add") == "add":
-                # ★★ 这里“补推无从谈起”（同进程传输、或故障演练直接拦下的写）
-                #    ⇒ 这次写**永远不会完成**，但登记表**已经分配过**这批位置了。
+                # ★★ 这次写**永远不会完成**，但登记表**已经分配过**这批位置了。
                 #    不退回去的话，协调者手里就留下"有位置、没分量"的脏账，
                 #    之后任何要读值的操作（改块 / 自检 / 一次性承诺复核）都会以
                 #    ``KeyError: <位置号>`` 收场 —— 那是最难归因的一类故障，
@@ -1160,7 +1093,6 @@ class VectorStore:
                 self._rollback_add(file_id, len(context.get("K", ())))
             raise
 
-        self._pending = None
         self._absorb_pushed(context)
 
     # -------------------------------------------------------------------
@@ -1179,14 +1111,14 @@ class VectorStore:
 
         .. important::
 
-           **只能删“向量末尾”的块** —— 这不是实现偷懒，是方案本身的限制：
-           ``vds.updates._push_del`` 要求 :math:`K` 恰好是 ``range(n-k, n)``，
-           因为新摘要用到了 :math:`e_{[n]} = e_{[n-k]} \cdot e_K` 这个因式分解。
-           "删文件**中间**的块"在数学上就不是一次 ``del``。
+           **只删“这份文件位置段的末尾”多少块** —— 删除按该文件自己的位置集合做
+           （:meth:`delete_from`）：向量里留下空洞、段永不回收，其余文件一个字节
+           都不动。“删这份文件**中间**的块”没有提供（那要重编号、重新承诺）。
 
-           由此推出一条使用上的前提：**只有最后写进向量的那份文件才删得动尾巴**。
-           别的文件就算排在末尾，它前面也可能压着别人后写的块 —— 那种情况会报错
-           并说清是哪些下标卡住了（而不是默默做错事）。
+           ★ 旧坐标（全局素数表）下 `_push_del` 要求 :math:`K` 恰好是
+           ``range(n-k, n)``，所以那时“只有最后写进向量的那份文件才删得动尾巴”；
+           新坐标（块身份派生素数）下每份文件各占一段，这条束缚不再存在，
+           本方法因此只需校验“要删的那几块确实是这份文件自己的末尾”。
 
         .. important::
 
@@ -1212,7 +1144,7 @@ class VectorStore:
         if drop >= rec.block_count:
             raise ValueError(
                 f"这份文件只有 {rec.block_count} 块，要删 {drop} 块 —— "
-                f"不能删到一块不剩：向量不允许缩到 n=0（那会让全局摘要回到"
+                f"不能删到一块不剩：向量不允许缩到 n=0（那会让摘要回到"
                 f"起点，与 bootstrap 的约定不符）。整份删除是另一件事"
             )
         K = tuple(rec.indices[-drop:])
@@ -1233,7 +1165,7 @@ class VectorStore:
         # 一定退得回去 —— 位置段永不回收，所以不存在“跨文件退账”这回事。
 
         def _settle() -> None:
-            """这次删除**自己的收尾**（正常路径与补推路径共用）。
+            """这次删除**自己的收尾**。
 
             两件事：退回末尾下标（登记表游标要与向量长度一起回落）、
             把文件账目截短。
@@ -1246,13 +1178,7 @@ class VectorStore:
             # 删掉的块如果有块密钥留在实现里，也要跟着抹掉（本类没有，子类有）
             self._forget_block_keys(owner, file_key, rec.block_count)
 
-        self._delete_tail(
-            key,
-            K,
-            _settle,
-            # ★ 纯数据版收尾说明（见 :meth:`export_pending`）。
-            restore={"kind": "truncate", "drop": int(drop)},
-        )
+        self._delete_tail(key, K, _settle)
         return K, rec
 
     def _delete_tail(
@@ -1260,7 +1186,6 @@ class VectorStore:
         file_id: tuple[str, str],
         K: tuple[int, ...],
         settle: Callable[[], None],
-        restore: Mapping | None = None,
     ) -> None:
         r"""把**向量末尾**的连续区间 ``K`` 删掉（论文 §8.2 的 ``op = del``）。
 
@@ -1269,8 +1194,7 @@ class VectorStore:
         而那属于最难查的一类偏差）。
 
         :param settle: 这次删除**自己的收尾**（退回登记表游标、把文件账目截短……）。
-            它在**账目推进之后**被调；正常路径与补推路径共用同一份
-            （理由同 :meth:`_absorb_pushed` 的 ``on_success``）。
+            它在**账目推进之后**被调（见 :meth:`_absorb_deleted`）。
         """
         drop = len(K)
         delta_old = self.delta_of(*file_id)
@@ -1323,7 +1247,6 @@ class VectorStore:
             "per_index": {},
             "elements": (),
             "on_success": settle,
-            "restore": restore,
         }
 
         try:
@@ -1334,16 +1257,28 @@ class VectorStore:
             # 与 _append / modify 同一套：一台没跟上就意味着全网不一致；
             # **不能**靠“重来一次”：交回过的节点再收到同一批 del 会被
             # 摘要闸拒掉（已经跟上的那几台 δ 已经是新的了）。
-            # 方案约定：不留现场、不补推 —— 已经删掉的那几台就是删掉了。
+            # 方案约定：写失败即作废 —— 已经删掉的那几台就是删掉了。
             raise
 
-        self._pending = None
         self._absorb_deleted(context)
 
     def delete_from(
         self, owner: str, file_key: str
     ) -> tuple[tuple[int, ...], tuple[tuple[str, str], ...]]:
-        r"""把这份文件**以及它之后写进向量的所有块**一起删掉。
+        r"""把**这一份文件**的全部位置删掉（其余文件一个字节都不动）。
+
+        ★ 新方案下每份文件各占一段位置、互不重叠，所以“删一份文件”就是删它自己
+        的全部位置 —— 向量里留下空洞、段永不回收
+        （见 :meth:`core.registry.SegmentRegistry.forget`）；不再需要连带删掉
+        排在它后面的文件（那是“全系统一条向量”才有的束缚）。与被删的那几块
+        打交道的节点会按 ``vds.updates._apply_del`` 把份额退回去。
+
+        :returns: ``(被删掉的下标集合 K, 被删掉的文件键列表)`` —— 新方案下
+            后者恒为 ``((owner, file_key),)``，即只有它自己。
+
+        .. note::
+
+           下面这一段是**旧坐标**（全系统一条向量）下的行为说明，保留供对照：
 
         为什么只能是"从这里删到末尾"：``del`` 只支持向量末尾的连续区间
         （理由见 :meth:`truncate`）。而各文件在向量上占的是**连续区间、
@@ -1393,9 +1328,10 @@ class VectorStore:
         所以向量、承诺、节点手里的份额、摘要 ``δ`` 全都原样有效，
         这些块照样能被任何人验证（"验证不受限"不受影响）。
 
-        为什么要改名而不是删掉：见 :meth:`core.registry.BlockRegistry.rename_owner`
-        —— 登记表只支持从**末尾**截断，压在中间的那些块物理删不掉。
-        而改名之后新账号与它们不再同名，界面上的"可解密"判据就**如实**了。
+        ★ 保留它的用途：测试与旧数据迁移时用得着（把一批块整体改挂）。
+        界面上的“删号”已经不走这条路了 —— 现在是
+        :meth:`StoreManager.delete_user <backend.manager.StoreManager.delete_user>`
+        逐个调用 :meth:`delete_from` 把文件连同数据一起删掉。
 
         ★ 内存与库必须一起改（库那半边由调用方负责）：只改一边的话，
           下次重启 ``manager._reload`` 会重建出另一套身份，两边分叉，
@@ -1447,8 +1383,8 @@ class VectorStore:
         删块时必须跟着抹掉 —— "已经删掉的数据还留着一把钥匙"是删除语义的反面。
 
         ★ 提成钩子（而不是在 :class:`PlainKeyStore` 里覆写 ``truncate``）是为了让
-        **补推路径**也走到它：截断的落库/收尾只有一份（``_settle``），
-        覆写公有方法只能覆盖"第一次就成功"那一次。
+        收尾只写一份：截断的落库与抹密钥都在 ``_settle`` 里，覆写公有方法
+        会把这两件事拆到两个地方。
         """
         return None
 
@@ -1473,15 +1409,14 @@ class VectorStore:
         return out
 
     def _absorb_pushed(self, p: Mapping) -> None:
-        r"""**写推成功之后**统一的那一套账 —— 一次成功与补推成功必须逐字一致。
+        r"""**写推成功之后**统一的那一套账。
 
-        两处都调它，是为了让"补推成功"与"第一次就成功"产生**完全相同**的结果；
-        各写一遍的话，迟早会出现"补推之后账目少了一半"这种只在故障恢复路径上
-        才看得见的偏差。
+        追加 / 改块 / 清零 / 恢复四条写路径都调它 —— 收尾只有**一条路**：
+        本次写推成功了才落库；没成功就退回登记表，当作从未发生。
 
         ``p`` 就是 :meth:`_append` / :meth:`modify` 留下的那份 context：
 
-        * ``delta_new`` —— 推进全局摘要；
+        * ``delta_new`` —— 推进摘要；
         * ``per_index`` —— 每个新下标的**全部**持有者（副本）；
         * ``K`` / ``elements`` —— 新分量；
         * ``on_success`` —— 这次操作**自己的收尾**（登记 FileRecord /
@@ -1510,8 +1445,7 @@ class VectorStore:
         这边是把它们连同 ``_holder`` / ``_replicas`` 里的名字一起**抹掉**。
 
         ``on_success`` 的调用时机与理由与那边完全一致（**账目推进之后**才调，
-        它读的就是刚推进的那些账）—— 所以“第一次就成功”与“补推成功”
-        逐字产生同一结果这件事，在这里同样成立。
+        它读的就是刚推进的那些账）。
         """
         self.deltas[p["file_id"]] = p["delta_new"]
         for j in p["K"]:
@@ -1525,7 +1459,7 @@ class VectorStore:
     def _rollback_add(self, file_id: tuple[str, str], count: int) -> None:
         """★ 把一次**没能完成**的追加所分配的位置退回登记表。
 
-        只在"补推无从谈起"时调用（见 :meth:`_append`）。退回之后：
+        只在一次写推**没能完成**时调用（见 :meth:`_append`）。退回之后：
         ``registry`` 里没有这批位置、:attr:`values` 里也没有它们 ——
         与"这次写从未发生"完全等价。
 
@@ -1538,305 +1472,6 @@ class VectorStore:
             self.registry.drop_tail(*file_id, count)
         except (KeyError, ValueError):
             return
-
-    def retry_pending(self) -> dict:
-        """把上次没推成功的更新**补推给失败的那几台**。
-
-        ★ 为什么必须要它（而不是"再传一次文件"）：
-
-        * 已经跟上的节点 δ 已经是新的，没跟上的还是旧的 —— 全网不一致；
-        * 协调者自己的 δ **没有**推进，但**登记表已经分配过**这批下标了 ——
-          再传一次文件会拿到新下标，而且会撞上
-          "登记表游标与向量长度不一致"。
-
-        所以唯一正确的出路就是**补推同一份负载**（负载在
-        :class:`~core.transport.WriteError` 里带着），全部补上之后才推进自己的账。
-
-        ★ 它**不只是把向量对上**：补成功之后还会调用那次操作自己的收尾回调
-        （``on_success``）—— 比如上传要把 :class:`FileRecord` 登记进
-        :attr:`files`。少了这一步，向量是自洽的，但那份文件在系统里
-        "不存在"，重启重建时还会以"节点与协调者不同步"炸出来。
-
-        :returns: ``{"ok": bool, "nodes": [仍失败的节点], "op": str, "detail": str}``
-
-            ``ok=False`` **不是**“没救” —— 它表示“补了，但还有几台没通”，
-            修好那几台再点一次就行（已经补上的不会再被打扰）。
-        """
-        retry = getattr(self.transport, "retry_write", None)
-        if self._pending is None:
-            return {"ok": True, "nodes": [], "op": "", "detail": "没有待补推的更新"}
-        if retry is None:  # pragma: no cover - 单进程模式的本地传输不走这条路
-            return {
-                "ok": False,
-                "nodes": [],
-                "op": self._pending["error"].op,
-                "detail": f"{type(self.transport).__name__} 不支持补推",
-            }
-
-        p = self._pending
-        still = retry(p["error"])
-        if still:
-            return {"ok": False, "nodes": [str(n) for n in still], "op": p["error"].op}
-
-        op = p["error"].op
-        # 与成功路径**逐字一致**（同一个方法）—— 删除走删除那一套：
-        # 它除了推进 δ，还要把 K 上的分量与持有者记录抹掉。
-        if p.get("kind") == "del":
-            self._absorb_deleted(p)
-        else:
-            self._absorb_pushed(p)
-        self._pending = None
-        return {"ok": True, "nodes": [], "op": op, "detail": "已补齐"}
-
-    def pending_vectors(self) -> dict[int, int]:
-        """待补推那次更新会把哪份文件推到第几块（启动守卫要用）。
-
-        ``{offset: n}`` —— 也就是"已经收下这次更新的那些节点"会报出的样子。
-        没有现场时返回空 dict。
-        """
-        p = self._pending
-        if p is None:
-            return {}
-        d = p["delta_new"]
-        return {int(d.offset): int(d.n)}
-
-    def _readd_registry(
-        self, file_id: tuple[str, str], K: Sequence[int]
-    ) -> None:
-        """把**上一次进程**已经分配过、却没来得及落库的那批位置重新登记上。
-
-        ★★ 为什么重启后必须补这一步（而且只在跨重启那条路上才踩得到）：
-
-          ``registry`` 的游标是**内存**里的，它要等写推成功之后才随
-          ``_persist_globals`` 落库。写失败时游标**已经往前走了**、库里却没有
-          —— 重启从库重建 ⇒ 登记表认为那几个位置**还是空的**。于是补推收敛
-          之后会出现「文件在、登记表里没有」：
-
-          * :meth:`check` 当场 ``KeyError``（账对不上）；
-          * 更要命的是**下一次分配会撞上这批位置** —— 两片数据压在同一批
-            全局下标上，而"第 i 块 ↔ 素数表里第几个"正是靠下标算的，
-            于是两份文件互相污染，症状离现场很远。
-
-        ``K`` 与登记表对不上时**当场报错并把刚分配的退回去**：那说明库里的
-        登记表状态与这次写不是同一个起点（比如库被手工改过），盲目恢复只会
-        把账搅得更乱。
-        """
-        owner, file_key = file_id
-        want = tuple(int(j) for j in K)
-        if not want:
-            return
-        if (
-            self.registry.has(owner, file_key)
-            and tuple(self.registry.positions_of(owner, file_key))[-len(want):] == want
-        ):
-            # ★ 幂等：同一次进程里重装现场（或库里的登记表本来就已经是这段）
-            #   ⇒ 不要**重复分配**。重复分配会让同一批数据压在两段下标上，
-            #   而症状要到很远的地方才看得出来。
-            return
-        # ★★ 必须用 ``restore_position``（**按位置**接回去），**不能**用
-        #    ``alloc`` / ``extend``：那两个入口只会"往后长"，而这批下标是
-        #    **上一次进程**分配的 —— 重启之后登记表的游标是从**已落库的下标**
-        #    重建出来的（= max + 1），与写失败那一刻的位置**未必相同**。
-        #    真链路上实测踩过：现场是 ``[1482, 1483, 1484, 1485]``，
-        #    按游标重建却得到 ``[1467, 1468, 1469, 1470]`` —— 那会把数据接到
-        #    错误的位置上（而按位置接回去才与当初逐个字节一致）。
-        for pos in want:
-            self.registry.restore_position(owner, file_key, pos)
-        got = tuple(self.registry.positions_of(owner, file_key))[-len(want):]
-        if got != want:
-            raise ValueError(
-                f"重启后重建的登记表位置与待补推现场对不上：现场是 {list(K)}，"
-                f"重建出来是 {list(got)} —— 说明库里的登记表状态与那次写不是"
-                f"同一个起点，不能盲目恢复"
-            )
-
-    def pending_write(self) -> dict | None:
-        """有没有"推失败了、还没补"的更新（界面用它决定要不要报警）。"""
-        if self._pending is None:
-            return None
-        exc = self._pending["error"]
-        return {
-            "op": exc.op,
-            "nodes": list(exc.nodes),
-            "failures": list(exc.failures),
-            "blocks": len(self._pending["K"]),
-        }
-
-    # -------------------------------------------------------------------
-    # 待补推现场的**导出 / 恢复**（跨重启）
-    # -------------------------------------------------------------------
-    #
-    # ★★ 为什么需要它（实测踩过）：``_pending`` 只在**内存**里。一旦进程
-    #    没了（用户重启、崩溃、被关窗口），现场就永久丢失 —— 而**节点上
-    #    已经跟进的那几台不会回退**。于是重启时启动守卫看到"节点跑在前面"，
-    #    报一句「存储节点与协调者不同步，拒绝启动」就**把整个系统锁死**，
-    #    而唯一出路是人工去节点上清那半段（``scripts/_node_forget_stray.py``）。
-    #
-    #    修法就是把这份现场落库：重启后先把它恢复回来，守卫才知道
-    #    "节点跑在前面"是**预期**状态（它在等补推），而不是数据出错。
-    #
-    # 难点只有一个：``on_success`` 是**闭包**，过不了重启。所以每一处写路径
-    # 都另外给了一份 ``restore``（同一件事的纯数据版），这里把它与其它字段
-    # 拼成可 JSON 化的一份，恢复时再还原成**等价**的闭包。
-
-    def export_pending(self) -> dict | None:
-        """把待补推现场导成**纯 JSON 可序列化**的一份数据。
-
-        :returns: 没有现场时返回 ``None``。
-        """
-        p = self._pending
-        if p is None:
-            return None
-        exc = p["error"]
-        d = p["delta_new"]
-        owner, file_key = str(p["file_id"][0]), str(p["file_id"][1])
-        # ★ 把 file_id / K 也塞进 restore：恢复时那个闭包只有这份数据可用，
-        #   而它要碰的正是"这份文件"与"这批下标"。
-        restore = dict(p.get("restore") or {})
-        restore["file_id"] = [owner, file_key]
-        restore["K"] = [int(j) for j in p["K"]]
-        return {
-            "op": str(exc.op),
-            "failures": [dict(f) for f in exc.failures],
-            "payloads": {str(k): dict(v) for k, v in exc.payloads.items()},
-            "kind": str(p.get("kind", "add")),
-            "file_id": [owner, file_key],
-            "delta_new": {
-                "U": str(d.U),
-                "C": str(d.C),
-                "n": int(d.n),
-                "offset": int(d.offset),
-                "chunks": [[int(a), int(b)] for a, b in d.chunks],
-                "identity": str(getattr(d, "identity", "") or ""),
-            },
-            "per_index": {
-                str(j): [str(nid) for nid in h]
-                for j, h in (p.get("per_index") or {}).items()
-            },
-            "K": [int(j) for j in p["K"]],
-            "elements": [str(v) for v in p["elements"]],
-            "restore": restore,
-        }
-
-    def import_pending(self, data: Mapping) -> None:
-        """从 :meth:`export_pending` 的结果恢复现场（进程刚起来时用）。
-
-        ★ 没有 ``restore`` 的现场**拒绝恢复**：那种情况下补推成功了也没人
-        能把账记全（``_absorb_pushed`` 里那句 ``done()`` 是登记
-        :class:`FileRecord` 的唯一地方），会造出一个**假的收敛** ——
-        向量自洽、库里却什么都没有。宁可让它按老办法人工处理。
-        """
-        from .transport import WriteError
-
-        restore = dict(data.get("restore") or {})
-        if not restore.get("kind"):
-            raise ValueError(
-                "这份待补推现场没有可恢复的收尾说明（restore）—— "
-                "补推成功之后没人能把账记全，所以不恢复它"
-            )
-        d = data["delta_new"]
-        delta_new = Digest(
-            U=int(d["U"]),
-            C=int(d["C"]),
-            n=int(d["n"]),
-            offset=int(d["offset"]),
-            chunks=tuple((int(a), int(b)) for a, b in (d.get("chunks") or ())),
-            identity=str(d.get("identity", "") or ""),
-        )
-        failures = [dict(f) for f in (data.get("failures") or [])]
-        exc = WriteError(
-            "（重启前留下的现场）有 "
-            + str(len(failures))
-            + " 台存储节点没跟上：\n  "
-            + "\n  ".join(f"{f.get('node')}：{f.get('reason')}" for f in failures),
-            failures,
-            str(data.get("op", "append")),
-            {str(k): dict(v) for k, v in (data.get("payloads") or {}).items()},
-        )
-        fid = data["file_id"]
-        kind = str(data.get("kind", "add"))
-        # ★ 登记表那一步要在装现场**之前**补回来：它在上一次进程里已经分配过
-        #   这批下标（见 :meth:`_readd_registry`）。装完之后 `_absorb_pushed`
-        #   一跑，账目就齐了 —— 与"第一次就成功"逐字一致。
-        if kind == "add":
-            self._readd_registry((str(fid[0]), str(fid[1])), data["K"])
-        self._pending = {
-            "error": exc,
-            "kind": kind,
-            "file_id": (str(fid[0]), str(fid[1])),
-            "delta_new": delta_new,
-            "per_index": {
-                int(j): tuple(str(nid) for nid in h)
-                for j, h in (data.get("per_index") or {}).items()
-            },
-            "K": tuple(int(j) for j in data["K"]),
-            "elements": tuple(int(v) for v in data["elements"]),
-            "on_success": self._rebuild_on_success(restore),
-            "restore": restore,
-        }
-
-    def _rebuild_on_success(self, restore: Mapping) -> Callable[[], None]:
-        """把 ``restore`` 那份纯数据还原成与原来**等价**的收尾闭包。
-
-        ★ 四个分支与四处写路径里的闭包**逐字对应**（``_register`` /
-          ``_patch_record`` / ``_extend`` / ``truncate._settle``）。
-          改任何一边都要改另一边 —— 不然"补推成功"与"第一次就成功"
-          会算出两本不同的账，而那种偏差只在故障恢复路径上才看得见。
-        """
-        kind = str(restore["kind"])
-        owner, file_key = str(restore["file_id"][0]), str(restore["file_id"][1])
-        kids = tuple(int(j) for j in (restore.get("K") or ()))
-
-        if kind == "file":
-            rec = _record_from_data(restore["record"])
-
-            def done_file() -> None:
-                self.files[(owner, file_key)] = rec
-
-            return done_file
-
-        if kind == "iv":
-            idx = int(restore["block_idx"])
-            iv = bytes.fromhex(str(restore["iv"]))
-            plain_len = int(restore["plain_len"])
-
-            def done_iv() -> None:
-                rec = self.files[(owner, file_key)]
-                rec.ivs[idx] = iv
-                rec.plain_lengths[idx] = plain_len
-                rec.total_bytes = sum(rec.plain_lengths)
-
-            return done_iv
-
-        if kind == "extend":
-            ivs = [bytes.fromhex(str(h)) for h in restore["ivs"]]
-            lens = [int(x) for x in restore["lens"]]
-            add_bytes = int(restore["add_bytes"])
-
-            def done_extend() -> None:
-                rec = self.files[(owner, file_key)]
-                rec.indices = rec.indices + kids
-                rec.ivs.extend(ivs)
-                rec.plain_lengths.extend(lens)
-                rec.total_bytes += add_bytes
-
-            return done_extend
-
-        if kind == "truncate":
-            drop = int(restore["drop"])
-
-            def done_truncate() -> None:
-                self.registry.drop_tail(owner, file_key, drop)
-                rec = self.files[(owner, file_key)]
-                rec.indices = rec.indices[:-drop]
-                rec.ivs = rec.ivs[:-drop]
-                rec.plain_lengths = rec.plain_lengths[:-drop]
-                rec.total_bytes = sum(rec.plain_lengths)
-                self._forget_block_keys(owner, file_key, rec.block_count)
-
-            return done_truncate
-
-        raise ValueError(f"不认识的收尾说明类型 {kind!r}")
 
     def _plan(
         self, K: tuple[int, ...], pool: Sequence[str] | None = None
@@ -1949,8 +1584,10 @@ class VectorStore:
     def query(self, indices, *, allow_partial: bool = False) -> QueryResult:
         """向服务器索取若干下标的**内容 + 一份聚合证据**，并验证。
 
-        ``indices`` 是**全局下标**，天然可以横跨任意多个文件、任意多个用户 ——
-        这是设计 B 相对"一文件一向量"的核心差别，不需要任何额外机制。
+        ``indices`` 是**全局位置号**，可以横跨任意多个文件、任意多个用户 ——
+        每份文件一条独立向量，所以跨文件时要在**合并位置集**上重算一份证据与
+        合并承诺（算法核要求同一份文件内的下标两两不交）；这一步由协调者完成，
+        调用方看到的仍是一份聚合证据。
 
         :param allow_partial: 有下标**没有任何在线副本**时怎么办。
 
@@ -2575,7 +2212,7 @@ class VectorStore:
             以及验证结论。``ok=False`` 时 ``message`` 说清是哪一环没过。
         """
         if file_id is None:
-            # ★ 逐份跑 —— 审计要的是“每一份文件都还在”，而不是“全局向量还在”。
+            # ★ 逐份跑 —— 审计要的是“每一份文件都还在”，而不是“向量整体还在”。
             each = [
                 self.pos_audit(file_id=fid, lambda_pos=lambda_pos, rng=rng)
                 for fid in sorted(self.files)
@@ -2732,7 +2369,7 @@ class VectorStore:
     # -------------------------------------------------------------------
 
     def authoritative_digest(self, file_id: tuple[str, str]) -> Digest:
-        """用"一次性承诺"独立重算全局摘要 —— 只用于自检。
+        """用"一次性承诺"独立重算**这一份文件**的摘要 —— 只用于自检。
 
         增量维护的 ``(U, C)`` 必须与"对整条向量做一次 ``commit``"逐位相同。
         两条路径在实现上完全独立（一条是 :func:`svc.add_back` 迭代，
@@ -2906,18 +2543,15 @@ class VectorStore:
         它不是“账实不符”，所以**不放进** :meth:`check` 拦下 —— 那是提示，
         不是错误；界面把它显示出来，想出副本重新传一次就行。
 
-        ★★ 必须容忍「登记表已分配、但还没落账」的下标。
-        那正是**待补推窗口**：一次追加失败会把现场留住（等「补推」），
-        而下标在失败**之前**就已经从登记表取走了 —— 此时 ``self._holder``
-        里还没有它，``replicas_of(i)`` 会抛 ``KeyError``。
-
-        而本函数是 ``/api/status`` 的必答题（每个页面都在轮询它），
-        所以那个 ``KeyError`` 会变成**每次都 500**，而且恰好发生在
-        最需要看到「待补推」提示的时候 —— 实测踩到：掉线一台、写一次失败，
+        ★★ 必须容忍「登记表里暂时还有、但已经不属于向量」的下标。
+        一次写推失败会把刚分配的位置退回登记表（见 :meth:`_rollback_add`），
+        但在那之前 ``self._holder`` 里还没有它们，``replicas_of(i)`` 会抛
+        ``KeyError``。而本函数是 ``/api/status`` 的必答题（每个页面都在
+        轮询它），所以那个 ``KeyError`` 会变成**每次都 500**，而且恰好
+        发生在最需要看清状态的时候 —— 实测踩到：掉线一台、写一次失败，
         之后整个界面全是「服务器内部错误」。
 
-        语义上也该跳过：那个下标此刻**不属于向量**（协调者没推进自己的账），
-        「副本不足」根本谈不上。
+        语义上也该跳过：那个下标此刻**不属于向量**，「副本不足」谈不上。
         """
         want: set[int] = set()
         for f in self.files:
@@ -2927,7 +2561,7 @@ class VectorStore:
             try:
                 holders = self.replicas_of(i)
             except KeyError:
-                # 待补推窗口里的新下标（见上面的说明）。
+                # 退回登记表还没跑完的那批新下标（见上面的说明）。
                 continue
             if len(holders) < self.replica_factor:
                 out.append(i)
@@ -2941,7 +2575,7 @@ class VectorStore:
         """
         rows = self.transport.report(verify=True)
         # ★ 节点自己只知道**文件内局部块号**（它按 offset 分视图），所以
-        #   “这些块在全局向量里占哪个位置”只有协调者补得出来 —— 用各文件的
+        #   “这些块在全局位置上占哪一格”只有协调者补得出来 —— 用各文件的
         #   位置段把局部块号映回全局位置。顺便把旧字段（indices / n / span）
         #   补回去，依赖它们的页面就不必跟着改。
         by_off: dict[int, tuple[str, str]] = {
@@ -3038,8 +2672,8 @@ def _full_holder(
     **空向量**承诺一次」：``specialize(crs, 0)`` 的 ``U_0`` 就是 ``g``，
     ``commit(crs_0, []).C`` 就是 ``1``。
 
-    实测（``scripts/_probe_truncate2.py``）：这样算出的新摘要与「对截断后的
-    向量重新做一次 :func:`svc.commit`」**逐位相同**，而且它的
+    实测（``scripts/verify_version_restore.py``）：这样算出的新摘要与
+    「对截断后的向量重新做一次 :func:`svc.commit`」**逐位相同**，而且它的
     ``check_local_view()`` 为真 —— 它确实是一个合法本地视图，不是硬凑的数。
     """
     idx = tuple(range(delta.n))
@@ -3135,14 +2769,13 @@ class PlainKeyStore(VectorStore):
             #
             #   块密钥是在加密循环里就生成并交出来的（``key_sink``），
             #   而那已经发生在写推**之前**。所以写推失败时这些钥匙
-            #   已经存在了 —— 只不过这个便捷子类习惯在成功之后才登记它们。
-            #   若在这里丢掉：补推把向量补齐之后，内容**照样读不出来**
-            #   （"内存里没有这份文件的块密钥"）—— 补推看起来成功、
-            #   实际用不了，是最难查的那种半成品状态。
+            #   已经存在了，只是这个便捷子类习惯在成功之后才登记它们。
+            #   与"这次上传作废"并不矛盾：文件不会出现在 :attr:`files` 里，
+            #   这几把钥匙也无人再取 —— 留着它们是为了让钥匙表如实反映
+            #   "当初确实生成过这些密钥"，而不是留下一个说不清的半截状态。
             #
             #   （真正的系统走 ``backend/manager.py``：``sink`` 当场把密钥
-            #   用所有者公钥封成密文存进 ``key_cts``，所以那边天然没这个问题。
-            #   这一条是"调用方自己的收尾也要跟着补推走"的又一例。）
+            #   用所有者公钥封成密文存进 ``key_cts``，所以那边天然没这个问题。）
             self._plain_keys[(owner, file_key)] = box
             raise
         self._plain_keys[(owner, file_key)] = box

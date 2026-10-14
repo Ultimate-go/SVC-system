@@ -22,7 +22,7 @@
 
 .. note::
 
-   库建在 ``scripts/`` 里、用完即删，**不碰**项目根那份 ``vds.db``。
+   库建在**系统临时目录**里、用完即删，**不碰**项目根那份 ``vds.db``。
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,7 +287,7 @@ check("★★ 演练全程零破坏（快照逐位相同）", snapshot(_inner) =
 # ===========================================================================
 section("5. 管理端接口：fault_drill + 影响面")
 
-DB_FILE = ROOT / "scripts" / "_tmp_fault_drill.db"
+DB_FILE = Path(tempfile.gettempdir()) / "vds_fault_drill.db"
 for suffix in ("", "-wal", "-shm"):
     p = Path(str(DB_FILE) + suffix)
     if p.exists():
@@ -410,7 +411,7 @@ print("[cleanup] 已删除临时库")
 # ===========================================================================
 section("6. HTTP 接口层（前端实际会打的那两条）")
 
-DB2 = ROOT / "scripts" / "_tmp_fault_drill_http.db"
+DB2 = Path(tempfile.gettempdir()) / "vds_fault_drill_http.db"
 for suffix in ("", "-wal", "-shm"):
     p = Path(str(DB2) + suffix)
     if p.exists():
@@ -582,15 +583,13 @@ class _CrossProc:
     def adopt(self, node_id, **kw): self._request("POST", node_id, "/node/adopt")
     def apply_append(self, **kw):
         failures: list[dict] = []
-        payloads: dict[str, dict] = {}
         for nid in self.node_ids:
             try:
                 self._request("POST", nid, "/node/append", json={})
             except TransportError as exc:
                 failures.append({"node": nid, "reason": str(exc)})
-                payloads[nid] = {"assigned": [0], "mark": f"payload-for-{nid}"}
         if failures:
-            raise WriteError("有节点没能跟上这次更新", failures, "append", payloads)
+            raise WriteError("有节点没能跟上这次更新", failures, "append")
     def apply_update(self, **kw): ...
     def drop(self, offset, positions): ...
     def apply_delete(self, **kw): ...
@@ -637,9 +636,6 @@ check("★★ 掉线期间广播写**失败**（而不是假成功）", isinstan
       type(_err).__name__)
 if isinstance(_err, WriteError):
     check("★★ 失败清单点名了那台节点", _err.nodes == ["x2"], str(_err.nodes))
-    check("★★ 失败清单里带着那台“没送出去”的请求体",
-          (_err.payloads.get("x2") or {}).get("mark") == "payload-for-x2",
-          str(_err.payloads)[:120])
     check("★ 健康的那台确实收到了这次写，故障那台一次都没发出去",
           _inner.sent == {"x1": 1}, str(_inner.sent))
 

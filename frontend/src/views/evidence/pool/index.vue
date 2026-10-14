@@ -1444,7 +1444,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <!-- 聚合 / 分解过程：这两件事是"设计 B"最少见也最值得讲的部分。 -->
+    <!-- 聚合 / 分解过程：这两件事在界面上最少见，也最值得讲。 -->
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"

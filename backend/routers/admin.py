@@ -1,6 +1,8 @@
 """管理员路由：增删用户、看审计流水、触发全量自检、改**服务器台数**。
 
-**只有 ``admin`` 角色能进**（``Depends(require_admin)``）。
+**多数路由要 ``admin`` 角色**（``Depends(require_admin)``）。两处例外：
+``patch_user`` 改自己的登录凭证只要求**已登录**，``run_check`` 任何登录
+用户都能打 —— 自检不含任何秘密，让所有用户都能自查是刻意的。
 """
 
 from __future__ import annotations
@@ -269,11 +271,16 @@ def delete_user(
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
-    # ★★ 内存与库必须**同时**改，而且要在**同一把写锁**里（审计 S1 / S2）：
-    #   内存侧 ``registry`` / ``files`` / ``deltas``（还有子类的块密钥表）
-    #   与库侧 ``blocks`` / ``files`` / ``file_deltas`` 六处一起改名。
-    #   所以整件事搬进了 :meth:`StoreManager.delete_user` ——
-    #   路由层只做参数校验的话，"改名"这一步就落在锁外面了。
+    # ★ 删号 = **删文件**（2026-10-14 改）：整件事在
+    #   :meth:`StoreManager.delete_user` 里、同一把写锁内完成 —— 逐个文件走
+    #   ``delete_file`` 的**完整链路**（内存账目 + 向量位置 + 库行 + 节点份额），
+    #   最后删 ``users`` 行。
+    #
+    #   以前的做法是“把文件改挂到墓碑名”，理由是“压在中间的块物理删不掉”；
+    #   底座支持删任意位置的文件之后，那条理由不再成立。
+    #
+    #   ★ “停用”仍然**不删文件**：停用只改 disabled 与撤令牌，文件原样保留，
+    #     在列表里用「所有者已停用」标识出来。两条路的差别就在这里。
     try:
         out = mgr.delete_user(user_id, actor=admin.username)
     except NotFound as exc:
@@ -282,48 +289,33 @@ def delete_user(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
     username = out["deleted"]
-    n_files = out["files_left"]
-    tomb = out["tomb_name"]
-    # ★ 墓碑名的构造搬到了 :meth:`StoreManager.delete_user`（它要带 ``#id`` 保唯一，
-    #   而只有那边能在同一个事务里拿到 ``user.id``）。这里只保留一条说明：
-    #
-    #   为什么必须"改名"而不是"删行"：登记表（``core.registry``）只支持从
-    #   **末尾**截断，压在中间的块物理删不掉；改名则不动任何下标、不动任何
-    #   代数量 —— 这些块照样能被任何人验证，而新账号与它们不再同名，
-    #   界面上"可解密"那条判据就**如实**了（不再出现"列表说能解、点了 403"）。
-    #
-    # 原实现保留在这里，说明为什么搬走：
-    #   它在**锁外面**直接 ``mgr.store.rename_owner(...)``，而那只改内存；
-    #   库那半边只 update 了 ``blocks`` / ``files`` 两张表 —— ``file_deltas``
-    #   被漏掉。改完之后：运行期 ``delta_of(墓碑名)`` KeyError → 文件列表 500；
-    #   重启后 ``_reload`` 从 ``blocks``（墓碑名）与 ``file_deltas``（旧名）
-    #   重建出**两套身份**，而且**不自愈**。
-    #   现在这三件事都在 :meth:`StoreManager.delete_user` 里、同一把锁内。
+    n_files = int(out.get("files_deleted") or 0)
+    n_blocks = int(out.get("blocks_deleted") or 0)
+    # ★ 删号之后令牌必须**立刻失效**：用户行没了，但已签发的令牌仍在 TTL 内，
+    #   不撤的话它会带着一个已不存在的身份继续访问（与“停用”同一条纪律）。
+    mgr.revoke_user_tokens(username, reason="删号")
     audit(
         db,
         admin.username,
         "user_delete",
         username,
         detail=(
-            f"该用户名下的 {n_files} 份文件已改挂到墓碑名 {tomb}"
-            f"（仍在向量里、仍可验证，但从此没有任何人能解密）"
+            f"该用户名下的 {n_files} 份文件（共 {n_blocks} 块）已连同数据一并删除，"
+            f"并撤销了全部令牌"
         ),
     )
     return {
         "ok": True,
         "deleted": username,
-        "files_left": n_files,
-        "tomb_name": tomb,
+        "files_deleted": n_files,
+        "blocks_deleted": n_blocks,
+        "deleted_files": out.get("deleted_files") or [],
         "warning": (
             f"{username} 已删除，用户名可以重新使用了。\n\n"
-            f"他名下的 {n_files} 份文件还在全局向量里（方案上物理删不掉："
-            f"登记表与向量是从 blocks 表重建的，只支持从末尾截断），"
-            f"现在挂在墓碑名 {tomb} 下面：\n"
-            f"  · 任何人仍然可以验证它们的完整性（验证不受限）；\n"
-            f"  · 但从此以后没有任何人能解开它们 —— 包括管理员"
-            f"（块密钥是用他当时的公钥封的，没有第二把钥匙）。\n\n"
-            f"重新建一个同名的 {username} 不会继承上面任何东西："
-            f"他会拿到一对全新的密钥，那些旧文件在他眼里是 🔒。"
+            f"他名下的 {n_files} 份文件（共 {n_blocks} 块）已随账号一起删除：\n"
+            f"  · 文件不再出现在列表里，也不能再被验证；\n"
+            f"  · 各存储节点上对应的分块份额已一并清除，密文与块密钥均不可恢复。\n\n"
+            f"重新建一个同名的 {username} 是一个全新的账号，不会继承任何东西。"
         ),
     }
 

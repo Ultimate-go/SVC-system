@@ -25,13 +25,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # ★ 必须在 import Settings 之前设好：db_path 的 default_factory 会读它。
-DB_FILE = ROOT / "scripts" / "_tmp_identity_restart.db"
+# ★ 落**系统临时目录**，不在仓库里留脏文件。
+DB_FILE = Path(tempfile.gettempdir()) / "vds_identity_restart.db"
 os.environ["VDS_DB_PATH"] = str(DB_FILE)
 os.environ.setdefault("VDS_SECRET_KEY", "identity-restart-test-key")
 

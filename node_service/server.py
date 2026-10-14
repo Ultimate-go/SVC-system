@@ -264,13 +264,11 @@ class NodeRuntime:
     def append(self, payload: dict) -> dict:
         """一次追加：先 ``ApplyUpdate`` 跟上新 ``n``，再 ``AddStorage`` 收下指派的位置。
 
-        ★ 这个方法**幂等**：同一批追加被投递两次不会追加两遍。
+        ★ 重复投递会被 409 拒掉（过时摘要守卫），不会追加两遍。
 
         靠的不是幂等键，而是下面那句 ``self.state.delta != delta_old`` ——
         ``delta_old`` 描述的是"变更**前**"的状态，而节点应用过一次之后
         ``state.delta`` 已经前进了，所以重放时两者永不可能相等，直接 409。
-
-        （守门测试：``tests/test_nodes.py::Test节点行为::test_过时摘要的更新会被拒``。）
         """
         with self._lock:
             self._need_session()
@@ -583,10 +581,9 @@ class NodeRuntime:
         3. 因此必须**真删密文** —— 只改 ``I`` 会让 :meth:`check
            <core.node_state.NodeState.check>` 判处"下标与密文对不上"。
 
-        ``del`` 单独一个路由（而不是并进 :meth:`update`）是为了让「补推」机制
-        原样复用：``core.transport.WriteError`` 的 ``op`` 就是路由名，
-        ``retry_write`` 直接拼 ``/node/{op}`` —— 所以 ``op="delete"``
-        天然对上 ``/node/delete``，一行都不用改。
+        ``del`` 单独一个路由（而不是并进 :meth:`update`）：它的载荷形状
+        与 ``mod`` 不同（要交回哪些位置，而不是替换某一块的内容），
+        混在一个路由里会让两侧都要靠字段名猜是哪种操作。
         """
         with self._lock:
             self._need_session()

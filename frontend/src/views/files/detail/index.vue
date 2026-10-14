@@ -1,10 +1,10 @@
 <script setup>
 /**
- * 文件详情 / 变更文件（★ 2026-10-12 拆页面：同一个组件两种形态，靠路由 meta 区分）。
+ * 文件详情 / 更新文件（★ 2026-10-12 拆页面：同一个组件两种形态，靠路由 meta 区分）。
  *
  *   · files-detail        → 「文件详情」：只读 —— 摘要与参数 / 封装过程 /
  *                            块分布矩阵 / 块明细；
- *   · files-update-detail → 「变更文件」：在上面的基础上多出更新 / 置零 /
+ *   · files-update-detail → 「更新文件」：在上面的基础上多出更新 / 置零 /
  *                            追加 / 截断 / 回滚演示 / 解密验证。
  *
  * ★ 为什么复用同一个组件而不是拷一份：这些能力读的是**同一份状态**
@@ -131,6 +131,20 @@ const replayNoInput = computed({
 
 const writeRunning = ref(false)
 const writeTimings = ref(null)
+/**
+ * 写操作的端到端耗时（毫秒）：从点下按钮到**这个请求返回**的墙钟差值。
+ *
+ * ★ 与上传那条线同一口径：读条量的是“这一次写操作”，用 performance.now()
+ *   做差（单调时钟），不用定时器累加 —— 标题里的总耗时必须是准确值。
+ */
+const writeElapsed = ref(0)
+function markWriteStart() {
+  writeElapsed.value = 0
+  return performance.now()
+}
+function markWriteEnd(t0) {
+  if (t0) writeElapsed.value = Math.round(performance.now() - t0)
+}
 
 // 解密
 const decrypting = ref(false)
@@ -317,7 +331,7 @@ async function load() {
     file.value = f
     nodes.value = n
     if (f.layout?.length) modifyForm.blockIdx = f.layout[0].block_idx
-    // 回退面板要用它 —— 只在「变更文件」形态下拉（详情页不显示这块）。
+    // 回退面板要用它 —— 只在「更新文件」形态下拉（详情页不显示这块）。
     await loadHistory()
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '加载失败'
@@ -337,6 +351,8 @@ const history = ref([])
 const historyLoading = ref(false)
 const restoring = ref(false)
 const restoreResult = ref(null)
+/** 回退操作的端到端耗时（与上传、写操作同一口径）。 */
+const restoreElapsed = ref(0)
 
 async function loadHistory() {
   if (!showOps.value) {
@@ -370,9 +386,12 @@ async function doRestore() {
   }
   restoring.value = true
   restoreResult.value = null
+  restoreElapsed.value = 0
+  const t0 = performance.now()
   try {
     const { data } = await filesApi.restore(id.value, null)
     restoreResult.value = data
+    restoreElapsed.value = Math.round(performance.now() - t0)
     ElMessage.success(`已回退 ${data.count} 个分块；当前为第 ${data.version} 版（聚合承诺已重算）`)
     await load()
   } catch (e) {
@@ -388,9 +407,11 @@ async function doModify() {
   const body = { op: 'modify', block_idx: idx, data_b64: toB64(text) }
   writeRunning.value = true
   writeTimings.value = null
+  const t0 = markWriteStart()
   try {
     const { data } = await filesApi.patch(id.value, body)
     writeTimings.value = data.timings
+    markWriteEnd(t0)
     // ★ 内容是我自己刚写进去的 —— 顺手把本地锚更新掉，下次看这块就有判据了。
     await anchorBytes(idx, new TextEncoder().encode(text), data, '更新')
     // ★ δ 变了（是**你自己**改的）—— 把本地钉的那一份丢掉，
@@ -434,9 +455,11 @@ async function doZero() {
   }
   writeRunning.value = true
   writeTimings.value = null
+  const t0 = markWriteStart()
   try {
     const { data } = await filesApi.zero(id.value, idx)
     writeTimings.value = data.timings
+    markWriteEnd(t0)
     // ★ 清零后的内容是**等长的全 0 字节**（长度就是原 plain_len）—— 客户端知道它，
     //   所以同样锚得下来，下次看这块一样能判服务器有没有换。
     await anchorBytes(idx, new Uint8Array(data.zeroed?.bytes ?? len ?? 0), data, '置零')
@@ -456,9 +479,11 @@ async function doAppend() {
   const body = { op: 'append', data_b64: toB64(appendText.value) }
   writeRunning.value = true
   writeTimings.value = null
+  const t0 = markWriteStart()
   try {
     const { data } = await filesApi.patch(id.value, body)
     writeTimings.value = data.timings
+    markWriteEnd(t0)
     dropDeltaAnchor(id.value)
     ElMessage.success(`已追加 ${data.added_blocks} 个分块，共 ${data.block_count} 个分块`)
     appendText.value = ''
@@ -482,9 +507,11 @@ async function doTruncate() {
   const body = { op: 'truncate', drop_blocks: dropBlocks.value }
   writeRunning.value = true
   writeTimings.value = null
+  const t0 = markWriteStart()
   try {
     const { data } = await filesApi.patch(id.value, body)
     writeTimings.value = data.timings
+    markWriteEnd(t0)
     dropDeltaAnchor(id.value)
     ElMessage.success(`已截断末尾 ${data.dropped_blocks} 个分块`)
     await load()
@@ -816,7 +843,7 @@ onMounted(load)
            右边演示服务端返回旧版本数据。并排一行，窄屏自动落回单列。 -->
       <div v-if="showOps && isMine" class="ops-row">
       <!-- 版本回退：把留过上一版的分块换回去，并重新承诺。
-           只出现在「变更文件」形态、而且只有所有者看得到：它换回的是旧密文
+           只出现在「更新文件」形态、而且只有所有者看得到：它换回的是旧密文
            与旧块密钥（回退后重新生效），与更新是同一级别的权限。 -->
       <div class="panel">
         <div class="sec-head">
@@ -865,7 +892,7 @@ onMounted(load)
           class="mt-2"
           :title="`已回退 ${restoreResult.count} 个分块；当前为第 ${restoreResult.version} 版，聚合承诺已重算（本页数据已刷新）`"
         >
-          <StageTimeline v-if="restoreResult.timings" :timings="restoreResult.timings" class="mt-2" />
+          <StageTimeline v-if="restoreResult.timings" :timings="restoreResult.timings" :total-ms="restoreElapsed" class="mt-2" />
         </el-alert>
 
         <details class="note-collapse">
@@ -880,7 +907,7 @@ onMounted(load)
       </div>
 
       <!-- 回滚演示：让服务端返回旧版本数据（演示「服务端不可信」）。
-           只出现在「变更文件」形态、只有所有者看得到：非所有者既改不了分块，
+           只出现在「更新文件」形态、只有所有者看得到：非所有者既改不了分块，
            也就没有「服务端返回旧版本」这一幕可演。 -->
       <div class="panel">
         <div class="sec-head">
@@ -1091,7 +1118,7 @@ onMounted(load)
             </div>
           </el-tab-pane>
         </el-tabs>
-        <StageTimeline v-if="writeTimings" :timings="writeTimings" class="mt-3" />
+        <StageTimeline v-if="writeTimings" :timings="writeTimings" :total-ms="writeElapsed" class="mt-3" />
       </div>
 
       <div v-if="showOps" class="panel">

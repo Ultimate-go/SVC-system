@@ -1,4 +1,4 @@
-"""系统状态路由：全局摘要、块分布、自检入口、存储证明。"""
+"""系统状态路由：逐文件摘要、块分布、自检入口、存储证明。"""
 
 from __future__ import annotations
 
@@ -84,10 +84,10 @@ def status(
     _: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
 ):
-    """全局摘要 :math:`\\delta = ((U, C), n)` 与公开参数。
+    """公开参数与逐文件摘要（每份文件一个 :math:`\\delta = ((U, C), n)`）。
 
-    ``n`` 是全系统**已用位置数**（不是某个文件的长度）—— 设计 B 下
-    它就是"全局块数"。
+    ``n`` 是全系统**已用位置数**（各文件块数之和，不含历史空洞），
+    不是任何一份文件的长度；要按文件看就看响应里的 ``files``。
     """
     return mgr.status()
 

@@ -28,6 +28,8 @@ const loading = ref(false)
 const pwdForm = reactive({ password: '', confirm: '' })
 const changing = ref(false)
 const changeTimings = ref(null)
+/** 改口令的端到端耗时（毫秒，含浏览器本地重封私钥的 PBKDF2 耗时）。 */
+const changeElapsed = ref(0)
 
 const user = computed(() => auth.user)
 
@@ -96,6 +98,9 @@ async function changePassword() {
   }
   changing.value = true
   changeTimings.value = null
+  // ★ 端到端：本地重封私钥（PBKDF2-HMAC-SM3 二十万次）也算在内 ——
+  //   它确实是“改口令”这件事里用户等的一部分。
+  const t0 = performance.now()
   try {
     let skWrapped
     try {
@@ -109,6 +114,7 @@ async function changePassword() {
       sk_wrapped: skWrapped,
     })
     changeTimings.value = data.timings
+    changeElapsed.value = Math.round(performance.now() - t0)
     pwdForm.password = ''
     pwdForm.confirm = ''
     // ★★ 改口令 = 后端**撤销这个人全部已签发的令牌**（正确的止损设计：
@@ -233,7 +239,7 @@ onMounted(() => {
           <el-button type="primary" :loading="changing" @click="changePassword">修改口令</el-button>
         </el-form-item>
       </el-form>
-      <StageTimeline v-if="changeTimings" :timings="changeTimings" class="mt-3" />
+      <StageTimeline v-if="changeTimings" :timings="changeTimings" :total-ms="changeElapsed" class="mt-3" />
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">修改口令会重新生成并保存密钥</p>

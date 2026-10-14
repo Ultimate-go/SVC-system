@@ -43,10 +43,12 @@ const metaHint = computed(() => {
   return parts.join(' · ')
 })
 
-/** 填充动画时长：按实际总耗时缩放，夹在 0.5~1.6 秒内。 */
+/** 填充动画时长：按**标题里那个总耗时**缩放，夹在 0.4~1.6 秒内。
+ *  ★ 用 shownTotal（端到端优先）而不是后端埋点总计：动画表现的是一次用户
+ *    操作的等待时长，那个数才是用户眼中的“这次花了多久”。 */
 const animMs = computed(() => {
-  const t = Number(perf.value.total_ms) || 0
-  return Math.max(500, Math.min(1600, Math.round(t * 0.6)))
+  const t = Number(shownTotal.value) || 0
+  return Math.max(400, Math.min(1600, Math.round(t * 0.5)))
 })
 
 const fillTone = computed(() =>
@@ -74,16 +76,24 @@ const toneCss = {
 
     <div class="fill-body">
       <div class="fill-track" :class="`is-${fillTone}`">
-        <span class="fill" :style="{ animationDuration: animMs + 'ms' }" />
+        <span class="fill" :style="{ animationDuration: animMs + 'ms' }">
+          <i
+            v-for="(s, i) in perf.stages"
+            :key="i"
+            class="seg"
+            :style="{ width: s.pct + '%', background: toneCss[s.tone] }"
+            :title="`${s.stage} ${formatMs(s.ms)}`"
+          />
+        </span>
       </div>
 
-      <!-- 每一步单独一行：阶段名与该步耗时。 -->
+      <!-- 每一步单独一行：只给阶段名与调用次数。
+           时间不在这里重复 —— 标题里的总耗时是唯一的耗时刻度。 -->
       <ol class="stage-rows">
         <li v-for="(s, i) in perf.stages" :key="i" class="row">
           <span class="dot" :style="{ background: toneCss[s.tone] }" />
           <span class="name">{{ s.stage }}</span>
           <span v-if="s.count > 1" class="count mono">×{{ s.count }}</span>
-          <span class="ms mono">{{ formatMs(s.ms) }}</span>
         </li>
       </ol>
     </div>
@@ -120,25 +130,33 @@ details[open] > .fill-summary .fill-tri { transform: rotate(90deg); }
   gap: 9px;
   margin-top: 9px;
 }
-/* ---------- 填充条：动画结束停在满格 ---------- */
+/* ---------- 分段彩条：每段宽度 = 该步耗时 ÷ 各步之和，整条从 0 拉到满格 ---------- */
 .fill-track {
   position: relative;
-  height: 6px;
-  border-radius: 3px;
+  height: 8px;
+  border-radius: 4px;
   overflow: hidden;
   background: var(--bg-raised);
 }
 .fill {
-  display: block;
+  display: flex;
   height: 100%;
   transform-origin: left center;
   animation-name: fill-grow;
   animation-timing-function: cubic-bezier(.22, .8, .28, 1);
   animation-fill-mode: both;
 }
-.fill-track.is-accent .fill { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
-.fill-track.is-ok .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 70%, var(--accent)), var(--ok)); }
-.fill-track.is-danger .fill { background: linear-gradient(90deg, color-mix(in srgb, var(--danger) 65%, var(--warn)), var(--danger)); }
+/* 每一段：宽度由耗时占比决定（占比以各段之和为分母，所以刚好填满）。 */
+.seg {
+  display: block;
+  height: 100%;
+  flex: none;
+  min-width: 1px;
+  box-shadow: inset -1px 0 rgba(0, 0, 0, .38);
+}
+.seg:last-child { box-shadow: none; }
+/* 结论为 fail 时只给整条加一道告警描边，不改各段自身的颜色语义。 */
+.fill-track.is-danger { box-shadow: inset 0 0 0 1px var(--danger); }
 .fill-track::after {
   /* 扫光用于指示填充进行中，随填充一同停止。 */
   content: '';
@@ -191,5 +209,4 @@ details[open] > .fill-summary .fill-tri { transform: rotate(90deg); }
 }
 .row .name { color: var(--text-2); }
 .row .count { color: var(--text-3); }
-.row .ms { margin-left: auto; color: var(--text-1); white-space: nowrap; }
 </style>

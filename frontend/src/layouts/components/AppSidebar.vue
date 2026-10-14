@@ -42,7 +42,7 @@ const core = {
   items: [
     { path: '/', name: 'dashboard', icon: 'dashboard', label: '总览', exact: true },
     { path: '/files', name: 'files', icon: 'file', label: '上传文件' },
-    // ★ 2026-10-12：「变更文件」紧跟在「上传文件」后面（同一件事的下一半 ——
+    // ★ 2026-10-12：「更新文件」紧跟在「上传文件」后面（同一件事的下一半 ——
     //   先传进来，之后要改就进这一页），与「完整性验证」并列。
     { path: '/files/update', name: 'files-update', icon: 'refresh', label: '更新文件' },
     { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },

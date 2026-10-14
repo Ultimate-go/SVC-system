@@ -181,7 +181,7 @@ async function loadFiles() {
 
     // 刷新后可能少了几份文件：把已经不在的人从勾选里摘掉
     pickedIds.value = pickedIds.value.filter((id) => list.some((f) => f.id === id))
-    if (!list.length) loadError.value = '库里还没有任何文件 —— 先到「文件与块」页上传一份'
+    if (!list.length) loadError.value = '库里还没有任何文件 —— 先到「上传文件」页上传一份'
   } catch (e) {
     loadError.value = e?.response?.data?.detail || e?.message || '加载文件列表失败'
   } finally {
@@ -294,8 +294,8 @@ async function verifyBasket() {
   basketResult.value = null
   basketError.value = ''
   try {
-    // ★ 一次请求把整个集合验完：所有块都在同一条向量里，任意下标子集
-    //   本来就能聚成**一份**证据、一次验证（这正是设计 B 的好处）。
+    // ★ 一次请求把整个集合验完：集合里可能跨了多份文件，后端会在
+    //   合并位置集上重算一份证据，所以这里仍然只发一次请求、只验一次。
     const { data } = await evidenceApi.query(basket.indices, basketAllowPartial.value)
     basketResult.value = data
     basket.syncN(data?.delta_n)
@@ -643,7 +643,7 @@ async function runQuery() {
 /**
  * 「当前文件与块数」（按全局下标验证那边）。
  *
- * ★ 一个证据可以横跨多个文件（设计 B），所以这是**真列表**而不是单个值：
+ * ★ 一个证据可以横跨多个文件（跨文件时在合并位置集上重算），所以这是**真列表**而不是单个值：
  *   逐文件统计这份证据盖住了它几块。数据源是响应里的 refs
  *   （每个全局下标 → 哪个文件的第几块），拿不到归属时如实说“没有归属信息”。
  */
@@ -778,7 +778,7 @@ onMounted(loadFiles)
 
       <div v-if="result" class="mt-3">
         <VerifyResult :result="result" />
-        <!-- 当前文件与块数：一份证据可以横跨多个文件（设计 B），所以逐文件列 -->
+        <!-- 当前文件与块数：一份证据可以横跨多个文件（跨文件时重算），所以逐文件列 -->
         <div class="cur-file">
           <span class="cur-lbl">当前文件与块数</span>
           <template v-if="resultFiles.length">

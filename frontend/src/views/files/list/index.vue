@@ -251,7 +251,38 @@ const uploadFacts = computed(() => {
 //: 行级「入池」的忙碌状态与它的分步耗时（与上传那条共用同一个时间线组件）。
 const poolBusy = ref(false)
 const poolTimings = ref(null)
+/** 入池取证的端到端耗时（毫秒）：从点下按钮到最后一次取证返回。 */
+const poolElapsed = ref(0)
 let elapsedTimer = null
+/** 开始计时的时刻（``performance.now()``）。 */
+let elapsedT0 = 0
+
+/**
+ * 开始计时。
+ *
+ * ★ 口径（2026-10-14 改）：从点下按钮到**上传请求返回**的墙钟差值，用
+ *   ``performance.now()`` —— 单调时钟，不受系统时间被改影响。
+ * ★ 屏幕上那个“已用 X s”每次刷新都用 ``now - elapsedT0`` **重算**，不累加：
+ *   累加会带上定时器自身的抖动（主线程忙时回调会被推迟），而这里的值要能
+ *   与最终定格的总耗时对得上。
+ */
+function startElapsed() {
+  stopElapsed()
+  elapsedT0 = performance.now()
+  uploadElapsed.value = 0
+  elapsedTimer = setInterval(() => {
+    uploadElapsed.value = Math.round(performance.now() - elapsedT0)
+  }, 100)
+}
+
+/** 停止计时并**定格精确值**（可重复调用）。 */
+function stopElapsed() {
+  if (elapsedTimer !== null) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+  if (elapsedT0) uploadElapsed.value = Math.round(performance.now() - elapsedT0)
+}
 
 const selectedFile = ref(null)
 
@@ -505,6 +536,8 @@ async function addToPool(row, { silent = false } = {}) {
       })
     }
     const ms = Math.round(performance.now() - t0)
+    // ★ 端到端值同时交给阶段条（标题里的总耗时用它，后端埋点总计只做悬浮说明）。
+    poolElapsed.value = ms
     // ★ 耗时提示：**单文件**的取证是“把各节点的凭证聚合起来”，与块数近乎
     //   线性、很快；而一旦把**多份文件**的块放进同一次验证，就要在合并
     //   位置集上重算一份证据（秒级）。第一次入池就把这件事说清楚，
@@ -575,8 +608,7 @@ async function doUpload() {
   }
   uploading.value = true
   uploadTimings.value = null
-  uploadElapsed.value = 0
-  elapsedTimer = setInterval(() => (uploadElapsed.value += 100), 100)
+  startElapsed()
   // ★ 过程弹框**现在**就开、动画跟着请求一起走（而不是传完再演一遍）。
   lastUpload.value = null
   uploadSteps.value = buildUploadSteps()
@@ -584,6 +616,9 @@ async function doUpload() {
   processOpen.value = true
   try {
     const { data } = await filesApi.upload(buildFormData())
+    // ★ 计时到此结束：读条量的是“这次上传”。后面补中间量、重拉列表
+    //   都是上传之后的事，算进去就不再是这个数了。
+    stopElapsed()
     uploadTimings.value = data.timings
     saveCalib(data.timings)
     lastUpload.value = data
@@ -625,7 +660,8 @@ async function doUpload() {
     }
     processOpen.value = false
   } finally {
-    clearInterval(elapsedTimer)
+    // 成功路径在 try 里已经定格过；这里兜底：抛异常时也要把表停下。
+    stopElapsed()
     uploading.value = false
     processPending.value = false
   }
@@ -1054,8 +1090,20 @@ onMounted(load)
             </div>
           </div>
         <el-table :data="files" v-loading="loading" border>
-          <el-table-column prop="owner" label="所有者" width="110">
-            <template #default="{ row }"><span class="mono">{{ row.owner }}</span></template>
+          <el-table-column label="所有者" width="150">
+            <template #default="{ row }">
+              <span class="mono">{{ row.owner }}</span>
+              <!-- ★ 停用**不删文件**：这份文件还在、仍可被任何人验证，
+                   但它的所有者已经登不进来（也就无法解密与更新）。 -->
+              <el-tag
+                v-if="row.owner_disabled"
+                size="small"
+                type="info"
+                effect="plain"
+                style="margin-left: 6px"
+                title="所有者已被停用：文件仍可验证，但本人无法登录，也无法解密与更新"
+              >已停用</el-tag>
+            </template>
           </el-table-column>
           <el-table-column label="文件标识" min-width="170">
             <template #default="{ row }">
@@ -1112,7 +1160,7 @@ onMounted(load)
             <EmptyState title="尚无文件" description="可通过上方上传区创建" />
           </template>
         </el-table>
-        <StageTimeline v-if="poolTimings" :timings="poolTimings" class="mt-3" />
+        <StageTimeline v-if="poolTimings" :timings="poolTimings" :total-ms="poolElapsed" class="mt-3" />
       </div>
     </template>
 

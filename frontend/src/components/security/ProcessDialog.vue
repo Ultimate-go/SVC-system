@@ -164,6 +164,18 @@ watch(
   },
 )
 
+/* ★ 请求一回来就把读条走完并停住：读条量的是“这次操作”，
+   操作结束了它就该结束。若动画还在半路上而请求已经回来了，
+   继续让它演下去就是在演一件已经发生完的事（也不再是真实过程）。 */
+watch(
+  () => props.pending,
+  (pending) => {
+    if (pending) return
+    stop()
+    if (props.steps.length) current.value = props.steps.length - 1
+  },
+)
+
 onBeforeUnmount(stop)
 </script>
 
@@ -210,7 +222,6 @@ onBeforeUnmount(stop)
         <span class="detail-name">{{ cur.name }}</span>
         <span v-if="cur.en" class="en mono">{{ cur.en }}</span>
         <span v-if="waiting && current === steps.length - 1" class="running mono">进行中</span>
-        <span v-if="msByStage[cur.key] !== undefined" class="ms mono">{{ formatMs(msByStage[cur.key]) }}</span>
       </div>
       <p class="desc">{{ cur.desc }}</p>
       <!-- 该步的中间量；无数据时不显示。 -->
@@ -257,7 +268,6 @@ onBeforeUnmount(stop)
 <style scoped>
 .sub { margin: 0 0 14px; font-size: 13px; }
 .en { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
-.ms { margin-left: auto; color: var(--text-2); font-size: 13px; }
 .desc { margin: 5px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.7; }
 /* 中间量列表：每行一个 k/v，数值用等宽字体。 */
 .s-facts {

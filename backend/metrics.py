@@ -168,6 +168,8 @@ ACTION_NAMES = {
     "modify": "改块",
     "append": "追加",
     "truncate": "截断",
+    "delete": "删除文件",
+    "restore": "回退版本",
     "query": "查询",
     "query_files": "多文件查询",
     "verify_batch": "批量验证",
@@ -175,6 +177,7 @@ ACTION_NAMES = {
     "por": "存储证明",
     "check": "全面自检",
     "login": "登录",
+    "register": "注册",
     "create_user": "建用户",
     "rewrap": "改口令",
 }

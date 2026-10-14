@@ -12,6 +12,7 @@ ENV/
 .conda/
 build/
 dist/
+dist-*/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
@@ -32,6 +33,9 @@ nodes/
 
 logs/
 *.log
+
+# 验收脚本的临时产物（现在都写系统临时目录；这两行是防手滑）
+scripts/_tmp_*
 
 *.tmp
 *.bak

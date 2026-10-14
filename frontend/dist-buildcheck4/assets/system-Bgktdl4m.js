@@ -1,1 +1,0 @@
-import{t as e}from"./client-DlbaGIyT.js";var t={status:()=>e.get(`/api/status`),check:()=>e.post(`/api/admin/check`),audit:t=>e.get(`/api/admin/audit`,{params:t}),auditActions:()=>e.get(`/api/admin/audit/actions`),setAuditRemark:(t,n)=>e.patch(`/api/admin/audit/${t}/remark`,{remark:n}),perfSummary:()=>e.get(`/api/perf/summary`)};export{t};

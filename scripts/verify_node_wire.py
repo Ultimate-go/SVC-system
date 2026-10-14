@@ -29,7 +29,7 @@
 
    这里**不起端口、不动你正在跑的那套服务**：用一份同步 ASGI 传输把请求
    直接交给各节点的 ASGI 应用。该走的东西（线格式、鉴权头、状态码）
-   一样不少，只是不经过 socket。数据目录建在 ``scripts/`` 下、用完即删。
+   一样不少，只是不经过 socket。数据目录建在**系统临时目录**下、用完即删。
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ import asyncio
 import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from typing import Mapping
 
@@ -68,7 +69,7 @@ FAILURES: list[str] = []
 
 TOKEN = "wire-test-token"
 NODES = ("node-1", "node-2", "node-3")
-DATA_DIR = ROOT / "scripts" / "_tmp_node_wire"
+DATA_DIR = Path(tempfile.gettempdir()) / "vds_node_wire"
 SEG = 32
 BLOCK = b"A" * SEG
 

@@ -18,6 +18,8 @@ const router = useRouter()
 const form = reactive({ username: '', display_name: '', role: 'user', password: '', confirm: '' })
 const submitting = ref(false)
 const timings = ref(null)
+/** 建号的端到端耗时（毫秒）：从点下按钮到接口返回。 */
+const elapsed = ref(0)
 
 async function submit() {
   if (!validUsername(form.username)) {
@@ -38,6 +40,8 @@ async function submit() {
   }
   submitting.value = true
   timings.value = null
+  elapsed.value = 0
+  const t0 = performance.now()
   try {
     const { data } = await usersApi.create({
       username: form.username,
@@ -46,6 +50,7 @@ async function submit() {
       password: form.password,
     })
     timings.value = data.timings
+    elapsed.value = Math.round(performance.now() - t0)
     ElMessage.success('用户已创建，密钥对已生成')
   } catch {
     // 409 等错误已由拦截器弹出
@@ -89,7 +94,7 @@ async function submit() {
 
     <div v-if="timings" class="panel mt-3">
       <h4 class="sec-title">耗时（后端实测）</h4>
-      <StageTimeline :timings="timings" />
+      <StageTimeline :timings="timings" :total-ms="elapsed" />
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note text-2">

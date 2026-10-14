@@ -42,6 +42,8 @@ const portsCard = ref(null)
 const lambdaPos = ref(8)
 const porRunning = ref(false)
 const porResult = ref(null)
+/** PoR 挑战的端到端耗时（毫秒）：从点下按钮到挑战返回。 */
+const porElapsed = ref(0)
 
 // ★ 故障演练（仅管理员）。
 //   ``drill`` 是后端返回的“现状 + 影响面”，不是前端自己推的 ——
@@ -79,9 +81,12 @@ async function load() {
 async function runPor() {
   porRunning.value = true
   porResult.value = null
+  porElapsed.value = 0
+  const t0 = performance.now()
   try {
     const { data } = await devicesApi.por(lambdaPos.value)
     porResult.value = data
+    porElapsed.value = Math.round(performance.now() - t0)
   } catch (e) {
     porResult.value = { ok: false, message: e?.response?.data?.detail || 'PoR 失败' }
   } finally {
@@ -320,7 +325,7 @@ async function refreshAll() {
               </template>
             </el-table-column>
           </el-table>
-          <StageTimeline v-if="porResult.timings" :timings="porResult.timings" class="mt-3" />
+          <StageTimeline v-if="porResult.timings" :timings="porResult.timings" :total-ms="porElapsed" class="mt-3" />
         </div>
 
         <details class="note-collapse">

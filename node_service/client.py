@@ -340,11 +340,10 @@ class HttpTransport:
         （证据就是旧摘要本身），这边送的是一份**来自另一台节点的检索凭证**
         :math:`(Q, F_Q, \\pi_Q)`，节点自己验过才合并。
 
-        ★ 只发一台、失败就直接抛 ``TransportError``，而且**不建补推现场**：
-        这不是一次全网状态推进（``δ`` 一个字节都不动），失败只影响"这一批块
-        有没有搬成功"。调用方（``StoreManager.redistribute``）会把它如实记进
-        ``lost`` 里汇报，而不是留一份需要人工补推的现场 ——
-        补推机制是给"δ 已经推进、但有台没跟上"那种真正的不一致用的。
+        ★ 只发一台、失败就直接抛 ``TransportError``：这不是一次全网状态推进
+        （``δ`` 一个字节都不动），失败只影响"这一批块有没有搬成功"。
+        调用方（``StoreManager.redistribute``）会把它如实记进 ``lost`` 里汇报
+        —— 与写路径上那种"δ 已推进、却有台没跟上"的不一致是两回事。
 
         :param blobs: ``下标 -> 密文段``（协调者刚从源节点取回来的）
         """
@@ -379,7 +378,6 @@ class HttpTransport:
         免得"测试里发的东西"和"生产里发的东西"长得不一样。
         """
         failures: list[dict] = []
-        payloads: dict[str, dict] = {}
         # ★ 两套下标：``assignments`` / ``blobs`` 的键是**全局位置号**（协调者记账用它），
         #   而节点侧用的是**文件内局部块号**。转换只在这一层做
         #   （与 LocalTransport 逐字一致，否则两条路径会惄惄分叉）。
@@ -397,10 +395,7 @@ class HttpTransport:
             try:
                 self._post(nid, "/node/append", payload)
             except TransportError as exc:
-                # ★ 记 下“是哪一台、为什么” + **它没收到的那份请求体** ——
-                #   前者给人看，后者给“补推”用（见 WriteError 的注释）。
                 failures.append({"node": nid, "reason": str(exc)})
-                payloads[nid] = payload
 
         if failures:
             # ★ 一次追加只要有一台没跟上，全网就处于不一致状态 ——
@@ -410,24 +405,7 @@ class HttpTransport:
                 + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures),
                 failures,
                 "append",
-                payloads,
             )
-
-    def retry_write(self, error: WriteError) -> list[str]:
-        """把上次没推成功的更新**只补推给失败的节点**，返回仍失败的节点。
-
-        ★ 只推给失败的那些：已经跟上的节点它的 δ 已经是新的了，再推一次
-        同一份更新会被它（**正确地**）拒掉 —— 那不是故障，是“重复投递”。
-
-        :returns: 仍然失败的节点名（空列表 = 都补上了）
-        """
-        still: list[str] = []
-        for nid, payload in error.payloads.items():
-            try:
-                self._post(nid, f"/node/{error.op}", payload)
-            except TransportError:
-                still.append(nid)
-        return still
 
     def apply_update(
         self,
@@ -443,7 +421,6 @@ class HttpTransport:
         「全网现在不一致」这件事必须让调用方知道，而不是当成成功。
         """
         failures: list[dict] = []
-        payloads: dict[str, dict] = {}
         idx_of = {g: i for i, g in enumerate(delta_new.positions)}
         for nid in self.node_ids:
             nb = blobs.get(nid) or {}
@@ -457,7 +434,6 @@ class HttpTransport:
                 self._post(nid, "/node/update", payload)
             except TransportError as exc:
                 failures.append({"node": nid, "reason": str(exc)})
-                payloads[nid] = payload
 
         if failures:
             raise WriteError(
@@ -465,16 +441,14 @@ class HttpTransport:
                 + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures),
                 failures,
                 "update",
-                payloads,
             )
 
     def drop(self, offset: int, positions: Mapping[str, Sequence[int]]) -> None:
         """让被点名的节点**交出**某些位置（``del`` 的前置步骤）。
 
-        与写路径不同：这一步**不改**全局摘要，所以失败时**不建补推现场** ——
+        与写路径不同：这一步**不改**全局摘要，所以失败时什么都不会留下 ——
         节点侧的交回是**幂等**的（不在手里的下标直接跳过），所以
-        「修好那台，重来一次整次截断」就是正确的修法，比补推简单得多。
-        错误里会直说这一句，免得有人以为要走补推。
+        「修好那台，重来一次整次截断」就是正确的修法。
         """
         failures: list[dict] = []
         for nid, want in positions.items():
@@ -492,7 +466,7 @@ class HttpTransport:
             raise TransportError(
                 "有节点没能交回待删区间（本次没有改动任何全局状态）：\n  "
                 + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures)
-                + "\n  交回是幂等的 —— 把那台修好之后重来一次整个截断即可，不需要补推"
+                + "\n  交回是幂等的 —— 把那台修好之后重来一次整个截断即可"
             )
 
     def apply_delete(
@@ -505,14 +479,9 @@ class HttpTransport:
         """把一次**删除**通知**每一台**节点。
 
         任何一台没跟上就整次失败（与 :meth:`apply_append` / :meth:`apply_update`
-        同一条纪律：``WriteError`` 里带上「哪几台」与「它们没收到的那份请求体」，
-        供 ``retry_write`` 补推）。
-
-        ★ 路由名就是 ``op``：``retry_write`` 拼的是 ``/node/{error.op}``，
-        所以这里的 ``"delete"`` 恰好对上 ``/node/delete``。
+        同一条纪律：``WriteError`` 里带上「哪几台」。）
         """
         failures: list[dict] = []
-        payloads: dict[str, dict] = {}
         payload = _delete_payload(
             delta_new=delta_new, op_delta=op_delta, witness=witness
         )
@@ -521,7 +490,6 @@ class HttpTransport:
                 self._post(nid, "/node/delete", payload)
             except TransportError as exc:
                 failures.append({"node": nid, "reason": str(exc)})
-                payloads[nid] = payload
 
         if failures:
             raise WriteError(
@@ -529,7 +497,6 @@ class HttpTransport:
                 + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures),
                 failures,
                 "delete",
-                payloads,
             )
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用

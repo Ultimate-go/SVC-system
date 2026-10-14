@@ -205,8 +205,8 @@ def reset_deploy_node_count() -> int:
 #   （见 ``scripts/start_all.stop_everything``）。配置一改，那里读到的就是
 #   **新**端口，而正在跑的进程还在**旧**端口上 —— 于是
 #   「改端口 → 点立刻重启」会一个都停不掉：旧后端还占着旧端口、还开着同一个
-#   ``vds.db``，而且内存里还持着一份全局向量（见 ``backend/main.py`` 的文件头，
-#   "必须单进程单 worker，全局向量在内存里"）—— 新旧两个后端同时写一个 SQLite
+#   ``vds.db``，而且内存里还持着一份权威状态（见 ``backend/main.py`` 的文件头，
+#   "必须单进程单 worker，权威状态在内存里"）—— 新旧两个后端同时写一个 SQLite
 #   是最容易把库弄脏的场景。
 #
 # ★★ 为什么是个**累加的集合**、而不是"上一次跑的那一套"：端口可以被改好几次
@@ -337,7 +337,7 @@ def read_deploy_stop_ports() -> set[int]:
 #
 #   * 十几 KB ~ 128 KB 的文件 → **1 KB/块**（细到能只改一小段，块数也不多）；
 #   * 512 KB → 4 KB/块（128 块）；1 MB → 16 KB/块（64 块，约 3.5 秒）；
-#   * 8 MB → 64 KB/块（128 块）；32 MB → 256 KB/块（128 块，约 7 秒）。
+#   * 8 MB → 64 KB/块（128 块，约 7 秒）；16 MB → 256 KB/块（64 块，约 3.5 秒）。
 #
 #   块数被压在 ~128 以内 ⇒ "多大都能传完"；小块留给小文件 ⇒ "小文件也能只改一块"。
 SEGMENT_LADDER: tuple[int, ...] = (1024, 4096, 16384, 65536, 262144)
@@ -629,8 +629,8 @@ class Settings:
         演示够用，生产必须固定注入。
     :param modulus_bits: ``|N|``。**演示档 1024，无安全强度**；论文配置 16λ = 2048
     :param l: 每个分量的比特数。256 正好装一个 SM3 摘要
-    :param n_max: 全局位置上限。**一旦定死不可改**（隐藏阶群的可用位置
-        在 Bootstrap 阶段就定死）
+    :param n_max: **素数表容量**（不是"全系统块数上限" —— 块数没有天花板，
+        见下面 :attr:`Settings.n_max` 的说明）
     :param segment_bytes: 一个向量分量对应多少字节密文
     :param replica_factor: 每块存**几份**（默认 2）。
 
@@ -644,7 +644,7 @@ class Settings:
     :param node_ids: 存储服务器标识
     :param node_urls: 各节点的 HTTP 地址。**为 None 时是单进程模式**（节点在
         同一个进程里），设了就是真分布式模式。两种模式的代数结果逐位相同，
-        有测试钉住这一点。端口由 ``nodes/deploy.json`` 决定（管理员界面可改），
+        端口由 ``nodes/deploy.json`` 决定（管理员界面可改），
         启动器把它拼成这个变量 —— 所以后端**不认识任何具体端口号**。
     :param node_token: 节点令牌（``VDS_NODE_TOKEN``）。节点一律要求鉴权，
         否则 ``/node/reset``（破坏性）与 ``/node/retrieve``（会吐出该节点

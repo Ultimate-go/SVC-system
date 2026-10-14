@@ -671,7 +671,7 @@ def stop_everything(
         uniq = ", ".join(str(x) for x in sorted(set(skipped)))
         say(f"  {uniq} 上有别的程序在占着 —— 没有动它（要停它请自行处理）。")
         say("     如果那确实是你以前留下的 VDS 进程，就去任务管理器里结束它，")
-        say("     或者换成别的端口（管理员界面 → 设备页 → 端口）。")
+        say("     或者换成别的端口（管理员界面 → 存储节点页 → 端口）。")
 
 
 def my_tree_ports() -> list[int]:

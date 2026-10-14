@@ -7,7 +7,7 @@
 
 .. warning::
 
-   **必须单进程单 worker。** 全局向量在内存里，多 worker 会各持一份并互相
+   **必须单进程单 worker。** 权威状态在内存里，多 worker 会各持一份并互相
    覆盖。演示规模下这是正确取舍 —— 想扩就得把向量状态挪到外部存储，
    而"存储层拆进程"本来就是规划的下一步。
 
@@ -120,13 +120,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #   解析用 `SpooledTemporaryFile`，超阈值落磁盘）。也就是说，一个超大 body
     #   仍然会先把带宽和磁盘吃掉，才轮到那句判断。
     #
-    #   这里按 `Content-Length` 在进入路由**之前**就拒掉。上限取 16 MiB：
-    #   8 MiB 的上传内容 + multipart 边界与编码开销的余量。
+    #   这里按 `Content-Length` 在进入路由**之前**就拒掉。上限取得比文件闸
+    #   （`routers/files.py::MAX_UPLOAD_BYTES` = 16 MiB）**略大** —— 那 4 MiB
+    #   是 multipart 边界与编码开销的余量。取成等值会误伤：一个刚好 16 MiB
+    #   的文件加上那点开销就超了，会被这道闸先 413 掉。
     #
     # ★ 诚实边界：不信 `Content-Length`（chunked 上传）的客户端绕得过这道。
     #   真正硬的上限要落在反向代理或 uvicorn 的参数上；这里只是把最常见的
     #   那个洞堵上，并让超限变成一个明确的 413。
-    max_request_bytes = 16 * 1024 * 1024
+    max_request_bytes = 20 * 1024 * 1024
 
     @app.middleware("http")
     async def _limit_request_body(request: Request, call_next):
@@ -178,7 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """探活。**不需要登录，也不查库、不问节点。**
 
         它回答的是“这个进程还在不在”，不是“系统健不健康” —— 后者要看
-        ``/api/status``（全局摘要）与 ``/api/nodes``（各台现状）。所以它故意
+        ``/api/status``（逐文件摘要）与 ``/api/nodes``（各台现状）。所以它故意
         不带任何状态：启动脚本 / 监控 / 容器探针要的是一个**永远很快**的答案。
         """
         return {"ok": True, "service": "vds-system"}

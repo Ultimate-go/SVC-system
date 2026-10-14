@@ -95,12 +95,17 @@ def main(argv: list[str] | None = None) -> int:
 
     store = build(args.blocks, args.files, modulus_bits=args.modulus_bits)
     n = store.n
-    crs_n = store.session.crs_n_for(store.delta)
     print(f"配置：|N| = {args.modulus_bits}、l = {L}、n_max = {store.session.n_max}、"
           f"块数 n = {n}、文件数 = {args.files}")
+    # ★ 一文件一向量 ⇒ **每份文件各有自己的 (crs_n, C)**。批量验证要求 m 份
+    #   证据共享同一个 C，所以它只能作用于**同一份文件内**的那几块。
+    f0 = sorted(store.files)[0]
+    d0 = store.delta_of(*f0)
+    crs0 = store.session.crs_n_for(d0)
+    print(f"批量那一格取第一份文件 {f0[0]}/{f0[1]}（{d0.n} 块）—— 它自己的 C 才是一组。")
 
     # ------------------------------------------------------------------
-    # ① 一次性查全部 —— 设计 B 的主路径：一份证据覆盖所有块
+    # ① 一次性查全部 —— 单文件内的主路径：一份证据覆盖该文件的所有块
     # ------------------------------------------------------------------
     _, one_ms = timed(lambda: store.query(list(range(n))))
     print(f"\n① 一次查全部 {n} 块（一份证据）：          {one_ms:8.1f} ms")
@@ -108,27 +113,29 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # ② 逐块各查一次 —— 拿 m 份**单块**证据，并单独量验证那一部分
     # ------------------------------------------------------------------
-    singles = []
+    singles = []   # [(crs_n, C, I, v, pi)] —— 带上“它属于哪份文件”，验的时候要用
     per_query = []
 
     def gather():
-        for i in range(n):
-            t0 = time.perf_counter()
-            r = store.query([i])
-            per_query.append((time.perf_counter() - t0) * 1000.0)
-            singles.append((r.indices, r.values, r.proof))
+        # ★ 按**文件**逐份取 —— 每份文件的证据只能对着它自己的 (crs_n, C) 验。
+        for fid in sorted(store.files):
+            d = store.delta_of(*fid)
+            crs_f = store.session.crs_n_for(d)
+            for g in store.registry.positions_of(*fid):
+                t0 = time.perf_counter()
+                r = store.query([g])
+                per_query.append((time.perf_counter() - t0) * 1000.0)
+                singles.append((crs_f, d.C, list(r.indices), list(r.values), r.proof))
 
     _, many_ms = timed(gather)
     print(f"② 逐块各查一次（{n} 份单块证据）：        {many_ms:8.1f} ms"
           f"   —— 平均每份 {many_ms / n:.1f} ms")
     print("   （其中每份都含一次「生成证明」；批量验证省不掉这一段）")
     # 只量 ``svc.verify`` 本身：这才是"批量"能碰的那一段
-    C = store.delta.C
-    cases = [
-        (list(I), list(v), pi) for (I, v, pi) in singles
-    ]
+    # ★ 每份证据用它**自己那份文件**的 (crs_n, C) —— 跨文件的证据本就不能互相验。
+    cases = [(I, v, pi) for (_, _, I, v, pi) in singles]
     _, verify_sep_ms = timed(
-        lambda: [svc_verify(crs_n, C, I, v, pi) for (I, v, pi) in cases]
+        lambda: [svc_verify(cn, cc, I, v, pi) for (cn, cc, I, v, pi) in singles]
     )
     print(f"\n③ 逐份 svc.verify（{n} 份单块证据）：       {verify_sep_ms:8.1f} ms"
           f"   —— 平均每份 {verify_sep_ms / n:.2f} ms")
@@ -141,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     #    ★ 它**两条信道都合**（ok_s / ok_lambda 分开报）：只合 S 那条会
     #      "看起来快一大截"，那是因为它少验了一半，这种对比是偷工减料。
     # ------------------------------------------------------------------
-    rep, batch_ms = timed(lambda: svc_verify_batch(crs_n, C, cases))
+    # ★ 批量方程要求 m 份证据**共享同一个 C** ⇒ 只能用同一份文件内的那些单块证据。
+    cases0 = [(I, v, pi) for (cn, cc, I, v, pi) in singles if cc == d0.C]
+    rep, batch_ms = timed(lambda: svc_verify_batch(crs0, d0.C, cases0))
     print(
         f"④ 批量验 svc.verify_batch：             {batch_ms:8.1f} ms"
         f"   —— {'通过' if rep.ok else '不通过（实现有问题）'}"
@@ -149,10 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- 反面对照：故意改掉一个值，批量检查必须报错，而且要指名 ---
-    bad = list(cases)
+    bad = list(cases0)
     I0, v0, pi0 = bad[0]
     bad[0] = (I0, [int(v0[0]) ^ 1, *v0[1:]], pi0)
-    bad_rep, _ = timed(lambda: svc_verify_batch(crs_n, C, bad))
+    bad_rep, _ = timed(lambda: svc_verify_batch(crs0, d0.C, bad))
     located = [j + 1 for j in bad_rep.bad]
     print(
         f"   反面对照：改掉一个值 → {'被拒（对）' if not bad_rep.ok else '仍然通过（错！）'}"
@@ -164,11 +173,12 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # ⑤ 主路径的对照组：**一份**覆盖全部 64 块的证据，验证要多久
     # ------------------------------------------------------------------
-    big = store.query(list(range(n)))
+    big = store.query(list(store.registry.positions_of(*f0)))
     _, big_verify_ms = timed(
-        lambda: svc_verify(crs_n, C, list(big.indices), list(big.values), big.proof)
+        lambda: svc_verify(crs0, d0.C, list(big.indices), list(big.values), big.proof)
     )
-    print(f"\n⑤ 对照：验证**一份**覆盖 {n} 块的证据：    {big_verify_ms:8.1f} ms"
+    print(f"\n⑤ 对照：验证**一份**盖某份文件全部 {len(big.indices)} 块的证据： "
+          f"{big_verify_ms:8.1f} ms"
           f"   —— 主路径上“验证”那一栏的真实代价")
 
     # ------------------------------------------------------------------
@@ -180,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"逐块各查一次：{many_ms:8.1f} ms —— 比合成一份慢 {many_ms / one_ms:.1f} 倍")
     print("\n「验 m 份已有证据」这个场景")
     print(f"  逐份 svc.verify      ：{verify_sep_ms:8.1f} ms（{len(cases)} 份）")
-    print(f"  批量（两条信道都合）：{batch_ms:8.1f} ms")
+    print(f"  批量（两条信道都合）：{batch_ms:8.1f} ms（同一份文件内的 {len(cases0)} 份）")
     ratio = batch_ms / verify_sep_ms if verify_sep_ms else float("inf")
     print(f"  ⇒ 批量{'快' if ratio < 1 else '慢'} {abs(1 / ratio if ratio < 1 else ratio):.2f} 倍")
     print("=" * 72)

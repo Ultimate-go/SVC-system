@@ -156,7 +156,7 @@ class AuditRemarkIn(BaseModel):
 #:
 #: ★ 它现在是一个纯粹的**请求体大小**限制，与密码学无关。
 #:   改造前它还兼一职：必须 ≥ 系统的块数上限（``n_max``），
-#:   否则会出现「**传得上去、验不了**」—— 一个 8 MB 文件的完整查询
+#:   否则会出现「**传得上去、验不了**」—— 一份大文件的完整查询
 #:   会被 pydantic 以 422 拒掉。改造后块数**没有上限**，
 #:   所以这个数不再是"必须 ≥ 某个系统上限"，而是
 #:   "一次请求多大了算过分"：8192 个下标 ≈ 每个下标一个十进制串，
@@ -185,9 +185,9 @@ MAX_INT_CHARS = 512
 #: ``data_b64``（写块的 base64 内容）的字符数上限。
 #:
 #: ★ 安全审计 I3：这个字段原先**没有上界**，而它的校验器会做 ``b64decode`` ——
-#:   传 1 GB 也会先解码。上限与 ``routers/files.py::MAX_UPLOAD_BYTES``（8 MiB）
-#:   对齐，再留 base64 的 4/3 膨胀余量与 multipart 开销：12 MiB 字符。
-#:   （两处都改时记得一起改。）
+#:   传 1 GB 也会先解码。12 MiB 字符够用：单块上限 1 MiB ⇒ base64 约 1.4 MiB
+#:   字符，再留出足够余量；而 ``routers/files.py::MAX_UPLOAD_BYTES``（16 MiB）
+#:   那道闸在走到本字段之前就会先拒掉更大的请求。
 MAX_B64_CHARS = 12 * 1024 * 1024
 
 #: “十进制群元素串”字段的类型 —— 长度至少 1、最多 :data:`MAX_INT_CHARS`。
@@ -376,10 +376,9 @@ class FilePatchIn(BaseModel):
 
     .. important::
 
-       ``truncate`` 有一个**方案本身带来的前提**：待删的那几块必须正好是
-       **全局向量的末尾**（底层 ``del`` 只能删末尾连续区间）。所以实际上
-       **只有最后写进向量的那份文件才删得动尾巴**；别的文件就算排在末尾，
-       前面也可能压着之后的块 —— 那种情况会返回 400 并**说清是哪些下标卡住**。
+       ``truncate`` 只删**这份文件位置段的末尾**那几块：删除按该文件自己的
+       位置集合做（``VectorStore.delete_from``），向量里留下空洞、段永不回收，
+       其余文件一个字节都不动。不允许删到一块不剩。
 
        另外删之前，协调者会先让“与待删区间**部分相交**”的节点把它那一部分
        交回去（论文的 ``RmvStorage``）—— 理由见 ``vds.updates._apply_del``。
@@ -401,9 +400,9 @@ class FilePatchIn(BaseModel):
     data_b64: str | None = Field(default=None, max_length=MAX_B64_CHARS)
     #: ``truncate`` 专用：删掉**末尾**几块（从这份文件的最后一块往前数）。
     #:
-    #: 上界用 :data:`MAX_INDICES`（= 全局块数上限）——真正的校验在
+    #: 上界用 :data:`MAX_INDICES`（= 一次请求能带多少个下标）——真正的校验在
     #: :meth:`~core.store.VectorStore.truncate` 里：它还要确认那几块
-    #: **正好是全局向量的末尾**，而且要留至少一块（不允许删到一块不剩）。
+    #: **正好是这份文件位置段的末尾**，而且要留至少一块（不允许删到一块不剩）。
     drop_blocks: int | None = Field(default=None, ge=1, le=MAX_INDICES)
 
     @field_validator("data_b64")

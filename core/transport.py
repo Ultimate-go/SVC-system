@@ -41,22 +41,21 @@ class TransportError(Exception):
 
 
 class WriteError(TransportError):
-    """写路径上“有节点没跟上”—— 带**结构化**的失败清单，能直接拿来补推。
+    """写路径上“有节点没跟上”—— 带**结构化**的失败清单。
 
-    为什么需要它（而不是一句字符串）：一次上传/改块只要有**一台**没跟上，
-    全网就不一致了 —— 而且 **协调者自己的 δ 不会推进**。此时的现场是：
+    为什么需要它（而不是一句字符串）：一次上传/改块/追加/删除只要有**一台**
+    没跟上，全网就不一致了 —— 而且 **协调者自己的 δ 不会推进**。此时的现场是：
 
     * 已经跟上的那些节点：δ 已经是新的；
     * 没跟上的那几台：δ 还是旧的；
     * 协调者：δ 还是旧的，**但登记表已经分配过下标了**。
 
-    于是“重新传一次文件”是**错**的（那会生成新的下标，而且会撞上
-    “登记表游标与向量长度不一致”），唯一正确的修法是**把同一份更新补推给
-    那几台** —— 所以异常里必须带着“哪几台”与“推的是什么”。
+    所以这次写按约定**作废**：协调者把已分配的位置退回登记表
+    （见 :meth:`core.store.VectorStore._rollback_add`），没推上去的副本丢弃。
+    异常里要带着"哪几台、为什么" —— 那是给界面与审计看的。
 
     :param failures: ``[{"node": "node-2", "reason": "..."}]``
-    :param op: ``"append"`` 或 ``"update"``（决定补推打到哪个路由）
-    :param payloads: ``{节点: 它就是没收到的那份请求体}`` —— 补推直接用
+    :param op: ``"append"`` / ``"update"`` / ``"delete"``（出错的写路径名）
     """
 
     def __init__(
@@ -64,12 +63,10 @@ class WriteError(TransportError):
         message: str,
         failures: "Sequence[dict]",
         op: str = "append",
-        payloads: "Mapping[str, dict] | None" = None,
     ) -> None:
         super().__init__(message)
         self.failures: list[dict] = [dict(f) for f in failures]
         self.op = op
-        self.payloads: dict[str, dict] = dict(payloads or {})
 
     @property
     def nodes(self) -> list[str]:
@@ -476,7 +473,7 @@ class LocalTransport:
     ) -> None:
         """让被点名的节点交出某些位置（``del`` 的前置步骤）。
 
-        与写路径不同：这一步**不改**全局摘要，只让节点的 ``I`` 变小、并删掉
+        与写路径不同：这一步**不改**摘要，只让节点的 ``I`` 变小、并删掉
         对应的密文。它幂等，所以“交回一半之后重来”是安全的。
 
         ★ ``positions`` 的值是**全局位置号**，而节点侧用的是**文件内局部块号** ——

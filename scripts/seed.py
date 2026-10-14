@@ -142,7 +142,7 @@ def main() -> int:
 
     manager.check()
     st = manager.status()
-    print(f"[check] 自检通过；全局向量 n = {st['delta']['n']}，"
+    print(f"[check] 自检通过；全局位置总数 n = {st['delta']['n']}，"
           f"{st['files']} 个文件")
     print(f"[done] 数据库：{settings.db_path}")
     print("[next] 跑后端：python -m uvicorn backend.main:app")

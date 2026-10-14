@@ -77,7 +77,7 @@ async function load() {
 async function toggleDisabled(u) {
   try {
     await usersApi.patch(u.id, { disabled: !u.disabled })
-    ElMessage.success(u.disabled ? '已启用' : '已停用')
+    ElMessage.success(u.disabled ? '已启用' : '已停用（名下文件保留）')
     await load()
   } catch {
     // 错误已由拦截器弹出
@@ -90,7 +90,8 @@ async function removeUser(u) {
   // 删除成功后把返回的 warning 原样弹出来。
   try {
     await ElMessageBox.confirm(
-      `确认删除用户 ${u.username}。其名下文件将归属已注销账户，原有块密钥不可恢复。`,
+      `确认删除用户 ${u.username}。其名下的全部文件将随账号一并删除，`
+      + `各节点上的分块份额一并清除，密文与块密钥均不可恢复。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )

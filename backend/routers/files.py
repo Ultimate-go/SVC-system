@@ -7,8 +7,9 @@
 
 .. important::
 
-   **密钥只管解密（规划 §8.6 的第③道门）**。本文件里 ``/api/query`` 的那条
-   验证路线**一个字节都不碰任何密钥** —— "验证不受限"是项目的硬决策。
+   **密钥只管解密（规划 §8.6 的第③道门）**。``/api/query`` 那条验证路线
+   （在 ``routers/verify.py`` 里）**一个字节都不碰任何密钥** ——
+   "验证不受限"是项目的硬决策。
 
 .. important::
 
@@ -52,9 +53,9 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 #:
 #: ★ 它和"块数"是两件事，别混：块数**没有**上限（那是位置上标取消后的效果），
 #:   而这里是"一次 multipart 请求最多收多少字节"的防滥用阈值。
-#:   以前是 8 MiB，容易被当成"系统总量上限 8 MB"（实测就这么被误解过），
-#:   而默认块大小调成 64 KB 之后 32 MiB 只要 512 块（约 28 秒），完全跑得动。
-MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+#:   取 16 MiB：默认块大小按阶梯会取到 256 KB（64 块，约 3.5 秒），
+#:   所以 16 MiB 是"传得动"与"别把内存吃光"之间的那个折中。
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 
 #: 应用层快速拒绝的话术。
 #: 它与密码学那句（见 :func:`decrypt`）**意思相同但措辞不同**：
@@ -73,7 +74,7 @@ def _write_failed(exc: WriteError) -> HTTPException:
     而是**全网暂时不一致** —— 而且此刻"重新上传一次"是**错**的修法
     （协调者的 δ 没推进，但登记表已经分配过那批下标了，重传会拿到新下标，
     并撞上"登记表游标与向量长度不一致"）。所以提示必须说清
-    "写失败就是失败了"，不要引导用户去重传或补推（那两者都会造出新的下标）。
+    "写失败就是失败了"，不要引导用户去重传（那会造出新的下标）。
     """
     who = "、".join(exc.nodes) or "未知节点"
     return HTTPException(
@@ -110,16 +111,18 @@ def can_decrypt(user: UserRow, row: FileRow) -> bool:
     return user.username == row.owner
 
 
-def _file_public(row: FileRow, mgr: StoreManager) -> dict:
+def _file_public(row: FileRow, mgr: StoreManager, *, owner_disabled: bool = False) -> dict:
     store = mgr._require()
     indices = store.file_indices(row.owner, row.file_key)
-    # ★ 这份文件自己的摘要。注意：本函数与 manager.list_files() 是**两份**
-    #   序列化实现，字段容易分叉 —— 列表页要的 segments 就只长在那一份上，
-    #   而路由走的是本函数，于是界面上「位置段」永远显示 "—"。
+    # ★ 这份文件自己的摘要 —— ``offset`` / ``n`` / ``segments`` / ``delta_U`` /
+    #   ``delta_C`` 都从它来。
     _fd_row = store.delta_of(row.owner, row.file_key)
     return {
         "id": row.id,
         "owner": row.owner,
+        # ★ 所有者已被停用（停用**不**删文件，所以列表里必须看得出来）。
+        #   停用的账号登不进来，这份文件对它自己来说也暂时回不去。
+        "owner_disabled": bool(owner_disabled),
         "file_key": row.file_key,
         "total_bytes": row.total_bytes,
         "block_count": row.block_count,
@@ -144,7 +147,7 @@ def _file_public(row: FileRow, mgr: StoreManager) -> dict:
         "last_index": indices[-1] if indices else None,
         # ★ 当前全局块数 n。带上它，前端才能回答"我手里那些旧证据还行吗"：
         #   证据 π_I = (S_I, Λ_I) 里 S_I = g^{e_[n]/e_I}，是 **n 的函数** ——
-        #   所以任何一次上传都会让此前取到的证据全部失效（设计 B 的固有代价）。
+        #   所以一次写操作只会让**该文件**此前取到的证据失效（别的文件的证据不受影响）。
         #   不标出来的话，界面上那些"验证通过"会一直是旧的结论。
         "delta_n": store.n,
         # ★ 这份文件在全局位置轴上占的段（追加会让它变成好几截）。
@@ -194,7 +197,7 @@ def upload(
     交给 FastAPI 的线程池更合适。
 
     ★ 读的时候**带上上限**（安全审计 I4）：以前是 ``file.file.read()`` ——
-    先把整份读进内存，然后才判 8 MB 上限。那么 8 MB 上限根本拦不住内存峰值，
+    先把整份读进内存，然后才判上限。那样上限根本拦不住内存峰值，
     一个 2 GB 的请求会先把进程吃掉。现在只读“上限 + 1”字节：
     多读的那 1 字节是为了区分“刚好等于上限”与“超过上限”。
     """
@@ -493,9 +496,10 @@ def _do_truncate(
 
     它是三个变体里最"窄"的一个 —— 不是实现偷懒，是方案的限制：
 
-    * 底层 ``del`` 只能删全局向量的**末尾连续**区间（新摘要用到
-      :math:`e_{[n]} = e_{[n-k]}\cdot e_K` 这个因式分解）；
-    * 于是「只有最后写进向量的那份文件才删得动尾巴」；
+    * 删除按**该文件自己的位置集合**做（``VectorStore.delete_from``）：
+      向量里留下空洞、段永不回收，其余文件一个字节都不动；
+    * 所以一次 ``truncate`` 只能删**这份文件位置段的末尾**那么几块
+      （整份删除等价于把它的全部位置一次删掉）；
     * 参与更新的每一台节点，其持有集合必须「要么全含待删区间、要么与它完全
       不相交」。本系统 4 台轮转 + 每块 2 份副本，跨台区间几乎必然部分相交
       —— 所以协调者会**先让那些节点把那部分交回去**（论文的 ``RmvStorage``），
@@ -523,7 +527,7 @@ def _do_truncate(
         raise _write_failed(exc) from exc
     except TransportError as exc:
         # 交回阶段失败：**没有改动任何全局状态**，而且交回是幂等的，
-        # 所以修好那台之后重来一次就是正确修法（不需要补推）。
+        # 所以修好那台之后重来一次就是正确修法。
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
     audit(
@@ -589,7 +593,7 @@ def delete_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except Conflict as exc:
         # 409 而不是 400：那不是参数写错，而是"当前状态不允许"（换个时机就能做）——
-        # 比如还有写推未完成、补推还没收敛。
+        # 比如还有写推未完成。
         # ★ 改造后 `delete_file` 自己**不再**抛"后面压着别人的文件"那种 Conflict
         #   （连带删除已经不存在了，审计 N4），但这条兜底留着：
         #   走到这里的可能是别的状态冲突。
@@ -633,9 +637,12 @@ def list_files(
     每行额外给出"我能不能解密"，让前端用两把不同的锁显示两条线。
     """
     rows = db.execute(select(FileRow).order_by(FileRow.id)).scalars().all()
+    # ★ 停用不删文件：一次查全已停用的用户名，逐行序列化时只做集合判断。
+    #   这份查询与 :meth:`StoreManager.disabled_owners` 共用一份实现。
+    disabled = mgr.disabled_owners()
     out = []
     for row in rows:
-        item = _file_public(row, mgr)
+        item = _file_public(row, mgr, owner_disabled=row.owner in disabled)
         item["can_decrypt"] = can_decrypt(user, row)
         item["is_mine"] = row.owner == user.username
         out.append(item)
@@ -664,7 +671,8 @@ def file_detail(
           那才是"只有所有者能解密"的根。
     """
     row = _file_or_404(db, file_id)
-    item = _file_public(row, mgr)
+    owner_disabled = row.owner in mgr.disabled_owners()
+    item = _file_public(row, mgr, owner_disabled=owner_disabled)
     item["can_decrypt"] = can_decrypt(user, row)
     item["is_mine"] = row.owner == user.username
     blocks = list(

@@ -24,6 +24,9 @@ const error = ref('')
 const status = ref(null)
 const checking = ref(false)
 const checkResult = ref(null)
+/** 自检的端到端耗时（毫秒）：从发起请求到它返回的墙钟差值。
+ *  ★ 动画是逐项揭示的演示，而标题里那个数必须是**真实的请求耗时**。 */
+const checkElapsed = ref(0)
 const healthDetailOpen = ref(false)
 
 // ---- 系统自检：逐项推进，与后端 store.check() 的检查项一一对应 ----
@@ -179,12 +182,17 @@ async function runCheck() {
   if (checking.value) return
   checking.value = true
   checkResult.value = null
+  checkElapsed.value = 0
   checkSteps.value = CHECK_ITEMS.map((it) => ({ ...it, state: 'pending' }))
 
   // 真实自检在后台整体执行（一次请求、六项一起查），动画过程逐项揭示。
+  const t0 = performance.now()
   const real = systemApi
     .check()
-    .then((d) => ({ ok: true, data: d.data }))
+    .then((d) => {
+      checkElapsed.value = Math.round(performance.now() - t0)
+      return { ok: true, data: d.data }
+    })
     .catch((e) => ({ ok: false, message: e?.response?.data?.detail || e?.message || '自检失败' }))
 
   // 逐项扫描：先亮起扫描态，再落为通过。
@@ -466,6 +474,7 @@ onMounted(() => {
             <StageTimeline
               v-if="checkResult.timings"
               :timings="checkResult.timings"
+              :total-ms="checkElapsed"
               :state="checkResult.ok ? 'ok' : 'fail'"
               class="mt-2"
             />

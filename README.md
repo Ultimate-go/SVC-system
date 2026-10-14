@@ -30,7 +30,7 @@ IAVC-VDSS 是论文 *Incrementally Aggregatable Vector Commitments and Applicati
 > 由此三件事一起消失：**全局位置分配器**（不再需要一本登记表）、**`n_max` 天花板**
 > （不再有「全系统最多存多少块」的限制）、**删除留下的空洞**（删了再传同一块，拿到的还是同一个素数）。
 >
-> 边界：`offset` **没有消失**，但它降到「**存储槽位号**」（密文放哪个槽位），
+> 边界：`offset` **没有消失**，但它降到「**存储槽位**」（密文存在哪个槽位），
 > 已不参与任何验证；详见 [`docs/开发与验收记录.md`](docs/开发与验收记录.md) 第十四章。
 在这些密码学能力之上，系统补齐了分布式存储节点、加密存储、密钥封装、完整性验证、存储证明（PoR）、审计回放与 Web 界面，构成一个可演示、可复现的完整系统。
 
@@ -39,12 +39,9 @@ IAVC-VDSS 是论文 *Incrementally Aggregatable Vector Commitments and Applicati
 ## 项目状态
 
 - 2026年第11届全国密码技术竞赛参赛项目，功能已完整闭环。
-- 验证方式（本次交付版本）：一键启动后按演示脚本走一遍；`python demo.py` 跑端到端演示并打印性能指标；`cd frontend; npm test` 跑前端单元测试（119 条，Node 自带 `node --test`，零新依赖；含切块阶梯口径、422 文案还原、输入校验措辞与上限、整份取密文的体积估算）；`scripts/bench_batch.py`、`scripts/bench_blocksize.py` 复现文档里的实测数字；管理员界面「总览 → 系统自检」跑一遍摘要、各节点状态与全局向量一致性。
-- **八份可重跑的验收脚本**（共 **387 条断言**，全部可离线跑、不启服务）：`scripts/verify_identity_primegen.py`（密码学内核）、`verify_session_identity.py`（新旧两套素数坐标并存）、`verify_store_identity.py`（上传/改块/追加/聚合/截断/删 除）、`verify_backend_identity.py`（真库 + 模拟重启）、`verify_fault_drill.py`（节点掉线 / 永久损毁下的真实反应 + HTTP 接口层）、`verify_node_wire.py`（**跨进程线格式** —— 不起端口地走真 JSON，含"节点重启后继续写"）、`verify_pending_restart.py`（**待补推现场跨重启** —— 四种操作"补推成功"与"一次就成功"必须算出**同一本账**，外加管理器层真重启、陈旧现场丢弃、缺"落库那半"时拒绝恢复）、`verify_segment_ladder.py`（**自动切块阶梯** —— 小文件 1 KB 起、大文件逐档上升、块数始终受控，且与前端那份预览口径**同表**）。
-  外加 `scripts/_e2e_api.py`（**87 项**，需要服务在跑）：打真 8000 端口 + 真 4 台节点，从登录一路走到"掉线 → 写失败 → 待补推 → 恢复 → 补推收敛"。
-
-还有一支**两步走的真链路探针** `scripts/_live_pending_probe.py`（`setup` → **人工重启一次后端** → `verify` → `cleanup`）：
-它专门验"待补推现场**跨重启**还活着"—— 中间那一步必须是真的重启进程，脚本没法在自己进程里做，所以拆成两半。
+- 验证方式（本次交付版本）：一键启动后按演示脚本走一遍；`python demo.py` 跑端到端演示并打印性能指标；`cd frontend; npm test` 跑前端单元测试（129 条，Node 自带 `node --test`，零新依赖；含切块阶梯口径、422 文案还原、输入校验措辞与上限、整份取密文的体积估算）；`scripts/bench_batch.py`、`scripts/bench_blocksize.py` 复现文档里的实测数字；管理员界面「总览 → 系统自检」跑一遍逐文件摘要、各节点状态与位置登记一致性。
+- **八份可重跑的验收脚本**（每份跑完都逐条打印 PASS / FAIL，全部可离线跑、不启服务）：`scripts/verify_identity_primegen.py`（密码学内核）、`verify_session_identity.py`（新旧两套素数坐标并存）、`verify_store_identity.py`（上传/改块/追加/聚合/截断/删 除）、`verify_backend_identity.py`（真库 + 模拟重启）、`verify_fault_drill.py`（节点掉线 / 永久损毁下的真实反应 + HTTP 接口层）、`verify_node_wire.py`（**跨进程线格式** —— 不起端口地走真 JSON，含"节点重启后继续写"）、`verify_version_restore.py`（**版本留存与回退** —— 留的是本体、只留两版、回退会重新承诺且可来回）、`verify_segment_ladder.py`（**自动切块阶梯** —— 小文件 1 KB 起、大文件逐档上升、块数始终受控，且与前端那份预览口径**同表**）。
+  外加 `scripts/_e2e_api.py`（需要服务在跑）：打真 8000 端口 + 真 4 台节点，从登录一路走到"掉线 → 写失败（本次作废）→ 恢复 → 重做一次成功"。
 - 密钥层已按导师要求从 ABE 切换为「**SM2 公钥封块密钥 + 口令封私钥**」。
 - **2026-10 做过一轮浏览器端全量实测**：只读接口 + 写入全链路（上传 / 详情 / 试解密 / 更新 / 清零 / 追加 / 截断 / 删除）+ 用户管理（建号、重复 409、空名与非法角色 422）+ **越权面**（普通用户打管理接口、改别人文件、改他人口令，全部 403）。完整清单与旁证见 [`docs/开发与验收记录.md`](docs/开发与验收记录.md)。
 - 目前仍在迭代：详见 [`docs/方案设计.md`](docs/方案设计.md) 的「已知局限」一节。
@@ -62,7 +59,7 @@ IAVC-VDSS 是论文 *Incrementally Aggregatable Vector Commitments and Applicati
 - **增量更新**：改块 / 追加 / 截断 / **删整份文件** / **把某一块清零**（换成等长全 0：它走的是改块而不是删除 —— 块仍在、下标不变、总块数不变，完整性照样验证通过，只有所有者解密时看得到那串 0）。前几种代价只与改动量成正比，**别人那份文件一个字节都不动**（每份文件一条独立向量）；删整份文件只影响它自己 —— 它占的位置段会空出来，但段**永不回收**，原来压在它后面的文件照样待在自己的位置上。
 - **存储证明（PoR）**：随机挑战，常数大小的证明确认各节点仍持有数据。
 - **故障演练**：把若干台节点模拟成「掉线」或「永久损毁」（地震 / 海啸），并算出**影响面** —— 哪些块的主副本出事但副本救得回来（照常可用）、哪些块的**每一份副本都在故障机器上**（现实中会永久丢失）。它只让指定节点不可达，**密码学与分片一个字都不改**，所以看到的失败是真代码在「这台机器没了」时的真实行为：验证 / 聚合 / 取块会报「取不到密文」，改块 / 追加 / 截断会被拦下。★ **它一个字节都不会删** —— 两种模式都只改两张名单，点「恢复」立刻全部复原；「会永久丢失哪几块」是**算出来的预判**，不是真删。
-- **Web 界面**：Vue 3 + Vite + Element Plus，**18 条路由**（16 个功能页面：登录、总览、上传文件、文件详情、证据池、完整性验证（多指标筛选 + 把块收进**集合**一次验完）、存储节点与节点详情/新增、用户管理与详情、审计、性能、个人中心、界面偏好；另有 403 / 404 两张兜底页）。
+- **Web 界面**：Vue 3 + Vite + Element Plus，**20 条路由**（17 个功能页面：登录、总览、上传文件、文件详情、证据池、完整性验证（多指标筛选 + 把块收进**集合**一次验完）、存储节点与节点详情/新增、用户管理与详情、审计、性能、个人中心、界面偏好；另有 403 / 404 两张兜底页）。
 - **审计回放**：只记元数据，被拒也留痕；可按对象 / 操作者精确匹配回放。
 
 ---
@@ -165,16 +162,20 @@ IAVC-VDSS/
 │  ├─ sm2.py            SM2 曲线原语（手写）
 │  ├─ crypto.py         SM4-CTR 分段加密 + SM3 分量（承诺的对象）
 │  ├─ node_state.py     节点本地状态机
-│  ├─ registry.py       全局块索引登记表
-│  ├─ session.py        全局会话 + CRS
-│  └─ transport.py      节点协议 + LocalTransport + WriteError
+│  ├─ registry.py       位置段登记表（一文件一向量）
+│  ├─ session.py        全局会话 + CRS + 素数表缓存
+│  ├─ transport.py      节点协议 + LocalTransport + WriteError
+│  ├─ faults.py         故障演练（让指定节点"联系不上"）
+│  ├─ timing.py         阶段埋点（进度条要的两套时长）
+│  └─ console.py        控制台输出（编码与美化）
 ├─ node_service/        存储节点服务（一个进程 + 一个 SQLite）
 ├─ backend/             FastAPI + SQLite + JWT；验证不受限 / 解密受限
-│  └─ routers/          auth / admin / files / verify / system
-├─ scripts/             seed（建账号）/ run_nodes / start_all（一键起停）/ bench_*（性能基准，实测数字的来源）
-├─ frontend/            Vue 3 + Vite + Element Plus（18 条路由）
+│  ├─ manager.py        协调者：一文件一向量 + 落库顺序
+│  └─ routers/          auth / admin / files / verify / system / perf
+├─ scripts/             seed / run_nodes / start_all（一键起停）/ restart / bench_*（性能基准，实测数字的来源）/ check_js_wrap / gen_crypto_vectors / 8 份 verify_*.py
+├─ frontend/            Vue 3 + Vite + Element Plus（20 条路由）+ tests/（前端单元测试）
 ├─ demo.py              端到端演示 + 性能指标
-└─ docs/                方案设计 + 复现指南
+└─ docs/                方案设计 + 复现指南 + 架构说明 + 验收记录
 ```
 
 ---

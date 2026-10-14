@@ -4,7 +4,7 @@
 --------
 **内存里的 :class:`~core.store.VectorStore` 是权威，数据库是写穿日志。**
 重启时从库里重建向量，重建完必须能通过 ``store.check()``
-（有测试钉住这一点）。这样做的好处是：密码学状态只有一份真源，
+（``store.check()`` 重建时就会拦）。这样做的好处是：密码学状态只有一份真源，
 数据库不参与任何代数运算，出问题时边界清楚。
 
 **安全红线**（规划 §6.4）：``crs`` 表只存 ``N``、``g``、``l``、``n_max`` 四个
@@ -53,7 +53,7 @@ def utcnow() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# 公开参数与全局摘要 —— 全系统各一行
+# 公开参数与摘要 —— 公开参数各一行；摘要按文件各一行（file_deltas）
 # ---------------------------------------------------------------------------
 
 class CrsRow(Base):
@@ -329,8 +329,6 @@ class NodeRegistryRow(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     #: 协调者上次成功推送到第几块。0 = 从没收到过（新加入还没分到块）。
     received_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 已经从这个集群里摘掉了（缩容留下的历史记录，仅用于展示）。
-    retired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 # ---------------------------------------------------------------------------# 审计

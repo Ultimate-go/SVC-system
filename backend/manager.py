@@ -7,7 +7,7 @@
 模幂、没有一行群运算，只有搬运。
 
 重建的正确性由 ``store.check()`` 兜底：它会把重建出来的增量摘要与
-"对整条向量做一次 ``commit``" 的结果逐位比对。有测试钉住这一点。
+"对这份文件做一次 ``commit``" 的结果逐位比对。
 
 并发
 ----
@@ -170,7 +170,7 @@ class DecryptDenied(Exception):
 
 
 class StoreManager:
-    """全局向量的持久化外壳。"""
+    """协调者权威状态的持久化外壳（各文件的摘要、位置登记、块账目）。"""
 
     def __init__(self, settings: Settings, database: Database) -> None:
         self.settings = settings
@@ -712,23 +712,19 @@ class StoreManager:
 
         .. important::
 
-           ★ **摘掉一台机器时不会把它从登记表里删掉**（``retired`` 保持 False）。
+           ★ **摘掉一台机器时不会把它从登记表里删掉**。
            为什么：它的数据目录还在、``received_n`` 也还记着"我推到过第几块" ——
            过一会儿把它加回来（比如 4 → 2 → 6 这种来回调），它手里的东西
            仍然是有效的，闸门一比对就放行，**不用重传**。
-           把它标成 retired/删掉反而会让那台机器回来时"被当成新的"，
+           把它从表里删掉反而会让那台机器回来时"被当成新的"，
            而它其实有数据 —— 那种状态会被闸门以"停在 n=4、协调者也是 n=4"放行，
-           但登记表说它是新节点，界面上就会显示一句错的"新节点"。保持 False 更简单也更准。
+           但登记表说它是新节点，界面上就会显示一句错的"新节点"。留着它更简单也更准。
         """
         joined: list[str] = []
         for nid in self.settings.node_ids:
             row = db.get(NodeRegistryRow, nid)
             if row is None:
                 db.add(NodeRegistryRow(node_id=nid, received_n=0))
-                joined.append(nid)
-            elif row.retired:
-                row.retired = False
-                row.received_n = 0
                 joined.append(nid)
         db.commit()
         return joined
@@ -1211,9 +1207,8 @@ class StoreManager:
                     blobs=dict(zip(Q, cts, strict=True)),
                 )
             except (TransportError, ValueError) as exc:
-                # 搬失败**不留补推现场**：δ 一个字节都没动，所以这不是
-                # "全网不一致"，只是"这批块没搬成" —— 如实记进 lost 就好
-                # （补推机制是给"δ 已推进、但有台没跟上"用的）。
+                # 搬失败什么都不用退：δ 一个字节都没动，所以这不是
+                # "全网不一致"，只是"这批块没搬成" —— 如实记进 lost 就好。
                 failed.append({"from": src, "to": tgt, "indices": list(Q), "why": str(exc)})
                 lost.extend(Q)
                 continue
@@ -1354,14 +1349,9 @@ class StoreManager:
                     owner, file_key, data, key_sink=sink, segment_bytes=seg_bytes, nodes=nodes
                 )
             except WriteError:
-                # 向量那边已经把现场留住了（补推就能收敛）。
-                # ★ 把"落库"这一步也挂到**同一份**现场上 —— 否则补推之后
-                #   库还是空的，重启时会被"节点与协调者不同步"拦下。
-                #
-                #   条件判断不能省：只有**真的**留下了现场才挂。
-                #   若传输层没带 payloads（`_pending is None`），重推根本无从谈起，
-                #   这时候再"补落库"就会造出一个**假的收敛** —— 库里有文件、
-                #   向量里却没有对应分量，下一句 store.check() 就当场抽你。
+                # 写推失败 ⇒ 这次上传作废：store 那边已经把已分配的位置
+                # 退回登记表（见 ``VectorStore._rollback_add``），所以"落库"这一步
+                # 根本不会走到 —— 库与向量都不会留下这次操作的痕迹。
                 raise
             except ValueError as exc:
                 msg = str(exc)
@@ -1371,7 +1361,7 @@ class StoreManager:
 
             with stage("落库（上传文件登记）"):
                 frow = self._persist_once(_finish)
-            # 记一下这次上传把全局向量推到了哪里，方便排查
+            # 记一下这次上传把该文件的向量推到了哪个位置段，方便排查
             assert store.n == n0 + frow.block_count
             return frow
 
@@ -1432,10 +1422,10 @@ class StoreManager:
                     wrapped[pos] = wrap_key(pk_owner, key)
 
             def _finish() -> dict:
-                """③ 再写库 —— 正常路径与补推路径共用（理由同 :meth:`upload`）。
+                """③ 再写库（理由同 :meth:`upload`）。
 
                 ★ 它**只读** ``store`` 当前状态：新 IV 与新长度也从中取，
-                  所以补推路径不需要再传一遍那两个值。
+                  不从外面传一遍，避免两份数据源漂移。
                 """
                 cur = store.files[(owner, file_key)]
                 iv = cur.ivs[block_idx]
@@ -1491,7 +1481,7 @@ class StoreManager:
                 store.modify(owner, file_key, block_idx, data, key_sink=sink)
             except WriteError:
                 # 一台没跟上就是全网不一致，且改块不能“重来一次”（重来会换新密钥、新密文，
-                # 已经跟上的节点会当场拒）。方案约定：不留现场、不补推。
+                # 已经跟上的节点会当场拒）。方案约定：写失败即作废。
                 raise
             except (KeyError, IndexError) as exc:
                 raise NotFound(str(exc)) from exc
@@ -1626,10 +1616,9 @@ class StoreManager:
     def _finish_restore(
         self, owner: str, file_key: str, block_idx: int, hist: Mapping, before: Mapping | None
     ) -> int:
-        """回退的**落库收尾** —— 正常路径与补推路径共用（理由同 :meth:`modify_block`）。
+        """回退的**落库收尾**（理由同 :meth:`modify_block`）。
 
-        ★ 它只读 ``store`` 当前状态（新 IV / 新长度都从那里取），所以补推路径
-          不需要再传一遍那两个值。
+        ★ 它只读 ``store`` 当前状态（新 IV / 新长度都从那里取），不从外面传一遍。
         """
         store = self._require()
         cur = store.files[(owner, file_key)]
@@ -1678,9 +1667,9 @@ class StoreManager:
 
         :param block_indices: 要回退哪几块（0 起）；``None`` = 所有留过上一版的块。
 
-        ★ 走的是与改块**同一条**推送/补推链路（:meth:`~core.store.VectorStore.restore_block`
+        ★ 走的是与改块**同一条**推送链路（:meth:`~core.store.VectorStore.restore_block`
           里就是 ``push_update`` + ``apply_update``），所以：
-          “推给节点 → 再改库”的顺序、写失败留住现场、补推收尾 —— 全部与改块一致。
+          “推给节点 → 再改库”的顺序、写失败即作废 —— 全部与改块一致。
 
         :raises NotFound: 文件或这些块的留存不存在
         :raises Conflict: 这份文件一块上一版都没留
@@ -1736,7 +1725,7 @@ class StoreManager:
                 except ValueError as exc:
                     raise OutOfRange(str(exc)) from exc
                 except WriteError:
-                    # 同改块：不留现场、不补推。
+                    # 同改块：写失败即作废。
                     raise
                 version = self._finish_restore(owner, file_key, bi, row, before)
                 done.append(bi)
@@ -1755,7 +1744,7 @@ class StoreManager:
           与"不能为空"两道校，等长全 0 两道都天然满足）。
 
         ★ 为什么**复用** :meth:`modify_block` 而不是另写一套：改块这条路
-          （重新加密 → 算新分量 → 推给全网 → 重新封装密钥 → 写库 → 补推）
+          （重新加密 → 算新分量 → 推给全网 → 重新封装密钥 → 写库）
           只能有一份定义。两份的结果就是"一条把账收干净、另一条漏一半"，
           而那是最难查的一类偏差。零清与改块**唯一**的区别只是"写什么内容"。
 
@@ -1821,10 +1810,10 @@ class StoreManager:
                     wrapped[pos] = wrap_key(pk_owner, key)
 
             def _finish() -> dict:
-                """③ 再写库 —— 正常路径与补推路径共用（理由同 :meth:`upload`）。
+                """③ 再写库（理由同 :meth:`upload`）。
 
                 ★ 它**只读** ``store`` 当前状态：新增的下标也从当前的账目里重算，
-                  所以补推路径不必再传一遍。
+                  不从外面传一遍。
                 """
                 cur = store.files[(owner, file_key)]
                 new_indices = cur.indices[n_before:]
@@ -1871,7 +1860,7 @@ class StoreManager:
             try:
                 store.append(owner, file_key, data, key_sink=sink)
             except WriteError:
-                # 同上传：不留现场、不补推。
+                # 同上传：写失败即作废。
                 raise
             except (KeyError, IndexError) as exc:
                 raise NotFound(str(exc)) from exc
@@ -1932,11 +1921,10 @@ class StoreManager:
             n_before = rec.block_count
 
             def _finish() -> dict:
-                """② 再写库 —— 正常路径与补推路径共用（理由同 :meth:`upload`）。
+                """② 再写库（理由同 :meth:`upload`）。
 
                 ★ 要删哪些块**从当前账目反推**（``block_idx >= 当前块数`` 的都是
-                  被删掉的），而不是把下标从外面传进来 —— 这样补推路径不必
-                  再传一遍，两条路也必然算出同一份结果。
+                  被删掉的），而不是把下标从外面传进来 —— 只有一处真相。
                 """
                 cur = store.files[(owner, file_key)]
                 with self.db.session() as db:
@@ -2023,8 +2011,8 @@ class StoreManager:
                 raise NotFound(f"文件 {owner}/{file_key} 不存在")
             n_before = store.n
             g0 = int(rec.indices[0])
-            # ★ K 与"连带名单"都在删之前就算好：这样 _finish 在**补推路径**上
-            #   也能用（那时 store 里的文件账目已经被摘掉了，已经推不出来）。
+            # ★ K 与"连带名单"都在删之前就算好：等到 _finish 落库时，
+            #   store 里的文件账目已经被摘掉了，那时再推就推不出来了。
             #
             #   ⚠️ K **不能**写成 `tuple(range(g0, n_before))`（"从这份文件的第一块
             #   一直数到向量末尾"）：位置段**永不回收**，删过的位置会留下空洞。
@@ -2247,7 +2235,7 @@ class StoreManager:
         targets: Sequence[tuple[str, str]],
         block_indices: Sequence[int] | Sequence[Sequence[int]] | None = None,
     ) -> dict:
-        """一次查询**若干个文件** —— 设计 B 下这只需要一份证据。
+        """一次查询**若干个文件** —— 跨文件时在合并位置集上重算一份证据。
 
         :param block_indices: 块序号，两种形态（见 :meth:`normalize_block_plan`）：
             ``[0, 1]`` 是**共用**（每个文件都取这几块），
@@ -2620,7 +2608,7 @@ class StoreManager:
 
         写路径的次序是「内存与节点先前进，落库在后」。落库自己抛错（磁盘满 /
         ``SQLITE_BUSY`` / 唯一约束冲突）时，事务由 ``Database.session()`` 回滚，
-        这次写就到此为止 —— **不留现场、不补推**。
+        这次写就到此为止 —— 不做任何补偿，如实报错。
         """
         return finish()
 
@@ -2692,9 +2680,10 @@ class StoreManager:
     # -------------------------------------------------------------------
     #
     # ★ 一次广播写只要有**一台**没跟上，全网就不一致：已经跟上的那几台 δ 已
-    #   经是新的了。方案约定：**不留现场、也不补推**，没推上去的副本直接丢弃
-    #   （见 ``core/store.py`` 里那几处 ``except TransportError``）。
-    #   所以写路径收到 ``WriteError`` 时只做一件事：把它翻成 503 告诉用户
+    #   经是新的了。方案约定：**写失败即作废**，没推上去的副本直接丢弃，
+    #   并把已分配的位置退回登记表（见 ``core/store.py`` 里那几处
+    #   ``except TransportError``）。所以写路径收到 ``WriteError`` 时只做一件事：
+    #   把它翻成 503 告诉用户
     #   “哪几台没跟上、已经写上的那几台不受影响”，不再挂任何待办。
 
 
@@ -2992,92 +2981,74 @@ class StoreManager:
             return out
 
     # -------------------------------------------------------------------
-    # 用户删除（墓碑改名）
+    # 用户删除（连同名下文件一起真删）
     # -------------------------------------------------------------------
 
     def delete_user(self, user_id: int, *, actor: str) -> dict:
-        """删号：把该用户名下的一切改挂到**墓碑名**，然后删掉用户行。
+        """删号：把该用户名下的**文件连同数据一起删掉**，然后删掉用户行。
 
-        ★ 三件事必须在**同一把写锁 + 同一个事务**里（审计 S1 / S2）：
+        ★ 语义（2026-10-14 改）：**删号 = 删文件**。以前的做法是把文件改挂到
+        墓碑名（``<名字>（已删号#id）``）并保留在向量里，理由是“压在中间的块
+        物理删不掉”；底座改造后 ``delete_file`` 已经能删任意位置的文件
+        （见 :meth:`core.store.VectorStore.delete_from`），那条理由不再成立。
 
-        1. **内存**：``registry`` / ``files`` / ``deltas``（以及子类的块密钥表）一起改名；
-        2. **库**：``blocks`` / ``files`` / **``file_deltas``** 三张表一起改名；
-        3. 删 ``users`` 那一行。
+        因此现在分两步，两步都在**同一把写锁**内：
 
-        为什么不能少改任何一处 —— 后果不是"少改一行"，而是：
+        1. 逐个调用 :meth:`delete_file`，把该用户名下的每份文件按**完整链路**
+           删干净：内存账目 + 向量位置 + 库里的块行/文件行 + 节点上的分块份额；
+        2. 删 ``users`` 那一行。
 
-        * 漏 ``deltas`` / ``file_deltas`` ⇒ 运行期 ``delta_of(墓碑名)`` 直接
-          ``KeyError``，而 ``/api/files`` 是**逐行序列化**的 ⇒
-          **一份墓碑文件就能让所有用户的文件列表 500**；
-        * 重启后 ``_reload`` 从 ``blocks``（墓碑名）与 ``file_deltas``（旧名）
-          重建出**两套身份** —— 库自己就不一致，所以**不自愈**。
+        ★ 为什么持锁：``doomed`` 是在锁内取的，删的过程中不允许再有并发上传
+        给他加新文件（否则会漏删）。:meth:`delete_file` 内部也会取同一把锁，
+        它是 ``RLock``，可重入。
 
-        为什么必须持锁：它改的是 ``registry`` / ``files`` / ``deltas`` 三个
-        **共享结构**，与并发的上传 / 查询是竞争关系。全项目其他写路径都在
-        ``_lock`` 保护下，只有它以前没有（审计 S2）——
-        而它的操作又跨内存与库，一旦看到半更新状态，故障要等到重启才"坐实"。
+        ★ 为什么不回滚：一份一份地删意味着中途失败会留下“删了一部分”的状态。
+        这里**如实返回已删清的清单**（调用方据此告知管理员），而不是假装
+        整体成功或整体失败 —— 删掉的数据本来就不可恢复，把已删的说成没删更糟。
 
         :param actor: 发起删除的管理员用户名（不能删自己）。
         :raises NotFound: 用户不存在。
-        :raises Conflict: 想删自己，或改名会撞键。
-        :returns: ``{"deleted", "files_left", "tomb_name"}``
+        :raises Conflict: 想删自己。
+        :returns: ``{"deleted", "deleted_files", "files_deleted", "blocks_deleted"}``
         """
-        with self._lock, self.db.session() as db:
-            user = db.get(UserRow, user_id)
-            if user is None:
-                raise NotFound("用户不存在")
-            if user.username == actor:
-                raise Conflict("不能删除自己")
-
-            username = user.username
-            uid = user.id
-            # ★ 墓碑名里带 ``#id`` 是为了唯一：``ghost`` 被删两次会有两个墓碑名，
-            #   否则 (owner, file_key) 会撞唯一约束。
-            #   （SQLite 不强制 VARCHAR 长度，所以名字超过 64 字符也不会被截断。）
-            tomb = f"{username}（已删号#{uid}）"
-            n_files = int(
-                db.execute(
-                    select(func.count())
-                    .select_from(FileRow)
-                    .where(FileRow.owner == username)
-                ).scalar_one()
-            )
+        with self._lock:
+            # 1) 校验并取出用户名（一个短事务；之后不再需要这个 session）。
+            #    在这里就把名字取出来，是因为第 3 步删行之后就拿不到了。
+            with self.db.session() as db:
+                user = db.get(UserRow, user_id)
+                if user is None:
+                    raise NotFound("用户不存在")
+                if user.username == actor:
+                    raise Conflict("不能删除自己")
+                username = user.username
 
             store = self._require()
-            # 先改内存（它会先做冲突检查，抛了就不会动库），再改库，最后删用户。
-            # 顺序反过来会留下"库已改、内存没改"的分叉 —— 而分叉只有重启后才看得出来。
-            try:
-                store.rename_owner(username, tomb)
-            except ValueError as exc:
-                raise Conflict(str(exc)) from exc
+            # 2) 删掉该用户名下的全部文件。
+            #    ★ 先快照出清单再逐个删：删的过程会改 ``registry``，
+            #      边删边遍历同一份结构是不安全的。
+            doomed = tuple(store.registry.owner_files(username))
+            deleted: list[dict] = []
+            for file_key in doomed:
+                out = self.delete_file(username, file_key)
+                deleted.append(
+                    {
+                        "file_key": file_key,
+                        "blocks": int(out.get("dropped_blocks") or 0),
+                    }
+                )
 
-            try:
-                for stmt in (
-                    update(BlockRow).where(BlockRow.owner == username),
-                    update(FileRow).where(FileRow.owner == username),
-                    # ★★ S1 的修复点：``file_deltas`` 以前**没有被改**。
-                    update(FileDeltaRow).where(FileDeltaRow.owner == username),
-                    # ★★ 回滚演示记录也要跟着走：不跟的话它会留在**活人**名下，
-                    #    而这个用户名一旦被重新注册，同一个
-                    #    ``(owner, file_key)`` 就会被复用 —— 又是
-                    #    “新文件被塞进旧密文”那条路（见 ``delete_file``）。
-                    update(ReplayRow).where(ReplayRow.owner == username),
-                ):
-                    db.execute(stmt.values(owner=tomb))
-                db.delete(user)
-                db.commit()
-            except Exception:
-                db.rollback()
-                # 库那半边失败就把内存**改回去**：分叉的后果是
-                # "重启前后文件列表不一样"，那种故障最难查。
-                # 这里宁可整体失败，也不留下一半。
-                store.rename_owner(tomb, username)
-                raise
+            # 3) 删用户行。文件已经全删干净，这里只是摘掉账号本身。
+            with self.db.session() as db:
+                row = db.get(UserRow, user_id)
+                if row is not None:
+                    db.delete(row)
+                    db.commit()
 
             return {
                 "deleted": username,
-                "files_left": n_files,
-                "tomb_name": tomb,
+                "deleted_files": deleted,
+                "files_deleted": len(deleted),
+                "blocks_deleted": sum(int(d["blocks"]) for d in deleted),
             }
 
     # -------------------------------------------------------------------
@@ -3185,7 +3156,7 @@ class StoreManager:
         这里问"还在不在"），所以它**不碰任何密钥、也不写审计流水** ——
         "验证不受限"这条原则同样适用于它。
 
-        :raises Conflict: 全局向量还是空的（没东西可挑战）
+        :raises Conflict: 系统里还没有任何块（没东西可挑战）
         """
         with self._lock:
             store = self._require()
@@ -3194,40 +3165,20 @@ class StoreManager:
             except ValueError as exc:
                 raise Conflict(str(exc)) from exc
 
-    def list_files(self) -> list[dict]:
-        """所有文件 —— **验证不受限**，所以列表不按所有者过滤。
+    def disabled_owners(self) -> set[str]:
+        """已停用（``disabled=1``）的用户名集合。
 
-        每行带上该文件的全局下标区间，前端据此选块验证。
+        ★ 给列表用：停用**不删文件**，这些文件仍然可被任何人验证，
+          但其所有权人已经登不进来 —— 列表里必须如实标出「所有者已停用」，
+          否则一份谁都解不开的文件看起来和正常文件一样。
+
+        ★ 查一次库拿全量，**不要**在逐行序列化里每行查一次。
         """
-        store = self._require()
-        out: list[dict] = []
-        for (owner, file_key), rec in store.files.items():
-            d = store.delta_of(owner, file_key)
-            out.append(
-                {
-                    "owner": owner,
-                    "file_key": file_key,
-                    "total_bytes": rec.total_bytes,
-                    "block_count": rec.block_count,
-                    "segment_bytes": rec.segment_bytes,
-                    "content_digest": rec.content_digest,
-                    "indices": list(rec.indices),
-                    #: ★ 新方案（一文件一向量）：段起点、块数、位置段、指纹。
-                    #:   界面按「文件 / 第几块」展示，这几个就是它背后的依据；
-                    #:   位置段还解释了“为什么块号与位置号对不上”。
-                    "offset": int(d.offset),
-                    "n": int(d.n),
-                    "segments": [[int(a), int(b)] for a, b in d.segments],
-                    "delta_fp": self.delta_fingerprint((owner, file_key)),
-                    # 只是**方便显示**的边界值。追加之后一个文件的下标可能带缺口
-                    # （两次追加之间别的文件也占了位置），所以 first..last 之间
-                    # 可能夹着别人的块 —— 要真集合只能用上面的 indices。
-                    "first_index": rec.indices[0],
-                    "last_index": rec.indices[-1],
-                }
-            )
-        out.sort(key=lambda x: x["offset"])
-        return out
+        with self.db.session() as db:
+            rows = db.execute(
+                select(UserRow.username).where(UserRow.disabled.is_(True))
+            ).scalars()
+            return {str(x) for x in rows}
 
     def _leaving_nodes(self) -> tuple[str, ...]:
         """**配置里已经摘掉、但进程还在跑**的那几台（缩容保存后、重启前的窗口）。
@@ -3363,19 +3314,19 @@ class StoreManager:
             note = (
                 f"影响评估：{len(lost)} 个分块将永久丢失，其全部副本均位于故障节点，涉及 {len(by_file)} 份文件。"
                 f"成因是「副本数不足」与「不可逆故障」同时成立。"
-                f"（本演练不删除数据；点击「恢复」即可全部复原。）"
+                f"（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
             )
         elif degraded:
             note = (
                 f"{degraded} 个分块的主副本不可用，但其余副本仍然在线 —— "
                 f"读取与验证会自动改用其余副本，当前功能不受影响。"
                 f"这正是多副本的意义：单节点故障不导致服务中断。"
-                f"（本演练不删除数据；点击「恢复」即可全部复原。）"
+                f"（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
             )
         else:
             note = (
                 "故障节点上没有任何在用的分块（可能未分配到分块）。"
-                "业务功能不受影响。（本演练不删除数据；点击「恢复」即可全部复原。）"
+                "业务功能不受影响。（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
             )
         return {
             "lost_blocks": lost,

@@ -5,15 +5,16 @@
  * 后果是**用户再也登不进去**。所以两个方向都要钉住：
  *
  * * 「Python 封 → JS 解」：`crypto-vectors.json` 的 `user_keys` 用例覆盖；
- * * 「JS 封 → Python 解」：本文件把 JS 的产物**写到盘上**
- *   （`logs/js-wrapped.json`），再由 `scripts/check_js_wrap.py` 用
+ * * 「JS 封 → Python 解」：本文件把 JS 的产物**写到系统临时目录**
+ *   （`vds-js-wrapped.json`），再由 `scripts/check_js_wrap.py` 用
  *   `core.keywrap.unwrap_private_key` 去解 —— 见验收文档 10.x。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -25,8 +26,8 @@ import {
 
 const V = JSON.parse(readFileSync(new URL('./crypto-vectors.json', import.meta.url), 'utf8'))
 
-/** JS 产物落到盘上的位置（`logs/` 是 gitignored 的）。 */
-const OUT = fileURLToPath(new URL('../../logs/js-wrapped.json', import.meta.url))
+/** JS 产物落到盘上的位置（系统临时目录，不往仓库里写）。 */
+const OUT = join(tmpdir(), 'vds-js-wrapped.json')
 
 test('wrapPrivateKey ↔ unwrapPrivateKey 自洽（新口令重封后解得回来）', () => {
   const sk = BigInt(V.sm2.sk_a)
@@ -61,7 +62,6 @@ test('★ I8：把 JS 封的密文落盘，交给 Python 侧去解（跨实现�
   const sk = BigInt(V.sm2.sk_a)
   const password = 'cross-impl-pass'
   const blob = wrapPrivateKey(password, sk, { iterations: 1000, salt: new Uint8Array(16) })
-  mkdirSync(dirname(OUT), { recursive: true })
   writeFileSync(
     OUT,
     JSON.stringify({ password, sk: sk.toString(), blob }, null, 1),

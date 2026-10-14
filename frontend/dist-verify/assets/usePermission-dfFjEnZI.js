@@ -1,1 +1,0 @@
-import{l as e}from"./runtime-core.esm-bundler-D8DVY3xR.js";import{i as t}from"./index-EgrstMgm.js";function n(){let n=t();return{isAdmin:e(()=>n.isAdmin),isLoggedIn:e(()=>n.isLoggedIn)}}export{n as t};

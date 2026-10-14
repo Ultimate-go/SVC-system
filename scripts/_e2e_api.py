@@ -1,5 +1,5 @@
 """接口层端到端（打真的 8000 端口）—— 上传 / 改块 / 追加 / 截断 / 检索 /
-批量验证 / 证据池 / 存储证明 / 故障演练 / 补推，一条一条走下来。
+批量验证 / 证据池 / 存储证明 / 故障演练，一条一条走下来。
 
 ★ 为什么要有它（而不是只靠那几个 ``verify_*.py``）：
   那些脚本大多在**进程内**跑，而这次线上事故恰恰是"进程内全绿、跨进程全挂"。
@@ -90,10 +90,6 @@ check("4 台节点都在", len(report) == 4, f"{len(report)} 台")
 check("4 台节点视图都合法", all(x.get("valid") for x in report),
       str([x.get("valid") for x in report]))
 
-r = c.get("/api/nodes/pending", headers=H_USER)
-check("GET /api/nodes/pending 200", r.status_code == 200, show(r, 160))
-check("★ 没有待补推的现场", not r.json().get("pending"), show(r, 160))
-
 
 section("1. ★ 上传（线上就是卡在这一步）")
 DATA1 = bytes((i * 7) % 251 for i in range(3000))
@@ -136,9 +132,6 @@ check("★ 第二份文件拿到了**另一段**位置（段不重叠）",
 
 
 section("2. 检索 + 承诺验证（读回来自己算分量）")
-r = c.get(f"/api/registry/0", headers=H_USER)
-check("GET /api/registry/0 200", r.status_code == 200, show(r, 200))
-
 r = c.post("/api/query", headers=H_USER, json={"indices": [0, 1]})
 check("POST /api/query 200", r.status_code == 200, show(r, 300))
 q = r.json().get("verify") or r.json()
@@ -184,9 +177,6 @@ rep2 = r.json()
 rep2 = rep2.get("nodes") if isinstance(rep2, dict) else rep2
 check("★ 三种更新之后，4 台节点视图仍合法",
       all(x.get("valid") for x in rep2), str([x.get("valid") for x in rep2]))
-r = c.get("/api/nodes/pending", headers=H_USER)
-check("★ 三种更新之后没有留下待补推现场", not r.json().get("pending"),
-      show(r, 160))
 
 
 section("4. 解密（所有者才行；默认模型是浏览器解封）")
@@ -246,10 +236,6 @@ check("★ 影响面说清「本演练不删数据」", "不删数据" in note, 
 check("★ 影响面报出了会丢哪几块（预判）", int(impact.get("lost_count") or 0) > 0,
       str(impact.get("lost_count")))
 
-r = c.get("/api/nodes/pending", headers=H_USER)
-check("★ 演练期间没有产生待补推现场（只改名单）",
-      not r.json().get("pending"), show(r, 160))
-
 r = c.post("/api/admin/fault-drill", headers=H_ADMIN,
            json={"action": "restore"})
 check("★ 恢复 200", r.status_code == 200, show(r, 200))
@@ -276,19 +262,7 @@ if r.status_code == 200:
           f"{len(got)} vs {len(EXPECT1)}")
 
 
-section("7. 补推在没有现场时是安全的空操作")
-r = c.post("/api/nodes/retry-push", headers=H_ADMIN)
-check("POST /api/nodes/retry-push 200", r.status_code == 200, show(r, 250))
-check("★ 明说「没有待补推的更新」而不是乱推一遍",
-      "没有待补推" in r.text or bool(r.json().get("ok")), show(r, 250))
-r = c.get("/api/nodes", headers=H_USER)
-rep3 = r.json()
-rep3 = rep3.get("nodes") if isinstance(rep3, dict) else rep3
-check("补推之后节点仍然全绿", all(x.get("valid") for x in rep3),
-      str([x.get("valid") for x in rep3]))
-
-
-section("8. 管理员面：自检 / 部署 / 端口 / 审计")
+section("7. 管理员面：自检 / 部署 / 端口 / 审计")
 r = c.post("/api/admin/check", headers=H_ADMIN)
 check("POST /api/admin/check 200", r.status_code == 200, show(r, 250))
 r = c.get("/api/admin/deploy", headers=H_ADMIN)
@@ -301,15 +275,13 @@ r = c.get("/api/perf/summary", headers=H_ADMIN)
 check("GET /api/perf/summary 200", r.status_code == 200, show(r, 150))
 
 
-section("9. 删除（del 要走 /node/delete 那条路）")
+section("8. 删除（del 要走 /node/delete 那条路）")
 r = c.delete(f"/api/files/{FID2}", headers=H_USER)
 check("★ DELETE 文件 200", r.status_code == 200, show(r, 300))
 r = c.get("/api/files", headers=H_USER)
 rows = r.json()
 rows = rows.get("files") if isinstance(rows, dict) else rows
 check("删掉之后列表里没有它", all(x.get("id") != FID2 for x in rows))
-r = c.get("/api/nodes/pending", headers=H_USER)
-check("★ 删除之后没有留下待补推现场", not r.json().get("pending"), show(r, 160))
 r = c.get("/api/nodes", headers=H_USER)
 rep4 = r.json()
 rep4 = rep4.get("nodes") if isinstance(rep4, dict) else rep4
@@ -322,13 +294,13 @@ if r.status_code == 200:
     check("★★ 删掉另一份之后，这份的字节仍然逐位相同", got == EXPECT1,
           f"{len(got)} vs {len(EXPECT1)}")
 
-section("10. ★ 掉线 → 写失败 → 待补推窗口 → 恢复 → 补推收敛（线上事故那条路）")
+section("9. ★ 掉线 → 写失败（本次作废）→ 恢复 → 重做一次成功")
 
 # 这一节把**线上那次报错描述的整套流程**真跑一遍。它盯三件事：
 #  1. 掉线期间广播写必须**失败**（而不是把更新悄悄推给一台"已经没了"的机器）；
-#  2. 失败之后进入**待补推窗口**：此时 /api/status 等**每个页面都在轮询**的
-#     接口**不能 500** —— 那正是最需要看到「待补推」提示的时候；
-#  3. 恢复 + 补推之后全绿。
+#  2. 失败之后这次写**整次作废**：登记表退回、账面不推进，文件块数一个字不变；
+#     而 /api/status 等**每个页面都在轮询**的接口**不能 500**；
+#  3. 修好那台之后**重做一次**，全绿。
 KEY_C = f"e2e-c-{RUN}"
 r = c.post(
     "/api/files",
@@ -339,6 +311,7 @@ r = c.post(
 check("先传一份新文件（它占向量末尾，才删得动/加得上）",
       r.status_code in (200, 201), show(r, 200))
 FID3 = r.json().get("id")
+_b_pre = c.get(f"/api/files/{FID3}", headers=H_USER).json().get("block_count")
 
 r = c.post("/api/admin/fault-drill", headers=H_ADMIN,
            json={"action": "knock_out", "nodes": ["node-1"], "mode": "down"})
@@ -349,64 +322,54 @@ r = c.patch(
     json={"op": "append", "data_b64": base64.b64encode(b"D" * 300).decode()},
 )
 check("★★ 掉线期间写**失败**（不再是「假成功」）", r.status_code == 503, show(r, 300))
-check("★ 报错说清是「没跟上」并指向补推",
-      "补推" in r.text and "没跟上" in r.text, show(r, 300))
+check("★ 报错说清是「没跟上」", "没跟上" in r.text, show(r, 300))
 
-r = c.get("/api/nodes/pending", headers=H_ADMIN)
-_pd = r.json().get("pending") or {}
-check("★★ 留下了**真的**待补推现场", bool(_pd), show(r, 200))
-check("★ 现场点名了那台机器", _pd.get("nodes") == ["node-1"], str(_pd.get("nodes")))
-check("★ 现场带上了补推要用的负载（失败原因指着演练）",
-      "演练" in str([f.get("reason") for f in _pd.get("failures", [])]),
-      str([f.get("reason") for f in _pd.get("failures", [])])[:160])
+# ★ 这次写应当**整次作废**：已分配的位置退回登记表，文件账目不动。
+_b_post = c.get(f"/api/files/{FID3}", headers=H_USER).json().get("block_count")
+check("★★ 失败的那次追加**没有落账**（块数与失败前逐个相同）",
+      _b_post == _b_pre, f"{_b_post} vs {_b_pre}")
+check("★★ 退回登记表之后还没有撞游标 —— 重传一次文件仍然可以",
+      c.post("/api/files", headers=H_USER,
+             files={"file": (f"e2e-probe-{RUN}.bin", b"P", "application/octet-stream")},
+             data={"file_key": f"e2e-probe-{RUN}", "segment_bytes": "512"}
+             ).status_code in (200, 201))
 
-# ★★ 待补推窗口里，**每个页面都会轮询**的那些接口必须照常可用。
+# ★★ 写失败之后，**每个页面都会轮询**的那些接口必须照常可用。
 #    以前 /api/status 会在这里 500：``under_replicated`` 走到"登记表已分配、
 #    但还没落账"的那个新下标，``replicas_of`` 直接 KeyError ——
-#    于是整个界面全是「服务器内部错误」，恰恰在最该看到提示的时候。
-for _path in ("/api/status", "/api/nodes", "/api/files", "/api/nodes/pending",
+#    于是整个界面全是「服务器内部错误」，恰恰在最该看清楚的时候。
+for _path in ("/api/status", "/api/nodes", "/api/files",
               "/api/admin/deploy", "/api/perf/summary", "/api/query/files"):
     _r = c.get(_path, headers=H_ADMIN) if _path.startswith("/api/admin") or _path.startswith("/api/perf") \
         else c.get(_path, headers=H_USER)
-    check(f"★★ 待补推窗口里 {_path} 不 500", _r.status_code < 500, show(_r, 160))
+    check(f"★★ 写失败之后 {_path} 不 500", _r.status_code < 500, show(_r, 160))
 
 _r = c.post("/api/admin/check", headers=H_ADMIN)
-check("★ 待补推窗口里自检**说清原因**（而不是一句「账实不符」）",
-      "补推" in _r.text, show(_r, 260))
-
-_r = c.patch(
-    f"/api/files/{FID3}", headers=H_USER,
-    json={"op": "append", "data_b64": base64.b64encode(b"E" * 300).decode()},
-)
-check("★ 待补推窗口里再写被挡下（409，而不是撞出一个 500）",
-      _r.status_code == 409, show(_r, 260))
-check("★ 挡下时也说清了修法", "补推" in _r.text, show(_r, 260))
+check("★★ 写失败之后自检**仍然全绿**（账面没有留下脏数据）",
+      _r.status_code == 200 and bool(_r.json().get("ok")), show(_r, 260))
 
 r = c.post("/api/admin/fault-drill", headers=H_ADMIN, json={"action": "restore"})
 check("★ 演练：恢复 node-1", r.status_code == 200, show(r, 200))
-r = c.post("/api/nodes/retry-push", headers=H_ADMIN)
-check("★★ 点一次「补推」", r.status_code == 200, show(r, 250))
-print("        retry-push →", json.dumps(r.json(), ensure_ascii=False)[:200])
 
-# 自动补推后台线程也会收敛；给它一点时间，然后逐项确认全绿。
-for _ in range(12):
-    _p = c.get("/api/nodes/pending", headers=H_ADMIN).json()
-    if not (_p.get("pending") or _p.get("persist_pending")):
-        break
-    time.sleep(2)
-_p = c.get("/api/nodes/pending", headers=H_ADMIN).json()
-check("★★ 补推之后**现场清空**", not (_p.get("pending") or _p.get("persist_pending")),
-      json.dumps(_p, ensure_ascii=False)[:200])
+# ★ 恢复之后**重做一次**同一个追加 —— 这次应该成功。
+r = c.patch(
+    f"/api/files/{FID3}", headers=H_USER,
+    json={"op": "append", "data_b64": base64.b64encode(b"D" * 300).decode()},
+)
+check("★★ 恢复之后重做同一次追加**成功**", r.status_code == 200, show(r, 300))
+_b_done = c.get(f"/api/files/{FID3}", headers=H_USER).json().get("block_count")
+check("★★ 重做之后块数确实长上去了", int(_b_done) > int(_b_pre),
+      f"{_b_done} vs {_b_pre}")
 
 _r = c.get("/api/nodes", headers=H_USER).json()
 _r = _r.get("nodes") if isinstance(_r, dict) else _r
-check("★★ 补推之后 4 台节点全部视图合法", all(x.get("valid") for x in _r),
+check("★★ 重做之后 4 台节点全部视图合法", all(x.get("valid") for x in _r),
       str([x.get("valid") for x in _r]))
-check("★★ 补推之后不再有「连不上」的机器",
+check("★★ 重做之后不再有「连不上」的机器",
       not any(x.get("unreachable") for x in _r),
       str([x.get("unreachable") for x in _r]))
 _r = c.post("/api/admin/check", headers=H_ADMIN)
-check("★★ 补推之后自检全绿", _r.status_code == 200 and bool(_r.json().get("ok")),
+check("★★ 重做之后自检全绿", _r.status_code == 200 and bool(_r.json().get("ok")),
       show(_r, 250))
 
 _r = c.post(f"/api/files/{FID3}/decrypt", headers=H_OWN, json={})
@@ -414,8 +377,8 @@ check("★★ 走完整套故障流程之后，文件仍然解得开",
       _r.status_code == 200, show(_r, 200))
 if _r.status_code == 200:
     _got = bytes.fromhex(_r.json().get("data_hex") or "")
-    # ★ 期望值只含那次**补推成功**的追加（"D"）。第二次（"E"）被 409 挡在
-    #   待补推窗口外，按设计**根本没发生** —— 把它算进来就是我写错了断言。
+    # ★ 期望值就是上传的 2048 字节 + 那次**重做成功**的追加。
+    #   失败的那一次按约定根本没发生，所以它不在这份期望值里。
     _want = b"C" * 2048 + b"D" * 300
     check("★★ 解出来的字节与上传时逐位相同（演练 + 写失败都没伤到数据）",
           _got == _want, f"实得 {len(_got)} 字节 / 应为 {len(_want)} 字节")
