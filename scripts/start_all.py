@@ -172,10 +172,6 @@ LOG_DIR = ROOT / "logs"
 #:   启动时清一次，免得重启器半路挂了留下一个过期标记）。
 RESTART_MARKER = LOG_DIR / "restart.pending"
 
-#: 与 :mod:`scripts.seed` 里那份保持一致。这里是**只读引用**，
-#: 改口令请改 ``scripts/seed.py`` 的 ``DEMO_PASSWORD``（它才是权威）。
-from scripts.seed import DEMO_PASSWORD, USERS  # noqa: E402
-
 
 # ---------------------------------------------------------------- 小工具
 
@@ -720,19 +716,16 @@ def reset_data() -> list[str]:
             f.unlink()
         except OSError:
             stuck.append(name)
-    n_dirs = 0
     nodes_dir = ROOT / "nodes"
     for d in sorted(nodes_dir.glob("node-*")):
         if d.is_dir():
             shutil.rmtree(d, ignore_errors=True)
-            n_dirs += 1
     if LOG_DIR.exists():
         for f in LOG_DIR.glob("*.log"):
             try:
                 f.unlink()
             except OSError:
                 stuck.append(f.name)
-    say(f"  已清空：vds.db、nodes/node-*（{n_dirs} 个节点目录）、logs/*.log")
     if stuck:
         say(f"  这几个没删掉（还被别的进程占着）：{'、'.join(stuck)}")
     return stuck
@@ -858,15 +851,6 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
     # 不是“全好”就**全部重启**（数据目录不动，所以数据不丢）：
     # 只补缺的那几台的话，还活着的台会占着端口，新起的进程绑不上 ——
     # 而 os 报“端口被占”时看起来像代码 bug，不像“上次没停干净”。
-    bad = [i for i, s in states.items() if s == "401"]
-    if bad:
-        say(
-            "  有节点活着但令牌不对（端口 "
-            + "、".join(str(node_port(i)) for i in bad)
-            + "）—— 重启成这份令牌（数据保留）"
-        )
-    else:
-        say("  节点没起齐 —— 全部重启（数据保留）")
     for i in range(len(NODES)):
         kill_port(node_port(i))
     time.sleep(1.0)
@@ -884,7 +868,7 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
         "--token",
         token,
     ]
-    say(f"  起 {len(NODES)} 台节点…")
+    say(f"  启动 {len(NODES)} 台节点…")
     # ★ 把节点组的输出**落到文件**而不是丢进 DEVNULL：
     #   丢了的话，“某一台为什么死了”就永远找不回来了。
     #   （那个子进程平时很安静，出问题时它的报错就是唯一线索。）
@@ -903,7 +887,7 @@ def ensure_nodes(token: str) -> subprocess.Popen | None:
     deadline = time.time() + 40
     while time.time() < deadline:
         if all(node_state(node_port(i), token) == "up" for i in range(len(NODES))):
-            say(f"  {len(NODES)} 台节点就绪（端口 {node_ports_hint()}）")
+            say(f"  {len(NODES)} 台节点就绪")
             return proc
         if proc.poll() is not None:
             say("  节点进程提前退了 —— 单独跑一次看看：")
@@ -922,7 +906,7 @@ def start_backend(token: str) -> subprocess.Popen | None:
     env = node_env(token)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = (LOG_DIR / "backend.log").open("wb")
-    say("  起后端…（日志 logs/backend.log）")
+    say("  搭建后端…（日志 logs/backend.log）")
     proc = subprocess.Popen(
         [PY, "-m", "uvicorn", "backend.main:app", "--port", str(PORTS.backend)],
         cwd=str(ROOT),
@@ -934,7 +918,7 @@ def start_backend(token: str) -> subprocess.Popen | None:
     while time.time() < deadline:
         # 200 或 401 都算活着（401 = 服务起来了，只是没带令牌）
         if http_code(f"http://127.0.0.1:{PORTS.backend}/api/status") in (200, 401):
-            say(f"  后端就绪（{PORTS.backend}，跨进程模式）")
+            say(f"  后端就绪（端口号{PORTS.backend}）")
             return proc
         if proc.poll() is not None:
             say("  后端启动失败，日志尾巴：")
@@ -989,7 +973,7 @@ def start_frontend() -> subprocess.Popen | None:
         return None
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = (LOG_DIR / "frontend.log").open("wb")
-    say("  起前端…（日志 logs/frontend.log）")
+    say("  建立前端…（日志 logs/frontend.log）")
     # ★★ 前端到后端的地址必须**跟着配置走**：vite 的 proxy 默认打 8000
     #    （见 frontend/vite.config.js 里的 VDS_API_TARGET），后端端口一改，
     #    不把新地址告诉它就会变成"页面能开、每个请求都失败"——
@@ -1016,30 +1000,9 @@ def start_frontend() -> subprocess.Popen | None:
 
 
 def banner() -> None:
-    say()
     say("=" * 62)
     say(f"  打开： {frontend_url()}")
-    say()
-    say(f"  存储节点 {len(NODES)} 台（端口 {node_ports_hint()}）")
-    say(f"  后端 {PORTS.backend} / 前端 {PORTS.frontend}")
-    say("  改台数与端口：管理员界面 → 设备（存储节点）→ 服务器台数 / 端口 → 「立刻重启」")
-    say()
-    say(f"  演示账号（口令统一 {DEMO_PASSWORD}）：")
-    for username, role, display in USERS:
-        tag = "管理员（能看审计与用户管理）" if role == "admin" else "普通用户"
-        say(f"    {username:10s} {display:6s} {tag}")
-    say()
-    say("  登录页不列演示账号：用上面这些账号 + 统一口令登录。")
-    # ★ 这里**不能**写死“默认没有任何预设文件”：`--demo` 启动时上一步刚灌了
-    #   5 个演示文件，同一屏里印这句就是自相矛盾 —— 用户会以为库里是空的，
-    #   直接去上传新文件。上一步 [4/6] 已经如实说了这次灌没灌，这里只描述入口。
-    say("  库里要不要有文件：带 --demo 启动会灌 5 个演示文件，否则是空的 ——")
-    say("  也可以直接去「上传文件」页自己选文件、自己决定切成几块。")
-    say()
-    say("  日志： logs/backend.log、logs/frontend.log")
-    say("  停止： 在这个窗口按 Ctrl+C（或者 python scripts/start_all.py --stop）")
     say("=" * 62)
-    say()
 
 
 # ---------------------------------------------------------------- 主流程
@@ -1100,10 +1063,10 @@ def warm_primes(target: int | None) -> None:
     target = max(1, min(int(target), n_max))
     info = warm_prime_cache(bits, target)
     if info["generated"]:
-        say(f"  首次生成到 {info['count']} 个素数（{info['seconds']} s），已落盘")
+        say(f"  首次生成到 {info['count']} 个素数，已落盘")
     else:
-        say(f"  磁盘缓存命中 {info['count']} 个素数（{info['seconds']} s）")
-    say(f"  {info['path']}")
+        say(f"  磁盘缓存命中 {info['count']} 个素数")
+    say(f"  本地素数表存储位置：{info['path']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1208,14 +1171,10 @@ def main(argv: list[str] | None = None) -> int:
         say("这个脚本是按 Windows 写的（用 PowerShell 找监听进程）。")
         return 2
 
-    say("=" * 62)
-    say("  VDS 一键启动")
-    say("=" * 62)
-
-    token = load_token()
-
     if args.reset:
-        say("\n[0/4] 重置")
+        say("=" * 62)
+        say("  项目重置中......")
+        say("=" * 62)
         # ★★ 顺序不能反：**先**按当前配置（也就是还在跑的那一套）停干净，
         #    **再**把端口复位。反过来停的就是默认端口，而进程还在自定义端口上
         #    —— 一个都停不掉，全变成占着端口的孤儿进程。
@@ -1223,9 +1182,9 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(1.0)
         reset_deploy_ports(NODES)
         PORTS = effective_ports(NODES)[0]
-        say(f"  端口已复位成默认值（后端 {PORTS.backend} / 前端 {PORTS.frontend} / "
-            f"节点 {node_ports_hint()}）")
+        say("[1/2]端口已复位成默认值")
         reset_data()
+        say("[2/2]节点目录、本地日志已清空")
         # ★ 库没清掉就别起了：那会拿着旧数据接着跑，与"重置"不是一个意思
         #   （而且节点目录已被清，两边正好对不上，启动闸一定会拒）。
         #   停下来把原因说清楚，好过去撞一个看不懂的启动错误。
@@ -1234,7 +1193,13 @@ def main(argv: list[str] | None = None) -> int:
             say("  这次不启动：否则会拿着旧数据接着跑，而节点数据已经清过了，两边对不上。")
             return 1
 
-    say("\n[1/6] 库的清理判定")
+    token = load_token()
+
+    say("=" * 62)
+    say("  项目启动中......")
+    say("=" * 62)
+
+    say("\n[1/6] 检查依赖库......")
     got_db = (ROOT / "vds.db").exists()
     need_seed = args.reset or not got_db
     if got_db and not args.reset:
@@ -1246,31 +1211,31 @@ def main(argv: list[str] | None = None) -> int:
         say("  没有 vds.db —— 节点数据也一并清掉（否则两边对不上）")
         reset_data()
 
-    say("\n[2/6] 素数表（预热）")
+    say("\n[2/6] 生成素数表......")
     warm_primes(args.warm)
 
-    say(f"\n[3/6] 存储节点（{len(NODES)} 台）")
+    say(f"\n[3/6] 启动存储节点（{len(NODES)} 台）")
     nodes_proc = ensure_nodes(token)
     if nodes_proc is None and not all(
         node_state(node_port(i), token) == "up" for i in range(len(NODES))
     ):
         return 1
 
-    say("\n[4/6] 账号")
+    say("\n[4/6] 预设账号")
     if not need_seed:
         say("  账号不动（库还在）")
     elif seed_accounts(args.demo, token) != 0:
         return 1
     else:
-        suffix = "（含 5 个演示文件，已经真的推到节点上）" if args.demo else "（没有预设文件）"
-        say("  账号已建" + suffix)
+        suffix = "（含 5 个演示文件）" if args.demo else ""
+        say("  预设账号已生成" + suffix)
 
-    say("\n[5/6] 后端")
+    say("\n[5/6] 搭建后端")
     backend_proc = start_backend(token)
     if backend_proc is None and not alive(PORTS.backend):
         return 1
 
-    say("\n[6/6] 前端")
+    say("\n[6/6] 建立前端")
     frontend_proc = start_frontend()
 
     if not args.no_browser and alive(PORTS.frontend):
@@ -1304,13 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     nodes_kid = ("存储节点组", nodes_proc) if nodes_proc is not None else None
 
-    say("按 Ctrl+C 停掉本次启动的进程。")
-    if nodes_kid is not None:
-        if args.strict:
-            say("  （--strict：只要有一台节点退出，就整体停下）")
-        else:
-            say("  （节点掉线不会带走后端与前端 —— 可以直接 kill 一台演示降级；")
-            say("    想恢复旧行为（一有退出就整体停下）加 --strict）")
+    say("按 Ctrl+C 结束本次启动的进程。")
 
     nodes_warned = False
     #: 是不是把控制权交给了「立刻重启」（见 :data:`RESTART_MARKER`）。
@@ -1399,7 +1358,7 @@ def main(argv: list[str] | None = None) -> int:
                         say(f"\n[恢复] {NODES[i]}（端口 {node_port(i)}）又答话了。")
                     node_seen[i] = st
     except KeyboardInterrupt:
-        say("\n收工，停掉本次启动的进程…")
+        say("\n正在结束本次启动的进程…")
     finally:
         if handed_over:
             # 交棒：收尾归重启器（它停干净之后自己会再按端口扫一遍），
@@ -1420,7 +1379,7 @@ def main(argv: list[str] | None = None) -> int:
             if nodes_proc is not None:
                 for i in range(len(NODES)):
                     kill_port(node_port(i))
-    say("已停。")
+    say("已停止。")
     return 0
 
 
