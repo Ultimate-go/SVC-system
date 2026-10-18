@@ -4,8 +4,9 @@
  *
  *   · files-detail        → 「文件详情」：只读 —— 摘要与参数（含封装过程说明）/
  *                            分布矩阵 + 分量明细；
- *   · files-update-detail → 「更新文件」：在上面的基础上多出替换 / 置零 /
- *                            追加 / 删除 / 回滚演示 / 解密验证。
+ *   · files-update-detail → 「更新文件」：在上面的基础上多出**三种写操作**
+ *                            （替换 / 追加 / 删除；置零是替换里的等长全 0 特例）、
+ *                            回滚演示与解密验证。
  *
  * ★ 为什么复用同一个组件而不是拷一份：这些能力读的是**同一份状态**
  *   （file / layout / δ 本地锚），拆成两个文件就会各拉一次详情、各维护一份锚 ——
@@ -15,10 +16,10 @@
  * - 分布矩阵（layout[].replicas 标主/副本），与分量明细并排一行（1:3）。
  * - **分量明细表**：每块的公开分量 —— 跟着「简略/详细」开关
  *   决定要不要铺出来；详细模式会把每块的分量一起要回来（`?elements=1`）。
- * - 替换 / 置零 / 追加 / 删除（四个写操作都显示 timings）。
- * - 解密预览（**浏览器本地解密 + 本地验证**；hex → hexToText，用 hasBadBytes 区分残缺）。
+ * - 替换 / 追加 / 删除（三种写操作都显示 timings；置零是替换页上的一个小按钮）。
+ * - 解密预览（**浏览器本地解密 + 本地验证**；结果在十六进制大弹框里看，按分块底色区分）。
  */
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
@@ -57,7 +58,7 @@ const theme = useThemeStore()
 
 const id = computed(() => route.params.id)
 
-/** 更新形态（替换 / 置零 / 追加 / 删除 / 回滚演示 / 解密验证）开关，见文件头的说明。 */
+/** 更新形态（替换 / 追加 / 删除三种写操作 + 回滚演示 + 解密验证）开关，见文件头。 */
 const showOps = computed(() => route.meta?.ops === true)
 /** 返回按钮的去处：从哪进来就回哪去。 */
 const backTo = computed(() => (showOps.value ? '/files/update' : '/files'))
@@ -157,6 +158,15 @@ const decrypting = ref(false)
  */
 const decryptResult = ref(null)
 
+/** 解密结果的大弹框（十六进制视图，参考 010 Editor 的分块底色区分）。 */
+const decryptOpen = ref(false)
+
+/** 点「解密并本地验证」：先把弹框打开（显示出“正在解…”），再跑一遍本地解封。 */
+async function openDecrypt() {
+  decryptOpen.value = true
+  await doDecrypt()
+}
+
 const isMine = computed(() => file.value?.is_mine)
 
 /** 浏览器侧的私钥状态（私钥只活在内存，见 stores/crypto.js）。 */
@@ -166,6 +176,123 @@ const decodePreview = computed(() => {
   if (!decryptResult.value?.hex) return null
   return decodeBlockHex(decryptResult.value.hex)
 })
+
+/**
+ * 十六进制视图的数据：按 `layout` 的明文长度把整份 hex 切回分块，再按 16 字节一行。
+ *
+ * ★ 为什么按 `plain_len` 切而不是固定 1 KB：最后一个分块通常不满一块，
+ *   而且分块大小是上传时定的（`file.block_size`），这里只信每块登记的长度。
+ * ★ 累计偏移以**全文**为坐标（不是块内偏移），这样翻到第 N 块时能直接读出
+ *   该字节在文件里的位置 —— 与改块页的序号口径一致（界面 1 起，偏移 0 起）。
+ */
+const hexBlocks = computed(() => {
+  const hex = decryptResult.value?.hex
+  const rows = [...(file.value?.layout || [])].sort((a, b) => a.block_idx - b.block_idx)
+  if (!hex || !rows.length) return []
+  const total = decryptResult.value.bytes || hex.length / 2
+  const replayed = new Set(decryptResult.value.replayedBlocks || [])
+  const out = []
+  let cursor = 0
+  rows.forEach((b, i) => {
+    // ★ 最后一块吃掉剩余字节：万一 layout 的长度与解出的明文有出入，
+    //   也不能把尾巴露在视图外面。
+    const len = i === rows.length - 1 ? Math.max(0, total - cursor) : (b.plain_len || 0)
+    const slice = hex.slice(cursor * 2, (cursor + len) * 2)
+    const rws = []
+    for (let off = 0; off < slice.length / 2; off += 16) {
+      const lineHex = slice.slice(off * 2, (off + 16) * 2)
+      const cells = []
+      const ascii = []
+      for (let j = 0; j + 1 < lineHex.length; j += 2) {
+        const byte = parseInt(lineHex.slice(j, j + 2), 16)
+        cells.push({ hex: lineHex.slice(j, j + 2).toUpperCase(), zero: byte === 0 })
+        const printable = byte >= 0x20 && byte <= 0x7e
+        ascii.push({ ch: printable ? String.fromCharCode(byte) : '.', dot: !printable })
+      }
+      rws.push({
+        off,
+        offHex: (cursor + off).toString(16).toUpperCase().padStart(8, '0'),
+        cells,
+        ascii,
+      })
+    }
+    out.push({
+      idx: b.block_idx,
+      len,
+      offsetHex: cursor.toString(16).toUpperCase().padStart(8, '0'),
+      rows: rws,
+      replayed: replayed.has(b.block_idx),
+      // 相邻分块色相至少差 40°（黄金角推进），避免两块颜色看着一样。
+      hue: (i * 47) % 360,
+    })
+    cursor += len
+  })
+  return out
+})
+
+/* ---------------------------------------------------------------------------
+   十六进制视图的书签栏
+   ---------------------------------------------------------------------------
+   一个分块一枚书签，颜色与那一块的左色条 / 标题一致（同一串色相，见 `hexBlocks`）。
+   目的很具体：块多时整份视图有几千行，靠滚轮拖很久；这里给一条能一眼看全的索引。
+--------------------------------------------------------------------------- */
+const hexWrap = ref(null)
+/** 当前点亮的分块序号（0 起）；-1 = 还没定。 */
+const activeBlock = ref(-1)
+/** 分块序号 → 该块的 DOM（`v-for` 里的函数 ref 登记）。 */
+const blockEls = new Map()
+
+function setBlockEl(el, idx) {
+  if (el) blockEls.set(idx, el)
+  else blockEls.delete(idx)
+}
+
+/** 点书签：只滚容器，不连带滚页面 / 弹框。 */
+function jumpToBlock(idx) {
+  const wrap = hexWrap.value
+  const el = blockEls.get(idx)
+  if (!wrap || !el) return
+  const offset = el.getBoundingClientRect().top - wrap.getBoundingClientRect().top
+  wrap.scrollTo({ top: wrap.scrollTop + offset - 6, behavior: 'smooth' })
+  activeBlock.value = idx
+}
+
+/**
+ * 滚到哪儿就把哪一枚点亮：取「顶边已经越过容器顶」的**序号最大**的那一块。
+ *
+ * ★ 按块的边界算而不是按滚动比例算 —— 块高不一样（最后一块往往不满），
+ *   按比例算会和实际看到的那一块对不上。
+ * ★ 不能依赖 `blockEls` 的迭代顺序（Map 记的是插入顺序，重渲染后不保证升序），
+ *   所以取最大值而不是“最后一个命中的”。
+ * ★ 滚动事件很密（128 块时一次要量 128 个盒子），用 rAF 合并到一帧一次。
+ */
+let scrollRaf = 0
+function syncActiveBlock() {
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0
+    const wrap = hexWrap.value
+    if (!wrap) return
+    const line = wrap.getBoundingClientRect().top + 8
+    let cur = -1
+    for (const [idx, el] of blockEls) {
+      if (idx > cur && el.getBoundingClientRect().top <= line) cur = idx
+    }
+    if (cur >= 0) activeBlock.value = cur
+  })
+}
+
+// 每次开框都从第 1 块看起，并点亮第一枚书签（弹框是 destroy-on-close，内容会重建）。
+watch(
+  [decryptOpen, () => hexBlocks.value.length],
+  async ([open, len]) => {
+    if (!open || !len) return
+    await nextTick()
+    if (hexWrap.value) hexWrap.value.scrollTop = 0
+    activeBlock.value = hexBlocks.value[0]?.idx ?? -1
+  },
+  { immediate: true },
+)
 
   // ---- 改块前“看旧内容”：明文 + **本地锚定校验** ----
   //
@@ -333,73 +460,10 @@ async function load() {
     file.value = f
     nodes.value = n
     if (f.layout?.length) modifyForm.blockIdx = f.layout[0].block_idx
-    // 回退面板要用它 —— 只在「更新文件」形态下拉（详情页不显示这块）。
-    await loadHistory()
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '加载失败'
   } finally {
     loading.value = false
-  }
-}
-
-/* ---------------------------------------------------------------------------
-   回退到上一版（★ 2026-10-12 条目 6）
-   ---------------------------------------------------------------------------
-   改块/清零**之前**，后端会自动把那一块当时的整套本体留一份（每块只留一份 =
-   当前 + 上一版）。这里只做两件事：把“哪几块能回退”列出来，以及按一下回退。
-   ★ 界面上不重复后端的话术：没有留存时就说“还没留过上一版”，不假装能回退。
---------------------------------------------------------------------------- */
-const history = ref([])
-const historyLoading = ref(false)
-const restoring = ref(false)
-const restoreResult = ref(null)
-/** 回退操作的端到端耗时（与上传、写操作同一口径）。 */
-const restoreElapsed = ref(0)
-
-async function loadHistory() {
-  if (!showOps.value) {
-    history.value = []
-    return
-  }
-  historyLoading.value = true
-  try {
-    const { data } = await filesApi.history(id.value)
-    history.value = data?.blocks || []
-  } catch {
-    // 拿不到历史不影响别的操作 —— 不当成整页错误
-    history.value = []
-  } finally {
-    historyLoading.value = false
-  }
-}
-
-async function doRestore() {
-  const blocks = history.value.map((h) => humanIdx(h.block_idx))
-  try {
-    await ElMessageBox.confirm(
-      `将第 ${blocks.join('、')} 个分块替换为上一版本的本体，并重新计算聚合承诺。\n\n` +
-        '回退将产生新的版本号（而非将版本号改回），并记入一条审计。\n' +
-        '当前版本会被留存为新的「上一版本」，因此回退本身也可以再次回退。',
-      '回退至上一版本',
-      { type: 'warning', confirmButtonText: '回退', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  restoring.value = true
-  restoreResult.value = null
-  restoreElapsed.value = 0
-  const t0 = performance.now()
-  try {
-    const { data } = await filesApi.restore(id.value, null)
-    restoreResult.value = data
-    restoreElapsed.value = Math.round(performance.now() - t0)
-    ElMessage.success(`已回退 ${data.count} 个分块；当前为第 ${data.version} 版（聚合承诺已重算）`)
-    await load()
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || '回退失败')
-  } finally {
-    restoring.value = false
   }
 }
 
@@ -779,11 +843,11 @@ onMounted(load)
             <li><b>按需生成凭证</b><span>要验证指定分块集合仍然存在，即对集合 I 生成凭证 π_I；验证仅使用 δ、π_I 与分块编号，无需明文。</span></li>
           </ol>
           <p v-if="showOps" class="note">
-            <b>替换</b>（改写指定分块的内容）、
-            <b>置零</b>（将指定分块替换为等长的全 0 字节）、
-            <b>追加</b>（在向量末尾增加分块）、
-            <b>删除</b>（移除本文件位置段的末尾部分）。
-            四种操作都会重新加密受影响的分块、使版本号递增 1，并记入审计。
+            写操作共<b>三种</b>：<b>替换</b>（改写指定分块的内容；把内容写成等长的全 0 字节
+            即「置零」，它是替换页上的一个按钮，不是独立操作）、<b>追加</b>（在向量末尾增加分块）、
+            <b>删除</b>（移除本文件位置段的末尾若干分块）。
+            三种操作都会重新加密受影响的分块、使版本号递增 1，并记入审计；
+            分块序号与位置段只在追加 / 删除时改变，替换不改变向量的长度。
           </p>
         </details>
       </div>
@@ -867,77 +931,12 @@ onMounted(load)
         </div>
       </div>
 
-      <!-- 这两块都是「对当前版本动手」的操作：左边把分块换回上一版本，
-           右边演示服务端返回旧版本数据。并排一行，窄屏自动落回单列。 -->
-      <div v-if="showOps && isMine" class="ops-row">
-      <!-- 版本回退：把留过上一版的分块换回去，并重新承诺。
-           只出现在「更新文件」形态、而且只有所有者看得到：它换回的是旧密文
-           与旧块密钥（回退后重新生效），与更新是同一级别的权限。 -->
-      <div class="panel">
-        <div class="sec-head">
-          <h4 class="sec-title" style="margin-bottom: 0">回退至上一版本</h4>
-          <el-tag v-if="history.length" type="success" size="small" effect="plain">
-            本文件有 {{ history.length }} 个分块可回退
-          </el-tag>
-          <el-tag v-else type="info" size="small" effect="plain">暂无可用上一版本</el-tag>
-        </div>
-
-        <p class="text-2" style="font-size: 13px; margin-top: 4px">
-          每次替换或置零之前，该分块当时的完整本体（密文、IV、分量、块密钥密文、长度）
-          会被自动留存一份，留存的是本体而非哈希。当节点数据丢失、或当前版本与基准不符时，
-          将其替换为上一版本、重新计算分量并重新承诺，验证即可通过。
-        </p>
-
-        <el-alert
-          v-if="!history.length"
-          type="info"
-          :closable="false"
-          class="mb-2"
-          title="当前没有可回退的版本"
-          description="执行一次替换或置零后，被换下来的版本才会成为「上一版本」。每个分块只保留一份（当前版本 + 上一版本）。"
-        />
-
-        <div v-else v-loading="historyLoading" class="rev-list">
-          <div v-for="h in history" :key="h.block_idx" class="rev-item mono">
-            <span class="rev-idx">第 {{ humanIdx(h.block_idx) }} 个分块</span>
-            <span class="rev-ver">留存自第 {{ h.version }} 版</span>
-            <span class="rev-size">{{ h.bytes }} B</span>
-            <span class="text-3">{{ h.source }} · {{ fmtTime(h.created_at) }}</span>
-          </div>
-        </div>
-
-        <div v-if="history.length" class="rev-actions">
-          <el-button type="warning" :loading="restoring" @click="doRestore">
-            将这 {{ history.length }} 个分块回退至上一版本
-          </el-button>
-          <span class="text-3" style="font-size: 13px">回退会重新计算聚合承诺，版本号递增 1（只增不减），并记入审计</span>
-        </div>
-
-        <el-alert
-          v-if="restoreResult"
-          type="success"
-          :closable="false"
-          class="mt-2"
-          :title="`已回退 ${restoreResult.count} 个分块；当前为第 ${restoreResult.version} 版，聚合承诺已重算（本页数据已刷新）`"
-        >
-          <StageTimeline v-if="restoreResult.timings" :timings="restoreResult.timings" :total-ms="restoreElapsed" class="mt-2" />
-        </el-alert>
-
-        <details class="note-collapse">
-          <summary>说明</summary>
-          <p class="note">
-            本功能针对一个具体情形：某一版本的数据在节点上无法取回（或与当前基准不符）。
-            此时的处理目标是恢复文件的可用性 —— 将该分块替换为上一版本并重新承诺即可。
-            回退不撤销历史：版本号只增不减，操作记入审计；被替换下来的版本会成为新的「上一版本」，
-            因此可以反复回退。
-          </p>
-        </details>
-      </div>
-
+      <!-- ★ 一行两块：左边是**三种写操作**（约 2/3），右边是「回滚演示」（约 1/3）。
+           ★ 「回退至上一版本」已于 2026-10-18 整体删除（用户明确不要这个功能）。 -->
+      <div v-if="showOps" class="ops-row">
       <!-- 回滚演示：让服务端返回旧版本数据（演示「服务端不可信」）。
-           只出现在「更新文件」形态、只有所有者看得到：非所有者既改不了分块，
-           也就没有「服务端返回旧版本」这一幕可演。 -->
-      <div class="panel">
+           只有所有者看得到：非所有者既改不了分块，也就没这一幕可演。 -->
+      <div v-if="isMine" class="panel ops-demo">
         <div class="sec-head">
           <h4 class="sec-title" style="margin-bottom: 0">演示：服务端返回旧版本数据</h4>
           <el-tag type="warning" size="small" effect="plain">演示功能 · 会令验证不通过</el-tag>
@@ -981,9 +980,8 @@ onMounted(load)
           </ol>
         </details>
       </div>
-      </div>
 
-      <div v-if="showOps" class="panel mb-3">
+      <div class="panel ops-main">
         <el-alert
           v-if="!isMine"
           type="info"
@@ -1006,6 +1004,18 @@ onMounted(load)
                 <el-button :disabled="!isMine" :loading="oldLoading" @click="fetchOldContent">
                   取回当前内容并校验
                 </el-button>
+                <!-- ★ 置零不是第四种操作，而是替换的一个特例（等长全 0）——
+                     所以它只是本页上的一个小按钮，点击弹框二次确认。 -->
+                <el-button
+                  type="warning"
+                  plain
+                  size="small"
+                  style="margin-left: 8px"
+                  :disabled="!isMine"
+                  :loading="writeRunning"
+                  title="把这一块的内容写成等长的全 0 字节（属于替换，不是删除）"
+                  @click="doZero"
+                >置零</el-button>
               </div>
 
               <!--
@@ -1093,30 +1103,12 @@ onMounted(load)
                 ② <b>本地锚</b> —— 本账户写入该分块时留存的明文摘要，保存于本地，服务端不可读写，
                 可检出回滚至旧版本的情形。该机制的覆盖范围限于当前客户端的记录，跨客户端不互通。
               </p>
-            </details>
-          </el-tab-pane>
-          <el-tab-pane label="置零" name="zero">
-            <div class="write-form">
-              <div>
-                <span class="text-2">分块序号：</span>
-                <el-input-number
-                  v-model="blockNoInput"
-                  :min="1"
-                  :max="Math.max(1, file.block_count || 1)"
-                  @change="oldInfo = null"
-                />
-              </div>
-              <el-button type="warning" :disabled="!isMine" :loading="writeRunning" @click="doZero">置零</el-button>
-            </div>
-            <details class="note-collapse">
-              <summary>说明</summary>
               <p class="note">
-                「置零」将指定分块的内容替换为<strong>等长的全 0 字节</strong>：其操作类型为改写
-                （论文 §8.2 的 <span class="mono">op = mod</span>；对应接口里的
-                <span class="mono">op = "zero"</span>）而非删除（<span class="mono">op = del</span>），
-                因此分块仍然存在、下标不变、总块数不变，
-                完整性校验仍可通过；全 0 内容仅在解封装后可见。
-                若需将某分块从向量中移除，只能删除<strong>末尾</strong>位置段（见「删除」）。
+                <b>置零</b>：把该分块的内容写成<b>等长的全 0 字节</b>。它属于<b>替换</b>，不是删除 ——
+                操作类型仍是论文 §8.2 的 <span class="mono">op = mod</span>（接口里是
+                <span class="mono">op = "zero"</span>），因此分块仍然存在、序号不变、总块数不变，
+                完整性校验照样通过，只有所有者解封装后才看得到全 0；版本号同样递增 1，
+                且原内容不可恢复。要把分块从向量里移除，只能用「删除」，而且只能删本文件位置段的末尾。
               </p>
             </details>
           </el-tab-pane>
@@ -1151,6 +1143,7 @@ onMounted(load)
         </el-tabs>
         <StageTimeline v-if="writeTimings" :timings="writeTimings" :total-ms="writeElapsed" class="mt-3" />
       </div>
+      </div>
 
       <div v-if="showOps" class="panel">
         <h4 class="sec-title">解密预览（浏览器本地解密与验证）</h4>
@@ -1169,7 +1162,7 @@ onMounted(load)
           :title="`将取回整份密文（约 ${fmtBytes(
             estimateCipherPackBytes(file.total_bytes, file.layout?.length),
           )}），随后在本机逐块解封、解密并验证`"
-          @click="doDecrypt"
+          @click="openDecrypt"
         >解密并本地验证</el-button>
         <el-alert
           v-if="decryptResult"
@@ -1177,65 +1170,63 @@ onMounted(load)
           :closable="false"
           class="mt-3"
           :title="decryptResult.verify.ok
-            ? `浏览器本地验证通过：${decryptResult.blocks} 个分块 · ${decryptResult.bytes} 字节 · ${decryptResult.ms} ms`
-            : `浏览器本地验证未通过：${decryptResult.verify.codeName} —— ${decryptResult.verify.message}`"
+            ? `本地验证结论：通过（${decryptResult.blocks} 个分块 · ${decryptResult.bytes} 字节 · ${decryptResult.ms} ms）`
+            : `本地验证结论：未通过（${decryptResult.verify.codeName}：${decryptResult.verify.message}）`"
         >
-          <div style="font-size: 13px">
+          <div class="dv-body">
             <p>
-              素数与映射：{{ decryptResult.primeCheck.message }}。
-              分量由浏览器依据密文重算，并与服务端返回值比对，结果：
-              {{ decryptResult.elementAgrees ? '一致' : '不一致（以本地计算值为准）' }}。
+              <b>素性检验与公开分量</b>：本次涉及的
+              {{ decryptResult.primeCheck.checked }} 个位置素数均通过素性检验
+              （<span class="mono">e_i = H(owner‖file_key‖i)</span>，由块身份哈希派生，
+              耗时 {{ decryptResult.primeCheck.ms }} ms）；
+              公开分量 <span class="mono">v_i</span> 由浏览器对取回的密文重新计算
+              （<span class="mono">v_i = SM3(c_i)</span>），再与服务端返回值逐一比对，
+              结果{{ decryptResult.elementAgrees ? '一致' : '不一致（此后的检验一律采用本地计算值）' }}。
             </p>
             <p>
-              δ：n = {{ decryptResult.delta.n }} · 指纹
+              <b>文件承诺</b> <span class="mono">δ = (U, C, n)</span> 中
+              <span class="mono">n = {{ decryptResult.delta.n }}</span>；
+              承诺指纹为 <span class="mono">sha256(U, C, n)</span> 的前 12 位：
               <span class="mono">{{ decryptResult.delta.fp }}</span>
+              —— 仅用于快速比对，完整的 <span class="mono">U</span> / <span class="mono">C</span>
+              见「摘要与参数」中的承诺弹框。
             </p>
             <p>
-              <b>δ 钉扎（本地锚定）</b>：
+              <b>与本地基线的比对</b>：
               <template v-if="decryptResult.deltaVerdict === 'match'">
-                本地 δ 与服务端 δ 一致。
+                本机保存的承诺基线与服务端返回的 <span class="mono">δ</span> 一致，
+                本次检验所依据的承诺即本机此前见证的那一版本。
               </template>
               <template v-else-if="decryptResult.deltaVerdict === 'mismatch'">
-                本地 δ 与服务端 δ 不一致。
-                本地验证结论：{{ decryptResult.verify.ok ? '通过' : '不通过' }}；
-                以服务端返回的 δ 复验的结果：「{{
+                本机保存的基线与服务端返回的 <span class="mono">δ</span> 不属于同一版本。
+                以本地基线复验的结论：「{{ decryptResult.verify.ok ? '通过' : '不通过' }}」；
+                以服务端返回的 <span class="mono">δ</span> 复验的结论：「{{
                   decryptResult.remoteVerify && decryptResult.remoteVerify.ok ? '通过' : '不通过'
                 }}」。
               </template>
               <template v-else>
-                本地尚未记录该文件的 δ。本次验证使用服务端返回的 δ。
+                本机尚未保存该文件的承诺基线，本次以服务端返回的
+                <span class="mono">δ</span> 为准。
                 <template v-if="decryptResult.justAnchored">
-                  本次验证通过，当前版本已记录于本地；后续验证将使用本地记录。
+                  本次检验通过，该版本的 <span class="mono">δ</span> 已记入本地；
+                  此后均以本地记录为基线。
                 </template>
               </template>
             </p>
             <p v-if="decryptResult.deltaVerdict === 'mismatch'" class="text-danger">
-              本地 δ 与服务端 δ 不属于同一版本，
-              可能由文件被修改或服务端返回不同版本的 δ 所致。
-              本地 δ 验证通过仅表示内容与本地记录一致；两项验证均未通过时按告警处理。
+              两侧 <span class="mono">δ</span> 不属于同一版本，可能因文件已被更新，
+              或服务端交回了另一版本的 <span class="mono">δ</span> 所致。
+              以本地基线复验通过，仅表示交付内容与本机记录一致，<b>不表示它是最新版本</b>。
             </p>
           </div>
         </el-alert>
         <div v-if="decryptResult" class="mt-3">
-          <div class="text-2 mono" style="font-size: 13px">{{ decryptResult.bytes }} 字节</div>
-          <div v-if="decodePreview" class="decrypt-text">
-            <el-alert
-              v-if="decodePreview.head || decodePreview.tail"
-              type="warning"
-              :closable="false"
-              class="mb-2"
-              :title="`分块边界处存在不完整字符（head=${decodePreview.head}, tail=${decodePreview.tail}）`"
-              description="替换该分块会破坏相邻分块边界处字符的完整性。"
-            />
-            <el-alert
-              v-if="hasBadBytes(decryptResult.hex)"
-              type="info"
-              :closable="false"
-              class="mb-2"
-              title="内容包含无法解码的字节（可能不是纯文本）"
-            />
-            <pre class="plain">{{ decodePreview.text }}</pre>
-          </div>
+          <el-button type="primary" plain @click="decryptOpen = true">
+            查看文件内容（十六进制视图）
+          </el-button>
+          <span class="text-2 mono" style="font-size: 13px; margin-left: 8px">
+            {{ decryptResult.bytes }} 字节
+          </span>
         </div>
 
         <details class="note-collapse">
@@ -1247,6 +1238,118 @@ onMounted(load)
         </details>
       </div>
     </template>
+
+    <!-- 解密结果大弹框：参考 010 Editor 的十六进制视图（分块底色区分 + 偏移列 + ASCII 栏）。 -->
+    <el-dialog
+      v-model="decryptOpen"
+      width="1120px"
+      top="4vh"
+      class="hex-dialog"
+      append-to-body
+      destroy-on-close
+      :title="`解密结果 · ${file?.file_key || ''}`"
+    >
+      <template v-if="decryptResult">
+        <div class="hx-verdict" :class="decryptResult.verify.ok ? 'ok' : 'bad'">
+          <span class="hx-verdict-k">验证结果</span>
+          <b>{{ decryptResult.verify.ok ? '通过' : '不通过' }}</b>
+          <span class="hx-sep">·</span>
+          <span>{{ decryptResult.blocks }} 个分块</span>
+          <span class="hx-sep">·</span>
+          <span>{{ decryptResult.bytes }} 字节</span>
+          <span class="hx-sep">·</span>
+          <span>{{ decryptResult.ms }} ms</span>
+          <span class="hx-sep">·</span>
+          <span class="mono">承诺 δ 指纹 {{ decryptResult.delta.fp }}</span>
+        </div>
+        <p v-if="!decryptResult.verify.ok" class="text-danger" style="font-size: 13px; margin: 6px 0 0">
+          {{ decryptResult.verify.codeName }} —— {{ decryptResult.verify.message }}
+        </p>
+        <el-alert
+          v-if="decodePreview && (decodePreview.head || decodePreview.tail)"
+          type="warning"
+          :closable="false"
+          class="mt-2"
+          :title="`分块边界处存在不完整字符（head=${decodePreview.head}, tail=${decodePreview.tail}）`"
+          description="替换该分块会破坏相邻分块边界处字符的完整性。"
+        />
+        <el-alert
+          v-if="hasBadBytes(decryptResult.hex)"
+          type="info"
+          :closable="false"
+          class="mt-2"
+          title="内容包含无法解码的字节（可能不是纯文本）"
+          description="右侧 ASCII 栏里的「.」既可能是真的句点，也可能是不可打印字节 —— 请以十六进制栏为准。"
+        />
+
+        <div class="hx-main">
+          <!--
+            ★ 书签栏（用户 2026-10-18）：一个分块一枚，颜色与该块的左色条 / 标题同色，
+              点一下就滚到那一块。块多的时候（128 块 ≈ 8000+ 行）靠滚轮拖很久，
+              这里给一条索引；它自己也能滚，且滚到哪儿就亮哪一枚。
+          -->
+          <div v-if="hexBlocks.length > 1" class="hx-rail" aria-label="分块书签">
+            <button
+              v-for="b in hexBlocks"
+              :key="b.idx"
+              type="button"
+              class="hx-tab"
+              :class="{ 'is-now': b.idx === activeBlock }"
+              :style="{ '--hx-hue': String(b.hue) }"
+              :title="`第 ${b.idx + 1} 块 · ${b.len} 字节 · 偏移 0x${b.offsetHex}`"
+              @click="jumpToBlock(b.idx)"
+            >
+              {{ b.idx + 1 }}
+            </button>
+          </div>
+          <div ref="hexWrap" class="hx-wrap" @scroll.passive="syncActiveBlock">
+          <div
+            v-for="b in hexBlocks"
+            :key="b.idx"
+            :ref="(el) => setBlockEl(el, b.idx)"
+            class="hx-block"
+            :style="{ borderLeftColor: `hsl(${b.hue} 62% 55%)` }"
+          >
+            <div class="hx-head" :style="{ color: `hsl(${b.hue} 70% 74%)` }">
+              第 {{ b.idx + 1 }} 块
+              <span class="hx-sep">·</span>
+              {{ b.len }} 字节
+              <span class="hx-sep">·</span>
+              <span class="mono">偏移 0x{{ b.offsetHex }}</span>
+              <span v-if="b.replayed" class="hx-replay">服务端返回的是旧版本</span>
+            </div>
+            <div class="hx-body">
+              <div v-for="r in b.rows" :key="r.off" class="hx-row">
+                <span class="hx-off">{{ r.offHex }}</span>
+                <span class="hx-bytes">
+                  <span
+                    v-for="(c, i) in r.cells"
+                    :key="i"
+                    class="hx-c"
+                    :class="{ 'hx-zero': c.zero }"
+                  >{{ c.hex }}</span>
+                </span>
+                <span class="hx-ascii">
+                  <span v-for="(ch, i) in r.ascii" :key="i" :class="{ 'hx-dotc': ch.dot }">{{ ch.ch }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!hexBlocks.length" class="text-2" style="font-size: 13px">没有可展示的分块。</p>
+          </div>
+        </div>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            明文字节全部由浏览器在本地解出（私钥不提交给服务端），按分块切开展示：块的<b>左色条与标题颜色</b>
+            区分不同分块，<b>偏移</b>是全文中的字节位置，<b>灰掉的 00</b> 表示该字节为零。
+            本次<b>只用了公开参数</b>完成验证：δ = (U, C, n) 与证据都可被任何人复算，不含任何秘密。
+          </p>
+        </details>
+      </template>
+      <el-empty v-else description="尚未解密" />
+    </el-dialog>
 
     <!-- δ 承诺弹框：指纹只给短摘要，完整值（U / C）在这里看，并可直接复制。 -->
     <el-dialog
@@ -1349,6 +1452,17 @@ onMounted(load)
 .decrypt-text {
   max-width: 720px;
 }
+/* 解密结论的正文：四段（素性检验 / 文件承诺 / 与本地基线比对 / 版本不一致告警）。 */
+.dv-body {
+  font-size: 13px;
+  line-height: 1.75;
+}
+.dv-body p {
+  margin: 0 0 6px;
+}
+.dv-body p:last-child {
+  margin-bottom: 0;
+}
 /* 摘要与参数：两列表格，长值（δ 指纹 / 摘要）整行铺开。 */
 .kv-grid {
   display: grid;
@@ -1407,58 +1521,27 @@ onMounted(load)
     grid-template-columns: minmax(0, 1fr);
   }
 }
-/* 回退面板：一行一块 */
-.rev-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 720px;
-  margin-top: 4px;
-}
-.rev-item {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-  font-size: 13px;
-}
-.rev-idx {
-  color: var(--text-1);
-}
-.rev-ver {
-  color: var(--accent);
-}
-.rev-size {
-  color: var(--text-2);
-}
-.rev-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-}
-
-/* ---------------------------------------------------------------------------
-   两件「对当前版本动手」的事并排成一行：左边回退、右边回滚演示。
-   align-items: stretch 让两块等高，底部的「说明」用 margin-top: auto 压到底边，
-   于是两栏的折叠说明处于同一水平线上，看起来是一排而不是错落的两块。
-   窄屏（< 1180px）自动落回单列，免得两栏都被压到不可读。
---------------------------------------------------------------------------- */
+/* 一行两块：左「三种写操作」（2/3）+ 右「回滚演示」（1/3）。
+   ★ DOM 里演示面板在前面（它原来独占一段），用 order 把它排到右边 ——
+     不靠挪模板来调整位置，免得那张很长的卡片被搬错一层。
+   ★ 窄屏落回单列，且把演示面板放到写操作之后（顺序不跳）。 */
 .ops-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
   gap: 16px;
+  /* ★ 两张卡片**等高**（上下边对齐）：一张是三种写操作，一张是回滚演示。
+     以前用 start，演示卡矮一截、下边悬在半空；现在铺满整行高度，
+     两卡内部的「说明」都靠 margin-top:auto 压到底边。 */
   align-items: stretch;
   margin-bottom: 16px;
 }
+.ops-main { order: 1; min-width: 0; }
+.ops-demo { order: 2; min-width: 0; }
 .ops-row > .panel { display: flex; flex-direction: column; }
 .ops-row > .panel > .note-collapse { margin-top: auto; }
 @media (max-width: 1180px) {
   .ops-row { grid-template-columns: minmax(0, 1fr); }
+  .ops-demo { order: 3; }
 }
 
 /* 演示面板：操作行与四步清单 */
@@ -1492,8 +1575,9 @@ onMounted(load)
 .kv .v.fp-link:disabled { color: var(--text-3); cursor: default; border-bottom-style: dotted; }
 .kv .v.fp-link:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
 
-/* 四个写操作（替换 / 置零 / 追加 / 删除）：做成小卡片，选中的那张拿出来。
-   字号比正文大一号；悬停上浮、选中亮起并带光晕，替换掉默认的下划线指示器。 */
+/* 三种写操作（替换 / 追加 / 删除）：做成小卡片，选中的那张拿出来。
+   字号比正文大一号；悬停上浮、选中亮起并带光晕，替换掉默认的下划线指示器。
+   ★ 置零不是第四个标签页，而是替换页上的一个小按钮（等长全 0 的替换）。 */
 .ops-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
 .ops-tabs :deep(.el-tabs__nav-wrap::after) { display: none; }
 .ops-tabs :deep(.el-tabs__active-bar) { display: none; }
@@ -1572,4 +1656,135 @@ onMounted(load)
   border-top: 1px dashed var(--line);
 }
 .dd-foot .el-button { margin-left: auto; }
+</style>
+
+<!--
+  解密结果弹框（十六进制视图）：同样 teleport 到 body，所以也用非 scoped 样式。
+  配色向 010 Editor 靠：深底、等宽字、分块左侧色条 + 标题同色，零字节变暗。
+-->
+<style>
+.hex-dialog { border-radius: 12px; }
+.hex-dialog .el-dialog__body { padding: 14px 20px 18px; }
+.hex-dialog .el-dialog__title { font-family: ui-monospace, Consolas, monospace; }
+
+.hx-verdict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+.hx-verdict.ok { background: rgba(35, 160, 110, 0.1); border-color: rgba(35, 160, 110, 0.45); color: #2f9e6f; }
+.hx-verdict.bad { background: rgba(214, 69, 69, 0.1); border-color: rgba(214, 69, 69, 0.45); color: #c94a4a; }
+.hx-verdict-k { font-size: 12.5px; opacity: 0.75; margin-right: 2px; }
+.hx-sep { opacity: 0.35; }
+
+/* 左书签栏 + 右十六进制视图。书签颜色由 `--hx-hue` 控制，与块的左色条同源。 */
+.hx-main {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+.hx-rail {
+  flex: 0 0 auto;
+  width: 54px;
+  max-height: 58vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #0b1018;
+  scrollbar-width: thin;
+}
+.hx-tab {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-left: 3px solid hsl(var(--hx-hue) 62% 55%);
+  border-radius: 4px;
+  background: hsl(var(--hx-hue) 45% 18% / 55%);
+  color: hsl(var(--hx-hue) 58% 70%);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, transform 0.12s;
+}
+.hx-tab:hover {
+  background: hsl(var(--hx-hue) 55% 28% / 85%);
+  color: #eaf3ff;
+  transform: translateX(2px);
+}
+.hx-tab:focus-visible {
+  outline: 2px solid hsl(var(--hx-hue) 70% 62%);
+  outline-offset: 1px;
+}
+.hx-tab.is-now {
+  background: hsl(var(--hx-hue) 62% 40%);
+  color: #fff;
+  font-weight: 600;
+}
+
+.hx-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 58vh;
+  overflow: auto;
+  padding: 10px 8px 4px 0;
+  border-radius: 10px;
+  background: #0b1018;
+}
+.hx-block {
+  margin: 0 0 10px 8px;
+  border-left: 3px solid #4a7fb5;
+  border-radius: 6px;
+  background: #111a25;
+  overflow: hidden;
+}
+.hx-block:nth-child(even) { background: #0f1721; }
+.hx-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.035);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.hx-replay { margin-left: auto; font-size: 12px; font-weight: 500; color: #f0b429; }
+.hx-body { padding: 6px 10px 8px; }
+.hx-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 176px;
+  gap: 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+.hx-row:hover { background: rgba(120, 170, 230, 0.07); }
+.hx-off { color: #5d7b99; }
+.hx-bytes { display: flex; flex-wrap: wrap; }
+.hx-c { width: 1.95em; text-align: center; color: #cfe3f7; }
+.hx-zero { color: #41556b; }
+.hx-ascii {
+  color: #7fa6c9;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  letter-spacing: 0.5px;
+  word-break: break-all;
+}
+.hx-dotc { color: #3d5164; }
+@media (max-width: 900px) {
+  .hx-row { grid-template-columns: 74px minmax(0, 1fr); }
+  .hx-ascii { display: none; }
+}
 </style>

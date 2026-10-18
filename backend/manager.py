@@ -73,7 +73,6 @@ from .models import (
     NodeRegistryRow,
     NodeStateRow,
     ReplayRow,
-    BlockHistoryRow,
     RevokedTokenRow,
     UserRow,
 )
@@ -1461,21 +1460,6 @@ class StoreManager:
                     row.plain_len = plain_len
                     frow = db.get(FileRow, file_id)
                     assert frow is not None
-                    # ★ 把“刚被换下来的那一版”留成**上一版**（用户 2026-10-12）。
-                    #   存的是**本体**（密文 + IV + 分量 + 块密钥密文 + 长度），
-                    #   不是哈希 —— 只留哈希的话，节点被销毁之后“验证得对、原文找不回”。
-                    #   ★ 写在这里而不是改之前：只有**这次写真的做成了**（节点都跟上了、
-                    #   这一行也提交了）才值得把旧版换进历史；写失败就留住旧历史。
-                    if before is not None:
-                        self._upsert_history(
-                            db,
-                            owner,
-                            file_key,
-                            block_idx,
-                            before,
-                            version=int(frow.version),
-                            source="改写前留存",
-                        )
                     # 版本号 +1 —— 防重放的那个序号
                     frow.version += 1
                     frow.total_bytes = cur.total_bytes
@@ -1494,10 +1478,6 @@ class StoreManager:
                     "version": version,
                 }
 
-            # ★ 改写**之前**先把这一块当前那套本体抄下来 —— 它就是回退要用的“上一版”。
-            #   抄不到（节点取不到密文）就**不留**：宁可不留，也不要把半份东西
-            #   当上一版（那会在回退时变成“解不开/分量对不上”这种更难查的错）。
-            before = self._capture_body(owner, file_key, block_idx)
             try:
                 store.modify(owner, file_key, block_idx, data, key_sink=sink)
             except WriteError:
@@ -1518,242 +1498,12 @@ class StoreManager:
     # -------------------------------------------------------------------
     # 版本留存与「回退到上一版」（用户 2026-10-12）
     #
-    # 一句话：改块/清零**之前**自动把那一块的整套本体抄一份（每块只留一份，
-    # 即“当前 + 上一版”），节点没了/数据对不上时可以把它写回去、重算分量、
-    # **重新承诺**，于是验证又能过。
-    #
-    # ★ 为什么不用快照、也不只留哈希：① 快照会是无限历史，而需求只要两版；
-    #   ② 哈希能“认出是不是原来那份”，但**找不回原文** —— 用户明确不要这种。
-    # ★ 回退**不是修改历史**：它产生**新版本号**（只增不减）、进审计，
-    #   并且会把“被换下来的当前版”留成新的上一版 —— 所以来回回退都行。
+    # ★ 2026-10-18 已**整块删除**（用户明确不要这个功能）：
+    #   旧版本到底算谁的（协调者库还是存储节点）没有清楚的归属，而为了“能回退”
+    #   就得在协调者库里多存一份**完整本体**（密文 + IV + 块密钥密文）——
+    #   那既多一份副本，也让“密文只在节点上”这句没法再讲。
+    #   现在只保留“当前版本”：改块/置零之后旧版本就真的没了。
     # -------------------------------------------------------------------
-
-    def _capture_body(self, owner: str, file_key: str, block_idx: int) -> dict | None:
-        """把某一块**当前**的整套本体抄下来（密文 / IV / 分量 / 块密钥密文 / 长度）。
-
-        ★ 少一样就返回 ``None``（调用方就**不留**这一版）：
-          密文对了但 ``key_ct`` 不对 ⇒ 所有者解不开；``element`` 不对 ⇒
-          “声称的分量配不上密文”。两种都比“没有上一版”难查得多。
-        """
-        try:
-            store = self._require()
-            pack = store.cipher_of(owner, file_key, [block_idx])
-            blk = pack["blocks"][0]
-            krow = self._blocks_of(owner, file_key).get(int(block_idx)) or {}
-            # ★ 明文长度以**协调者自己的记账**为准（``FileRecord.plain_lengths``）：
-            #   块账目那份（``blocks.plain_len``）与它不是同一个来源，缺字段时会给 0，
-            #   而 0 会让回退后的“解密长度校验”当场失败（我第一次就是这么踩的）。
-            rec = store.files.get((owner, file_key))
-            plain_len = int(rec.plain_lengths[int(block_idx)]) if rec is not None else 0
-        except Exception:  # noqa: BLE001 - 取不到就当成“没留”（见上）
-            return None
-        ct = str(blk.get("ciphertext_hex") or "")
-        iv = str(blk.get("iv_hex") or "")
-        element = str(blk.get("element") or "")
-        key_ct = krow.get("key_ct")
-        if not (ct and iv and element and key_ct):
-            return None
-        return {
-            "ciphertext_hex": ct,
-            "iv_hex": iv,
-            "element": element,
-            "key_ct": str(key_ct),
-            "plain_len": plain_len,
-            "global_index": int(blk.get("global_index") or 0),
-        }
-
-    @staticmethod
-    def _upsert_history(
-        db, owner: str, file_key: str, block_idx: int, body: Mapping, *, version: int, source: str
-    ) -> None:
-        """把一份旧本体留成“上一版”（**每块只留一份**，新的覆盖旧的）。
-
-        ★ 用传入的 ``db``（与调用方同一个事务）而不是另开一个 session：
-          另开会与当前写事务抢 SQLite 的写锁，而且“账改了但历史没改”
-          这种半完成状态会真的出现。
-        """
-        row = db.execute(
-            select(BlockHistoryRow).where(
-                BlockHistoryRow.owner == owner,
-                BlockHistoryRow.file_key == file_key,
-                BlockHistoryRow.block_idx == block_idx,
-            )
-        ).scalar_one_or_none()
-        payload = {"version": int(version), "source": source, **body}
-        if row is None:
-            db.add(
-                BlockHistoryRow(
-                    owner=owner, file_key=file_key, block_idx=block_idx, **payload
-                )
-            )
-        else:
-            for k, v in payload.items():
-                setattr(row, k, v)
-
-    def _history_rows(self, owner: str, file_key: str) -> dict[int, dict]:
-        """这份文件留了上一版的块 —— ``block_idx -> 整行（含密文）``。
-
-        ★ 返回**普通 dict**而不是 ORM 行：session 一关，行就成了 detached，
-          再去读属性会直接抛 DetachedInstanceError。
-        """
-        with self.db.session() as db:
-            rows = db.execute(
-                select(BlockHistoryRow).where(
-                    BlockHistoryRow.owner == owner, BlockHistoryRow.file_key == file_key
-                )
-            ).scalars().all()
-            return {
-                int(r.block_idx): {
-                    "version": int(r.version),
-                    "ciphertext_hex": r.ciphertext_hex,
-                    "iv_hex": r.iv_hex,
-                    "element": r.element,
-                    "key_ct": r.key_ct,
-                    "plain_len": int(r.plain_len),
-                    "global_index": int(r.global_index),
-                    "source": r.source,
-                    "created_at": r.created_at,
-                }
-                for r in rows
-            }
-
-    def history_of(self, owner: str, file_key: str) -> list[dict]:
-        """哪些块留了上一版（给界面看）。**不把密文发给前端** —— 界面用不到。"""
-        with self.db.session() as db:
-            rows = db.execute(
-                select(BlockHistoryRow)
-                .where(BlockHistoryRow.owner == owner, BlockHistoryRow.file_key == file_key)
-                .order_by(BlockHistoryRow.block_idx)
-            ).scalars().all()
-            return [
-                {
-                    "block_idx": int(r.block_idx),
-                    "version": int(r.version),
-                    "bytes": len(r.ciphertext_hex) // 2,
-                    "plain_len": int(r.plain_len),
-                    "source": r.source,
-                    "created_at": r.created_at.isoformat(timespec="seconds"),
-                }
-                for r in rows
-            ]
-
-    def _finish_restore(
-        self, owner: str, file_key: str, block_idx: int, hist: Mapping, before: Mapping | None
-    ) -> int:
-        """回退的**落库收尾**（理由同 :meth:`modify_block`）。
-
-        ★ 它只读 ``store`` 当前状态（新 IV / 新长度都从那里取），不从外面传一遍。
-        """
-        store = self._require()
-        cur = store.files[(owner, file_key)]
-        with self.db.session() as db:
-            brow = db.execute(
-                select(BlockRow).where(
-                    BlockRow.owner == owner,
-                    BlockRow.file_key == file_key,
-                    BlockRow.block_idx == block_idx,
-                )
-            ).scalar_one_or_none()
-            if brow is None:  # pragma: no cover - 上面的块数校重复，兼底
-                raise NotFound(f"文件 {owner}/{file_key} 的第 {block_idx} 块没有账目")
-            gidx = int(brow.global_index)
-            brow.element = str(store.values[gidx])
-            # 复的那一版连同它那把块密钥一起回来 —— 否则所有者解不开。
-            brow.key_ct = str(hist["key_ct"])
-            brow.iv = cur.ivs[block_idx]
-            brow.plain_len = int(cur.plain_lengths[block_idx])
-            frow = db.get(FileRow, brow.file_id)
-            assert frow is not None
-            old_version = int(frow.version)
-            # ★ 把“被换下来的那一版”留成新的上一版：回退本身也可以再回退。
-            if before is not None:
-                self._upsert_history(
-                    db,
-                    owner,
-                    file_key,
-                    block_idx,
-                    before,
-                    version=old_version,
-                    source="回退前留存",
-                )
-            frow.version = old_version + 1
-            frow.total_bytes = cur.total_bytes
-            self._persist_globals(db)
-            # ★ 节点那一侧也要落库（漏了这一步会出现“重启后才发现不一致”）。
-            self._persist_nodes(db, [gidx])
-            db.commit()
-            return int(frow.version)
-
-    def restore_previous(
-        self, owner: str, file_key: str, block_indices: Sequence[int] | None = None
-    ) -> dict:
-        r"""把若干块回退到**上一版本体**：换回旧密文 → 重算分量 → 重新承诺 → 版本 +1。
-
-        :param block_indices: 要回退哪几块（0 起）；``None`` = 所有留过上一版的块。
-
-        ★ 走的是与改块**同一条**推送链路（:meth:`~core.store.VectorStore.restore_block`
-          里就是 ``push_update`` + ``apply_update``），所以：
-          “推给节点 → 再改库”的顺序、写失败即作废 —— 全部与改块一致。
-
-        :raises NotFound: 文件或这些块的留存不存在
-        :raises Conflict: 这份文件一块上一版都没留
-        :raises OutOfRange: 块号越界
-        """
-        with self._lock:
-            store = self._require()
-            rec = store.files.get((owner, file_key))
-            if rec is None:
-                raise NotFound(f"文件 {owner}/{file_key} 不存在")
-            hist = self._history_rows(owner, file_key)
-            if not hist:
-                raise Conflict(
-                    "这份文件还没有留过上一版 —— 先改块或清零一次，才会有上一版可回退"
-                )
-            targets = (
-                sorted(hist)
-                if block_indices is None
-                else sorted({int(i) for i in block_indices})
-            )
-            if not targets:
-                raise OutOfRange("没点名要回退哪一块")
-            # ★ 先校**越界**，再问"有没有留存"：反过来的话，给一个不存在的块号会
-            #   得到"这些块没有留存上一版"，而真相是"这份文件根本没有这块" ——
-            #   误导性的报错比没有报错更难查。
-            bad = [i for i in targets if not 0 <= i < len(rec.indices)]
-            if bad:
-                raise OutOfRange(
-                    f"块号越界：{owner}/{file_key} 只有 {len(rec.indices)} 块（收到 {bad}）"
-                )
-            missing = [i for i in targets if i not in hist]
-            if missing:
-                raise NotFound(f"这些块没有留存上一版：{missing}")
-
-            done: list[int] = []
-            version = 0
-            for bi in targets:
-                row = hist[bi]
-                # ① 回退前先把“当前这一版”抄下来（回退也要可回退）
-                before = self._capture_body(owner, file_key, bi)
-                try:
-                    store.restore_block(
-                        owner,
-                        file_key,
-                        bi,
-                        ciphertext=bytes.fromhex(row["ciphertext_hex"]),
-                        iv=bytes.fromhex(row["iv_hex"]),
-                        plain_len=int(row["plain_len"]),
-                        element=int(row["element"]),
-                    )
-                except (KeyError, IndexError) as exc:
-                    raise NotFound(str(exc)) from exc
-                except ValueError as exc:
-                    raise OutOfRange(str(exc)) from exc
-                except WriteError:
-                    # 同改块：写失败即作废。
-                    raise
-                version = self._finish_restore(owner, file_key, bi, row, before)
-                done.append(bi)
-            return {"restored": done, "count": len(done), "version": int(version)}
 
     def zero_block(self, owner: str, file_key: str, block_idx: int) -> dict:
         r"""把第 ``block_idx`` 块的内容换成**等长的全 0 字节**。
@@ -3345,10 +3095,18 @@ class StoreManager:
             },
         }
 
-    def status(self) -> dict:
+    def status(self, *, probe: bool = True) -> dict:
         store = self._require()
         # 探活只做一次，下面两处都复用它（理由见 ``nodes`` / ``nodes_down`` 那两行）
-        report = store.node_report()
+        #
+        # ★★ ``probe=False`` 时**完全不探活**。``node_report()`` 要让每台
+        #    对每份文件做一遍密码学自检（``check_local_view`` 内部是 svc.verify），
+        #    代价与 §|I| 级模幂相当、**随文件数增长**（实测 7 份文件时
+        #    ``/api/status`` 要 1.5~3 s）。而只要部署参数与切块口径的页面
+        #    （如「上传文件」页只读 ``segment_*`` / ``crs``）根本用不到它。
+        #    那时 ``nodes`` 返回 ``None``（“没问”），而不是 0 —— 0 是
+        #    “问了、一台都没答”，两者不能混为一谈。
+        report = store.node_report() if probe else []
         return {
             "crs": {
                 "N_bits": store.session.crs.N.bit_length(),
@@ -3428,15 +3186,18 @@ class StoreManager:
             #   什么都没有”（见 `core/node_state.py::_describe_one`）—— 空库时
             #   **每一台**都是 fresh，照它数会得到 0 台在线，于是总览页会出现
             #   「0 NODES」配着「系统运行正常」这种自相矛盾。所以按“答上话了”数。
-            "nodes": len([r for r in report if not r.get("unreachable")]),
+            "nodes": len([r for r in report if not r.get("unreachable")]) if probe else None,
             "nodes_down": [r["node_id"] for r in report if r.get("unreachable")],
+            #: 本次到底探没探活。``false`` 时上面的 ``nodes`` 为 ``null``。
+            "nodes_probed": probe,
             "mode": "distributed" if self.settings.distributed else "single-process",
             "transport": type(store.transport).__name__,
             "keywrap": self.keywrap_status(),
         }
 
-    def node_report(self) -> list[dict]:
-        return self._require().node_report()
+    def node_report(self, *, verify: bool = True) -> list[dict]:
+        """各存储节点现状（``verify=False`` 时不做密码学自检，见调用方说明）。"""
+        return self._require().node_report(verify=verify)
 
     def pos_audit(self, *, lambda_pos: int = DEFAULT_LAMBDA_POS) -> dict:
         """**存储证明（PoR）**：不下载内容，确认各节点确实还存着它那份。
@@ -3498,6 +3259,8 @@ class StoreManager:
         if isinstance(store.transport, FaultyTransport):
             return
         store.transport = FaultyTransport(store.transport)
+        # 换了传输层，之前缓存的现状行（含 unreachable / proved）就作废了。
+        store.invalidate_node_report()
 
     def _faults(self) -> FaultyTransport:
         t = self._require().transport
@@ -3559,6 +3322,10 @@ class StoreManager:
                 raise ValueError(
                     f"未知动作 {action!r}（只认 knock_out / restore / status）"
                 )
+            # ★ 节点在线与否变了 —— 现状缓存必须当场丢掉，否则接下来
+            #   “刚让它掉线、块分布图却还显示它在”会是 1.5 s 的误报。
+            if action != "status":
+                store.invalidate_node_report()
             return {**ft.status(), "impact": self._fault_impact(store, ft)}
 
     def _fault_impact(self, store: VectorStore, ft: FaultyTransport) -> dict:

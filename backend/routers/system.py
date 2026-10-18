@@ -83,25 +83,39 @@ def plan(
 def status(
     _: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
+    probe: bool = True,
 ):
     """公开参数与逐文件摘要（每份文件一个 :math:`\\delta = ((U, C), n)`）。
 
     ``n`` 是全系统**已用位置数**（各文件块数之和，不含历史空洞），
     不是任何一份文件的长度；要按文件看就看响应里的 ``files``。
+
+    :param probe: 是否**逐台探活**存储节点（影响响应里的 ``nodes`` /
+        ``nodes_down``）。默认 ``True``：``node_report()`` 会让每台对每份文件
+        做一遍密码学自检，代价随文件数增长（实测 7 份文件时 1.5~3 s）。
+        只要部署参数与切块口径的页面（上传文件页）传 ``probe=0``：
+        那时 ``nodes`` 为 ``null``、``nodes_probed`` 为 ``false`` ——
+        “没问”与“问了没答”是两回事，不能都写 0。
     """
-    return mgr.status()
+    return mgr.status(probe=probe)
 
 
 @router.get("/nodes")
 def nodes(
     _: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
+    verify: bool = True,
 ):
     """各台存储服务器的现状：持有多少块、下标跨度、视图是否合法。
 
     这是界面上"块分布"那张表的数据源。**每台只知道自己的那一段**。
+
+    :param verify: 是否让每台顺带做一遍**密码学自检**（``proved`` 字段）。
+        默认 ``True`` —— 节点页/设备页靠它显示「视图校验通过」。
+        只要 “谁在线、持有哪些块” 的页面（上传文件页）传 ``verify=0``：
+        那时 ``proved`` 为 ``null``（没算过），``valid`` 照旧。
     """
-    return mgr.node_report()
+    return mgr.node_report(verify=verify)
 
 
 @router.post("/por")

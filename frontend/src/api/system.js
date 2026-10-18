@@ -1,7 +1,15 @@
 import api from './client'
 
 export const systemApi = {
-  status: () => api.get('/api/status'),
+  /**
+   * 公开参数与逐文件摘要。
+   *
+   * @param {{ probe?: boolean }} [params] `probe: false` = **不逐台探活**。
+   *   `node_report()` 要让每台对每份文件做一遍密码学自检，代价随文件数增长
+   *   （实测 7 份文件时 1.5~3 s）。只要部署参数与切块口径的页面传 `false`：
+   *   那时响应里的 `nodes` 为 `null`、`nodes_probed` 为 `false`。
+   */
+  status: (params) => api.get('/api/status', { params }),
   check: () => api.post('/api/admin/check'),
   /**
    * 审计流水。params 支持：

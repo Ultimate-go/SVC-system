@@ -40,9 +40,9 @@ IAVC-VDSS 是论文 *Incrementally Aggregatable Vector Commitments and Applicati
 
 - 2026年第11届全国密码技术竞赛参赛项目，功能已完整闭环。
 - 验证方式（本次交付版本）：一键启动后按演示脚本走一遍；`python demo.py` 跑端到端演示并打印性能指标；`cd frontend; npm test` 跑前端单元测试（129 条，Node 自带 `node --test`，零新依赖；含切块阶梯口径、422 文案还原、输入校验措辞与上限、整份取密文的体积估算）；`scripts/bench_batch.py`、`scripts/bench_blocksize.py` 复现文档里的实测数字；管理员界面「管理员工作台 → 系统初始化 → 一致性自检」跑一遍逐文件摘要、各节点状态与位置登记一致性。
-- **九份可重跑的验收脚本**（每份跑完都逐条打印 PASS / FAIL，全部可离线跑、不启服务）：`scripts/verify_identity_primegen.py`（密码学内核）、`verify_session_identity.py`（新旧两套素数坐标并存）、`verify_store_identity.py`（上传/改块/追加/聚合/截断/删 除）、`verify_backend_identity.py`（真库 + 模拟重启）、`verify_fault_drill.py`（节点掉线 / 永久损毁下的真实反应 + HTTP 接口层）、`verify_node_wire.py`（**跨进程线格式** —— 不起端口地走真 JSON，含"节点重启后继续写"）、`verify_version_restore.py`（**版本留存与回退** —— 留的是本体、只留两版、回退会重新承诺且可来回）、`verify_incremental_agg.py`（**增量聚合与一步分解** —— 两段各自聚合再合并，与一次取全**逐位相同**；分解一步直达任意子集，且拆出的子集与当初聚出来的那一份逐位相同）、`verify_segment_ladder.py`（**自动切块阶梯** —— 小文件 1 KB 起、大文件逐档上升、块数始终受控，且与前端那份预览口径**同表**）。
+  - **八份可重跑的验收脚本**（每份跑完都逐条打印 PASS / FAIL，全部可离线跑、不启服务）：`scripts/verify_identity_primegen.py`（密码学内核）、`verify_session_identity.py`（新旧两套素数坐标并存）、`verify_store_identity.py`（上传/改块/追加/聚合/截断/删除）、`verify_backend_identity.py`（真库 + 模拟重启）、`verify_fault_drill.py`（节点掉线 / 永久损毁下的真实反应 + HTTP 接口层）、`verify_node_wire.py`（**跨进程线格式** —— 不起端口地走真 JSON，含"节点重启后继续写"）、`verify_incremental_agg.py`（**增量聚合与一步分解** —— 两段各自聚合再合并，与一次取全**逐位相同**；分解一步直达任意子集，且拆出的子集与当初聚出来的那一份逐位相同）、`verify_segment_ladder.py`（**自动切块阶梯** —— 小文件 1 KB 起、大文件逐档上升、块数始终受控，且与前端那份预览口径**同表**）。
   外加 `scripts/_e2e_api.py`（需要服务在跑）：打真 8000 端口 + 真 4 台节点，从登录一路走到"掉线 → 写失败（本次作废）→ 恢复 → 重做一次成功"。
-- **两条静态自检**（不起服务、不跑数据）：`scripts/check_js_wrap.py`（「JS 封 → Python 解」互通）与 `scripts/check_stage_names.py`（**界面上的步骤 key 与后端 `with stage("…")` 的埋点名是否逐一对得上** —— 对不上的后果是静默的：那一步不显示耗时，看着像“这一步不花时间”）。
+- **四条静态自检**（不起服务、不跑数据）：`scripts/check_js_wrap.py`（「JS 封 → Python 解」互通）、`scripts/check_stage_names.py`（**界面上的步骤 key 与后端 `with stage("…")` 的埋点名是否逐一对得上** —— 对不上的后果是静默的：那一步不显示耗时，看着像“这一步不花时间”）、`scripts/check_error_codes.py`（后端 `ApiError` 的码表与前端 `data/errors.js` 是否一致）、`scripts/check_node_report_cache.py`（**节点现状的短 TTL 缓存**：同一屏内重复问不重复算，但上传 / 改块 / 追加 / 删除 / 换 CRS / 故障演练之后**必须当场失效**；顺带钉住 `/api/status?probe=0`、`/api/nodes?verify=0` 两个轻量档还在被用）。
 - 密钥层已按导师要求从 ABE 切换为「**SM2 公钥封块密钥 + 口令封私钥**」。
 - **2026-10 做过一轮浏览器端全量实测**：只读接口 + 写入全链路（上传 / 详情 / 试解密 / 替换 / 置零 / 追加 / 删除）+ 用户管理（建号、重复 409、空名与非法角色 422）+ **越权面**（普通用户打管理接口、改别人文件、改他人口令，全部 403）。完整清单与旁证见 [`docs/开发与验收记录.md`](docs/开发与验收记录.md)。
 - 目前仍在迭代：详见 [`docs/方案设计.md`](docs/方案设计.md) 的「已知局限」一节。
@@ -173,7 +173,7 @@ IAVC-VDSS/
 ├─ backend/             FastAPI + SQLite + JWT；验证不受限 / 解密受限
 │  ├─ manager.py        协调者：一文件一向量 + 落库顺序
 │  └─ routers/          auth / admin / files / verify / system / perf
-├─ scripts/             seed / run_nodes / start_all（一键起停）/ restart / bench_*（性能基准，实测数字的来源）/ check_js_wrap / check_stage_names / gen_crypto_vectors / 9 份 verify_*.py
+├─ scripts/             seed / run_nodes / start_all（一键起停）/ restart / bench_*（性能基准，实测数字的来源）/ check_*（静态自检）/ gen_crypto_vectors / 8 份 verify_*.py
 ├─ frontend/            Vue 3 + Vite + Element Plus（20 条路由）+ tests/（前端单元测试）
 ├─ demo.py              端到端演示 + 性能指标
 └─ docs/                方案设计 + 复现指南 + 架构说明 + 验收记录

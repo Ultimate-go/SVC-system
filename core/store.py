@@ -55,7 +55,9 @@
 from __future__ import annotations
 
 import random
+import copy
 import dataclasses
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Collection, Mapping, Sequence
 
@@ -94,6 +96,19 @@ __all__ = ["VectorStore", "PlainKeyStore", "FileRecord", "QueryResult"]
 
 #: 默认的存储服务器台数。"台数"与文件无关 —— 它是全网的分片数。
 DEFAULT_NODE_IDS: tuple[str, ...] = ("node-1", "node-2", "node-3", "node-4")
+
+#: ``node_report()`` 的短 TTL（秒）。
+#:
+#: ★ 为什么需要它：``node_report(verify=True)`` 要让**每台**节点对**每份文件**
+#:   跑一遍 ``check_local_view``（内部是 ``svc.verify``，§|I| 级模幂），
+#:   代价随文件数增长（实测 7 份文件时 1.5~3 s）。而设备页 / 总览页 / 块分布图
+#:   往往在几百毫秒内连续问好几遍（页头 + 列表 + 详情），每一遍都重算没有意义。
+#:
+#: ★★ 它只挡**重复读**，不挡写：任何改变节点持有情况的操作（上传 / 改块 /
+#:   追加 / 删除 / 换 CRS / 故障演练）都走 :meth:`VectorStore.invalidate_node_report`
+#:   把缓存直接丢掉，所以“刚传的块看不到”这类陈旧不会发生。
+#:   1.5 s 只够合并同一屏内的重复请求，短到即使有遗漏也来不及积成事故。
+NODE_REPORT_TTL_S = 1.5
 
 
 @dataclass
@@ -223,6 +238,8 @@ class VectorStore:
         "_replicas",
         "_offset",
         "replica_factor",
+        #: ``node_report()`` 的短 TTL 缓存：``{verify: (取回时刻, 行列表)}``
+        "_report_cache",
     )
 
     def __init__(
@@ -278,6 +295,8 @@ class VectorStore:
         #: 全局下标 -> **全部**持有者（主副本在前）。副本数 > 1 时才有意义。
         self._replicas: dict[int, tuple[str, ...]] = {}
         self._offset: int = 0
+        #: 见 :meth:`node_report` / :data:`NODE_REPORT_TTL_S`。
+        self._report_cache: dict[bool, tuple[float, list[dict]]] = {}
 
     # -------------------------------------------------------------------
     # 按文件取摘要
@@ -738,6 +757,7 @@ class VectorStore:
         }
 
         # 每一份副本都要拿到新密文 —— 只推一份的话，从别的副本读到的就是旧内容
+        self.invalidate_node_report()
         try:
             with stage("分发至存储节点"):
                 self.transport.apply_update(
@@ -759,108 +779,6 @@ class VectorStore:
         # 反过来的话，「本地记录改了、节点没收到」会让协调者比实际存储更乐观。
         self._absorb_pushed(context)
         return iv_new, len(plaintext)
-
-    def restore_block(
-        self,
-        owner: str,
-        file_key: str,
-        block_idx: int,
-        *,
-        ciphertext: bytes,
-        iv: bytes,
-        plain_len: int,
-        element: int,
-    ) -> tuple[bytes, int]:
-        r"""把某一块换回它**上一版的本体**（密文一并换回），并让全网跟上新的分量。
-
-        与 :meth:`modify` 的唯一区别是：新密文**不是算出来的，是拿回来的**。
-        所以这里**不生成密钥、也不重新封装** —— 复的那一版连同它那把块密钥
-        （``key_ct``，由调用方写回块账目）一起回到原位，所有者用同一把私钥就解得开。
-
-        ★ 为什么要重新承诺：回退后这一块的分量与承诺对不上旧基准（``C`` 里
-          是旧值），不重算的话“数据换回去了、验证却不过”。这里走的就是
-          :func:`push_update` 那条**增量更新**路 —— 只动``K`` 上的分量，
-          其余块一个字不碰（与改块同构）。
-
-        .. important::
-
-           调用方必须保证 ``element == vector_element(ciphertext)``（本方法会校）。
-           这两个值来自同一个历史行，但校验一次很便宜，而放过一次就会得到
-           “承诺说 A、密文说 B”的分裂状态 —— 那是所有故障里最难归因的一种。
-
-        :returns: ``(新 IV, 明文长度)``，与 :meth:`modify` 同形。
-        :raises KeyError: 文件不存在
-        :raises IndexError: 块号越界
-        :raises ValueError: 空块、超单块上限，或本体与分量对不上
-        """
-        key = (owner, file_key)
-        rec = self.files.get(key)
-        if rec is None:
-            raise KeyError(f"文件 {owner}/{file_key} 不存在（先上传再回退）")
-        n_blocks = len(rec.indices)
-        if not 0 <= block_idx < n_blocks:
-            raise IndexError(
-                f"块号 {block_idx} 越界：{owner}/{file_key} 只有 {n_blocks} 块"
-            )
-        if not ciphertext:
-            raise ValueError("空块没有意义")
-        if len(ciphertext) > rec.segment_bytes:
-            raise ValueError(
-                f"留存的本体有 {len(ciphertext)} 字节，超过单块上限 {rec.segment_bytes}"
-            )
-        with stage("块标识校验"):
-            v_new = int(element)
-            if vector_element(ciphertext) != v_new:
-                raise ValueError(
-                    "留存的本体与它记的分量对不上 —— 拒绝用一份自相矛盾的历史回退"
-                )
-
-        gidx = rec.indices[block_idx]
-        iv_new = bytes(iv)
-        delta_old = self.delta_of(owner, file_key)
-        op_delta = UpdateDelta(op="mod", K=(block_idx,), F_new=(v_new,))
-        with stage("承诺更新"):
-            pushed = push_update(
-                self.session,
-                delta_old,
-                _full_holder(self.session, delta_old, self._vals_of(key)),
-                op_delta,
-                {block_idx: self.values[gidx]},
-            )
-        holders = self.replicas_of(gidx)
-
-        def _patch_record() -> None:
-            rec.ivs[block_idx] = iv_new
-            rec.plain_lengths[block_idx] = int(plain_len)
-            rec.total_bytes = sum(rec.plain_lengths)
-
-        context = {
-            "kind": "mod",
-            "file_id": key,
-            "delta_new": pushed.delta,
-            "per_index": {gidx: tuple(holders)},
-            "K": (gidx,),
-            "elements": (v_new,),
-            "on_success": _patch_record,
-        }
-
-        try:
-            with stage("分发至存储节点"):
-                self.transport.apply_update(
-                    delta_new=pushed.delta,
-                    op_delta=op_delta,
-                    witness=pushed.witness,
-                    blobs={nid: {gidx: ciphertext} for nid in holders},
-                )
-        except TransportError:
-            # 与 modify / append 同一处理：一台没跟上，全网就不一致；
-            # 而回退更不能“重来一次”（重来还是同一份旧密文，但已经跟上的
-            # 节点会因为它与当前值相同而拒绝重复应用）。
-            # 方案约定：写失败即作废 —— 没推上去的节点就是没有这份新值。
-            raise
-
-        self._absorb_pushed(context)
-        return iv_new, int(plain_len)
 
     def append(
         self,
@@ -1070,6 +988,7 @@ class VectorStore:
             "on_success": on_success,
         }
 
+        self.invalidate_node_report()
         try:
             # 节点自己算新状态；协调者只告诉它们"发生了什么"和"你负责哪些位置"
             with stage("分发至存储节点"):
@@ -1220,6 +1139,7 @@ class VectorStore:
         #      只丢下标，(S_I, Λ_I) 一个字不改）
         drops = self._plan_drops(K)
         if drops:
+            self.invalidate_node_report()
             self.transport.drop(int(delta_old.offset), drops)
 
         # ② 协调者自己发起 del（它手里有整个向量，不依赖任何一台正好持有整个尾巴）
@@ -1256,6 +1176,7 @@ class VectorStore:
             "on_success": settle,
         }
 
+        self.invalidate_node_report()
         try:
             self.transport.apply_delete(
                 delta_new=pushed.delta, op_delta=op_delta, witness=pushed.witness
@@ -2574,13 +2495,26 @@ class VectorStore:
                 out.append(i)
         return out
 
-    def node_report(self) -> list[dict]:
+    def node_report(self, *, verify: bool = True) -> list[dict]:
         """各服务器现状 —— 给界面上的"块分布矩阵"用。
 
-        这里**带上密码学验证**（``proved`` 字段），因为这是显式请求现状的
-        接口，不是检索路径上顺手拿一下数据。
+        :param verify: 是否让每台做一遍**密码学自检**（``proved`` 字段）。
+
+            ★ 默认做：这是显式请求现状的接口，不是检索路径上顺手拿一下数据。
+            ★★ 但它的代价是 §|I| 级的模幂（每台 × 每份文件一份），
+            **会随文件数增长**（实测 7 份文件时 ``/api/status`` 要 1.5~3 s）。
+            只需要"谁在线、持有哪些块"的页面（如「上传文件」页只取
+            ``node_id`` / ``unreachable``）传 ``verify=False``：那时 ``proved``
+            一律为 ``None``（“没算过”，不是“不合法”），
+            而 ``valid`` / ``held`` / ``indices`` 照旧 —— 它们只比集合，便宜。
         """
-        rows = self.transport.report(verify=True)
+        key = bool(verify)
+        now = time.monotonic()
+        hit = self._report_cache.get(key)
+        if hit is not None and now - hit[0] < NODE_REPORT_TTL_S:
+            # ★ 返回副本：调用方会往行里塞字段，也可能自己改 —— 不能把缓存改脏。
+            return copy.deepcopy(hit[1])
+        rows = self.transport.report(verify=key)
         # ★ 节点自己只知道**文件内局部块号**（它按 offset 分视图），所以
         #   “这些块在全局位置上占哪一格”只有协调者补得出来 —— 用各文件的
         #   位置段把局部块号映回全局位置。顺便把旧字段（indices / n / span）
@@ -2606,10 +2540,22 @@ class VectorStore:
             row["n"] = len(positions)
             row["span"] = span(positions)
             out.append(row)
+        self._report_cache[key] = (now, copy.deepcopy(out))
         return out
+
+    def invalidate_node_report(self) -> None:
+        """丢掉 :meth:`node_report` 的短 TTL 缓存。
+
+        ★★ **任何改变节点持有情况的操作都要调它**（上传 / 改块 / 追加 /
+           删除 / 换 CRS / 故障演练）。TTL 只是合并同一屏内的重复读，
+           不是“允许写完之后还看到旧数据”。
+        """
+        self._report_cache.clear()
 
     def set_crs(self) -> None:
         """把公开参数交给各节点（跨进程时是第一次通信）。"""
+        # 各节点的视图/自检结果都变了 —— 缓存一并丢掉。
+        self.invalidate_node_report()
         self.transport.set_crs(
             {
                 "N": str(self.session.crs.N),
@@ -2679,9 +2625,10 @@ def _full_holder(
     **空向量**承诺一次」：``specialize(crs, 0)`` 的 ``U_0`` 就是 ``g``，
     ``commit(crs_0, []).C`` 就是 ``1``。
 
-    实测（``scripts/verify_version_restore.py``）：这样算出的新摘要与
-    「对截断后的向量重新做一次 :func:`svc.commit`」**逐位相同**，而且它的
-    ``check_local_view()`` 为真 —— 它确实是一个合法本地视图，不是硬凑的数。
+    实测：这样算出的新摘要与「对截断后的向量重新做一次 :func:`svc.commit`」
+    **逐位相同**，而且它的 ``check_local_view()`` 为真 —— 它确实是一个合法本地
+    视图，不是硬凑的数。（原来这条断言由 ``scripts/verify_version_restore.py``
+    顺带核对；那个脚本随「回退到上一版」功能一起删除，结论不受影响。）
     """
     idx = tuple(range(delta.n))
     crs_0 = specialize(session.crs, 0)

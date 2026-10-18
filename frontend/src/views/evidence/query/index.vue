@@ -160,7 +160,8 @@ async function loadFiles() {
   try {
     // 同时问一次"现在一共多少块"：**库空的时候**也得知道，
     // 否则集合里那些已经被删掉的块标不出来（空列表里根本没有 delta_n）。
-    const [{ data }, st] = await Promise.all([filesApi.list(), systemApi.status()])
+    // ★ 只要 `blocks`（全系统在用块数），不需要逐台探活（`probe: false`）。
+    const [{ data }, st] = await Promise.all([filesApi.list(), systemApi.status({ probe: false })])
     const list = Array.isArray(data) ? data : data.items || []
     allFiles.value = list
 

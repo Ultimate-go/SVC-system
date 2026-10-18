@@ -94,7 +94,7 @@ function onMove(ev) {
  * 以前只有复选框与文件名那一条能点，卡片一大片空白点了没反应。
  * 现在整卡可点，**两处除外**：
  *   · 「逐块指纹」那一块（它自带「收起/细看」按钮，点它只应开合）；
- *   · 任何按钮/链接（移除、看完整标题…）。
+ *   · 任何按钮/链接（移除、完整标题…）。
  * ★ 刚划选完那一下不算点击：松手之后浏览器还会补一个 click，
  *   不挡掉的话“划过去”会变成“把最后那张又翻一下”。
  */
@@ -381,6 +381,74 @@ function cardTitle(card) {
   return `${cut >= 0 ? raw.slice(0, cut) : raw}：${scope}`
 }
 
+/** 这张卡涉及的**文件条目**（新卡必有：`addCard` 把 `result.files` 一并收了）。 */
+function cardFileEntries(card) {
+  return card?.files || card?.result?.files || []
+}
+
+/**
+ * 单文件证据：一张卡只覆盖**一份文件**。
+ *
+ * ★ 这类卡的标题不需要再解释“哪几份文件分别第几块”—— 它就是一个文件名。
+ *   用户口径：第一行只给文件名 + 持有者，块范围放到第二行。
+ */
+function isSingleFileCard(card) {
+  return cardFileEntries(card).length === 1
+}
+
+/** 单文件卡第 1 行左边：文件标识（没有归属信息才退回旧标题）。 */
+function singleTitle(card) {
+  const f = cardFileEntries(card)[0]
+  return f?.file_key || cardScope(card)
+}
+
+/** 单文件卡的持有者（拿不到就返回空串，界面上整块不显示）。 */
+function singleOwner(card) {
+  return cardFileEntries(card)[0]?.owner || ''
+}
+
+/**
+ * 单文件卡覆盖的块范围文本（「第 1-9 块」）。
+ *
+ * ★ 块号按 1 起显示（`span` 内部已经换算过）；拿不到块号就返回空串，
+ *   不编一个假的区间。
+ */
+function singleBlockText(card) {
+  const f = cardFileEntries(card)[0] || {}
+  let bs = Array.isArray(f.block_indices) ? f.block_indices : []
+  if (!bs.length) {
+    const off = Number(f.offset)
+    const nf = Number(f.n)
+    if (Number.isFinite(off) && Number.isFinite(nf)) {
+      bs = (card.indices || [])
+        .filter((i) => i >= off && i < off + nf)
+        .map((i) => i - off)
+    }
+  }
+  return bs.length ? `第 ${span(bs)} 块` : ''
+}
+
+/**
+ * 单文件卡第 2 行左边：「第 1-9 块 · 共 12 块」。
+ *
+ * ★ “共 N 块”说的是**这张卡覆盖了几块**，不是文件一共多少块。
+ */
+function singleBlockLine(card) {
+  const covered = (card.indices || []).length
+  const t = singleBlockText(card)
+  return t ? `${t} · 共 ${covered} 块` : `共 ${covered} 块`
+}
+
+/**
+ * 「完整标题」按钮只在**标题真会被截断**时才给。
+ *
+ * ★ 单文件卡的标题就是一个文件名，hover 就能看全，再放一个按钮是多余的（用户口径）；
+ *   多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会长到要被截断。
+ */
+function needFullTitle(card) {
+  return !isSingleFileCard(card) && cardTitle(card).length > 24
+}
+
 /**
  * 完整标题按行给出：持有者、文件、覆盖块数各一行。
  *
@@ -421,7 +489,9 @@ function showFullTitle(card) {
 
 async function syncDelta() {
   try {
-    const { data } = await systemApi.status()
+    // ★ 只要逐文件的 δ 指纹，不需要逐台探活（`probe: false`）：
+    //   `node_report()` 会让每台对每份文件跑一遍 svc.verify，随文件数增长。
+    const { data } = await systemApi.status({ probe: false })
     // ★★ 判“这张卡还有效吗”靠的是**每份文件**的 δ 指纹，不是长度：
     //   替换 / 置零 / 追加 / 删除都只改 C，**不改全局位置总数 n** ——
     //   只比 n 的话，改完块聚合面板里的卡看起来一切正常，实际已经验不过了。
@@ -459,187 +529,281 @@ const aggregating = ref(false)
    两份证据不能直接拼接 —— 每份证据只对它覆盖的下标有定义。
    `key` 与后端 `with stage("…")` 的名字对齐，对不上就不显示耗时。
 --------------------------------------------------------------------------- */
-const AGG_STEPS = [
+/**
+ * 四类流程的最后一小步：所得证据随后按「可验证查询」那 7 步走。
+ *
+ * ★ 这是用户 2026-10-18 要的口径：聚合 / 分解本身是一条链路，
+ *   而“这份东西到底对不对”在界面上就是「验证」——那 7 步与可验证查询页逐字一致。
+ *   所以把它作为末步摆出来，先说清“后面还有一步”，而不是让它凭空消失。
+ */
+const QUERY_LAST_STEP = {
+  name: '可验证查询',
+  en: 'QUERY',
+  // ★ 正文由 processSteps 按“这次到底通没通”填**一行结论**；不在这里写死。
+  desc: '',
+}
+
+/**
+ * ① 同一文件内两张（或更多）证据聚合 —— 论文 §6.5.2 的 ``VC.Agg``。
+ *
+ * ★ ``key`` 逐字对齐后端 ``with stage("…")``：同一份文件走
+ *   ``core/store.py::_prove`` 里的单文件分支（``_certs_for`` + ``AggManyToOne``），
+ *   实际只出现「探测节点持有情况 / 取回密文 / 取回分量与凭证 / 证据合成 / 承诺验证」。
+ *   对不上就不显示那一步耗时 —— 不编数字。
+ */
+const AGG_SAME_STEPS = [
   {
     name: '合并下标集合',
     en: 'UNION',
-    desc: '把所选各张证据覆盖的分块集合取并集。一份证据只在其覆盖的下标上有定义，因此两份证据不能按同一语义直接叠加。',
+    desc: '把所选各张证据覆盖的分块集合取并集。一份证据只在其覆盖的下标上有定义，因此两张证据不能按同一语义直接叠加。',
+  },
+  {
+    key: '探测节点持有情况',
+    name: '探测节点持有情况',
+    en: 'PROBE',
+    desc: '一次问答式探测：问清并集内每个分块当前由谁持有。节点的申报只作线索，分量一律由交付的字节当场算出。',
+  },
+  {
+    key: '取回密文',
+    name: '取回密文',
+    en: 'FETCH',
+    desc: '从持有者取回这些分块的密文。分量由密文自己算出来，不采信节点申报的数值。',
   },
   {
     key: '取回分量与凭证',
     name: '取回分量与凭证',
+    en: 'CERTS',
+    desc: '向持有者收同一份文件内的凭证，按“一个分块只交给第一个答得上来的节点”认领：聚合要求各凭证的下标集合两两不相交，副本不能被算两次。',
+  },
+  {
+    key: '证据合成',
+    name: '证据合成（VC.Agg）',
+    en: 'AGG',
+    desc:
+      '把各节点的凭证按论文的聚合算法合成：$\\mathrm{VC.Agg}((I,v_I,\\pi_I),(J,v_J,\\pi_J))\\to\\pi_{I\\cup J}$。' +
+      '前提是同一承诺 $C_f$ 且 $I\\cap J=\\emptyset$；只收凭证、不需全量值，故为毫秒级。',
+  },
+  {
+    name: '聚合完成',
+    en: 'DONE',
+    desc:
+      '所得证据覆盖 $I\\cup J$，仍为两个群元素。它是合法的子向量开口，因此可再聚合、次序任意（incremental / multi-hop）；' +
+      '检验交给下一步。',
+  },
+  QUERY_LAST_STEP,
+]
+
+/**
+ * ② 来自不同文件的证据聚合 —— 「归约」到一条合并向量。
+ *
+ * ★ 不能也走 ``Agg``：论文 ``Def. 29`` 的聚合以**同一个承诺 C** 为前提，
+ *   而一文件一向量 ⇒ 每份文件各有 $C_f$；$\\Lambda_I$ 的支撑集只覆盖本文件的
+ *   补集，跳文件的交叉项抵消不掉。于是先把承诺抬进一条合并向量、再重开证据。
+ * ★ 能对上的静态阶段名只有「合并位置集合」与「合并向量上的承诺验证」；
+ *   其余几条后端带动态参数（如 ``重算合并证据（Open，|P|=…）``），对不上就不显示耗时。
+ */
+const AGG_CROSS_STEPS = [
+  {
+    name: '合并下标集合',
+    en: 'UNION',
+    desc: '把所选各张证据覆盖的分块集合取并集。这一步只确定“要结论的范围”，与后面的向量变换是两件事。',
+  },
+  {
+    key: '探测节点持有情况',
+    name: '探测节点持有情况',
+    en: 'PROBE',
+    desc: '问清并集内每个分块当前由谁持有。跨文件时一次要问的台数更多，这是这条链路比单文件慢的第一个原因。',
+  },
+  {
+    key: '取回密文',
+    name: '取回密文',
     en: 'FETCH',
-    desc: '取得并集内每个分块的公开分量与它在向量中的位置。这是本流程中唯一向存储节点索取数据的一步。',
+    desc: '从各交付者取回并集内分块的密文。跨文件聚合必须拿到密文（单文件那条只需凭证），这是第二个原因。',
   },
   {
     key: '合并位置集合',
     name: '合并位置集合',
     en: 'MERGE-P',
-    desc: '涉及多份文件时，把相关分块抬到同一条合并向量上：此后下标归于这条合并向量，不再属于任何单份文件。',
+    desc: '把涉及各份文件的位置取并集 $P$。此后下标属于这条合并向量，不再属于任何单份文件。',
   },
   {
-    key: '按主副本分派挑战',
-    name: '分派挑战',
-    en: 'SPLIT-CH',
-    desc: '按主副本把挑战分派至各存储节点，每台只计算自己持有的那部分。',
-  },
-  {
-    key: '合并向量上的承诺验证',
     name: '抬入合并向量',
     en: 'COMMIT',
-    desc: '把各份文件的承诺抬入合并向量后重新计算聚合承诺，新的承诺覆盖并集内全部分块。',
+    desc: '逐份取该文件的素数积 $E_f$，令 $E=\\prod_f E_f$、$C\' = \\prod_f C_f^{\\,E/E_f}$。承诺抬得动（公开可算，不需任何块的值）；抬不动的是证据 —— 这正是下一步必须重算的原因。',
   },
   {
-    key: '证据合成',
-    name: '证据合成',
-    en: 'AGGREGATE',
-    desc: '把各份材料合成为一份证据。聚合是增量的：已经聚合过的部分不必重算，新并入的部分直接并上去即可；所得证据本身仍是合法证据，因此可以再参与合并，次数不限、顺序任意。',
+    name: '重算合并证据',
+    en: 'OPEN',
+    desc: '在合并向量上用全量值重开一份证据。代价是 $O(\\sum_f |f|)$ 次大指数模幂：只与涉及文件的总位置数有关，与这次要结几块无关，所以是秒级。',
   },
   {
-    name: '判定',
-    en: 'VERDICT',
-    desc: '所得证据可独立验证、可再聚合、可分解，此后与单份文件的证据用法相同。',
+    name: '归约完成',
+    en: 'DONE',
+    desc:
+      '所得证据覆盖本次并集，仍为两个群元素，但它属于合并向量、不属于任何单份文件。' +
+      '这一步不是 $\\mathrm{VC.Agg}$：$\\Lambda$ 的支撑集只覆盖各文件自己的补集，跨文件交叉项抵消不掉；检验交给下一步。',
   },
+  QUERY_LAST_STEP,
 ]
 
-const DISAGG_STEPS = [
+/**
+ * ③ 来自同一文件的证据分解 —— 纯代数，不向节点取数据。
+ *
+ * ★ 后端只有两个阶段：「拆出子集证据」「校验拆出的证据」（``manager.py``）。
+ */
+const DISAGG_SAME_STEPS = [
   {
     name: '确定目标子集',
     en: 'SUBSET',
-    desc: '从本张证据覆盖的分块中选出要单独取出的部分（按界面序号，从 1 起）。子集可以跳着选，不必是连续区间。',
+    // 第一行（本次选定的子集）由 processSteps 填在最前面。
+    desc: '从当前位置集合覆盖的分块中选出要拆分的部分（按界面序号），无需连续区间。',
   },
   {
     key: '拆出子集证据',
-    name: '拆出子集证据',
+    name: '拆分子集证据',
     en: 'DISAGG',
-    desc: '由原证据推出只覆盖子集的新证据，不向节点索取数据。这一步对目标子集是一步直达：覆盖 6 块的证据可以直接拆出覆盖第 1、3、5 块的证据，无需逐层回退。',
+    desc:
+      '$\\mathrm{VC.Disagg}((I,v_I,\\pi_I),K)\\to\\pi_K$，$K\\subseteq I$；' +
+      '代数运算、无需与存储节点通信，可一次拆分到任意子集，无需逐层回退。',
   },
   {
-    key: '校验拆出的证据',
-    name: '当场公开检验',
-    en: 'VERIFY',
-    desc: '对新证据当场执行一次公开检验，拆出的证据必须能独立成立。拆出的子集证据与当初聚合得到的那一份逐位相同 —— 这正是「退回上一次」与「一步拆到位」重合为一件事的原因。',
+    // 正文（本次覆盖了哪些索引、共几块）由 processSteps 填。
+    name: '分解完成',
+    en: 'DONE',
+    desc: '',
   },
-  {
-    name: '判定',
-    en: 'VERDICT',
-    desc: '新证据入池，可单独验证、继续聚合或再次分解；分解不影响原证据。需要注意：拆出的只能是子集，含「原证据未覆盖的分块」的证据拆不出来，必须另取一份再合并。',
-  },
+  QUERY_LAST_STEP,
 ]
 
-const CROSS_STEPS = [
+/**
+ * ④ 来自不同文件的证据分解 —— 归约只能“按文件重取”，不是代数拆。
+ *
+ * ★★ 这一套原来是错的：它写的是「生成挑战 / 各节点生成证明份额 / 份额合成证据 /
+ *   配对检验」——那是 **PoR（存储证明）** 的阶段。而跨文件分解实际走的是
+ *   ``/api/query/files``（``evidenceApi.queryFiles``），后端执行的是
+ *   ``_fetch`` + ``_prove`` 的**单文件**分支，所以阶段名是
+ *   「探测节点持有情况 / 取回密文 / 取回分量与凭证 / 证据合成 / 承诺验证」。
+ *   对不上就不显示耗时 —— 不编数字。
+ *
+ * ★ 为什么不能像单文件那样直接拆：合并向量上的证据属于**那条合并向量**，
+ *   $\\Lambda$ 的支撑集只盖到本文件的补集，跨文件交叉项抵消不掉；
+ *   要得到“归属于某份文件自己”的证据，只能按那份文件自己的向量重取一份。
+ */
+const DISAGG_CROSS_STEPS = [
   {
     name: '指定文件',
     en: 'PICK',
     desc: '跨文件证据是在合并向量上取得的，其下标不属于任何单份文件；分解前必须先指定要拆出的那一份。',
   },
   {
-    key: '取回分量与凭证',
-    name: '取回该文件的分量',
-    en: 'FETCH',
-    desc: '只取该文件自身的分块：取得的公开分量与位置属于该文件，而非合并向量。',
-  },
-  {
-    key: '生成挑战',
-    name: '生成挑战',
-    en: 'CHALLENGE',
-    desc: '现场生成随机挑战。挑战由验证方临时抽取，服务端无法预知，因而无法预先准备应答。',
-  },
-  {
-    key: '各节点生成证明份额',
-    name: '各节点生成凭证份额',
-    en: 'PROVE',
-    desc: '持有所选分块的节点各自计算一份凭证份额，最终合并回同一条向量。',
-  },
-  {
-    key: '份额合成证据',
-    name: '证据合成',
-    en: 'AGGREGATE',
-    desc: '各份份额合成为一份证据，规模仍为两个群元素。',
-  },
-  {
-    key: '配对检验',
-    name: '配对检验',
-    en: 'BILINEAR',
-    desc: '当场执行一次配对检验：所得证据必须能独立成立。',
-  },
-  {
-    name: '判定',
-    en: 'VERDICT',
-    desc: '所得证据归属该份文件自己，可独立验证、可再聚合、可继续分解。',
-  },
-]
-
-/**
- * 批量验证走的那几步 —— 与 -views/evidence/query/index.vue 同一套。
- *
- * `key` 逐字对齐后端 `with stage("…")` 的名字：对得上才显示那一步耗时，
- * 对不上就不显示 —— 不编数字。
- */
-const VERIFY_STEPS = [
-  {
-    name: '确定下标集合',
-    en: 'SELECT',
-    desc: '只对指定的分块集合作结论。一份证据仅在其覆盖的下标上有定义；未被覆盖的分块不因该证据而判定为通过。',
+    name: '确定块集合',
+    en: 'SUBSET',
+    desc: '取该文件在这张卡里覆盖的、它自己的第几块到第几块。这里用的是**文件内块号**，不是合并向量上的下标 —— 它们是两套坐标。',
   },
   {
     key: '探测节点持有情况',
     name: '探测节点持有情况',
     en: 'PROBE',
-    desc: '询问各存储节点：集合内的分块当前分别由谁持有。节点的申报只作为线索，随后由公开检验加以核对。',
+    desc: '只问该文件的那一段位置由谁持有。节点的申报只作线索。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '从持有者取回这些分块的密文。协调者只持有密文，不具备提供明文的能力。',
+    desc: '从持有者取回这些分块的密文。分块内容必须真的拿到：这是“重取”与“代数拆”的根本区别。',
   },
   {
     key: '取回分量与凭证',
-    name: '本地重算分量',
-    en: 'DIGEST',
-    desc: '浏览器在本地依据密文重算公开分量（SM3），不采用服务端申报的数值。',
+    name: '取回分量与凭证',
+    en: 'CERTS',
+    desc: '向持有者收取该文件这些块的凭证（一个块只交给第一个答得上来的节点，避开副本重复）。',
   },
   {
     key: '证据合成',
     name: '证据合成',
     en: 'AGGREGATE',
-    desc: '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素（≤ 256 字节），与覆盖的分块数无关。',
+    desc: '把凭证合成为一份证据。规模仍为两个群元素。',
   },
   {
-    key: '承诺验证',
-    name: '公开检验',
-    en: 'VERIFY',
-    desc: '以聚合承诺 δ 与所得证据执行一次公开检验。该检验不需明文与密钥，也不依赖对任何一方的信任，任何持有同样输入的主体都能独立复算。',
+    name: '重取完成',
+    en: 'DONE',
+    desc:
+      '所得证据归属于该文件自己，仍为两个群元素。它不是 $\\mathrm{VC.Disagg}$ 的产物：' +
+      '合并向量上的证据无法代数降回该文件的向量，只能重取一次。检验交给下一步。',
   },
-  {
-    name: '判定',
-    en: 'VERDICT',
-    desc: '通过：这些分块存在，且内容与入库版本一致。不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符。',
-  },
+  QUERY_LAST_STEP,
 ]
 
+/**
+ * 「可验证查询」是四类流程的**最后一小步** —— 本页不再单独演一遍验证动画。
+ *
+ * ★ 用户 2026-10-18：验证在这页不单独开动画，因为它已经是每条流程的末步；
+ *   那一小步只摆**一行结论**（通过 / 不通过），与「可验证查询」页的判定同义。
+ */
+const QUERY_PASS_LINE = '可验证查询结果通过：证据合法，未经篡改或替换。'
+const QUERY_FAIL_LINE =
+  '可验证查询结果不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符，需要重新取证核实。'
+
 const STEPS_BY_KIND = {
-  aggregate: AGG_STEPS,
-  disagg: DISAGG_STEPS,
-  cross: CROSS_STEPS,
-  verify: VERIFY_STEPS,
+  aggSame: AGG_SAME_STEPS,
+  aggCross: AGG_CROSS_STEPS,
+  disaggSame: DISAGG_SAME_STEPS,
+  disaggCross: DISAGG_CROSS_STEPS,
 }
 const TITLE_BY_KIND = {
-  aggregate: '一次聚合的处理链路',
-  disagg: '一次分解的处理链路',
-  cross: '跨文件拆出的处理链路',
-  verify: '一次批量验证的处理链路',
+  aggSame: '同一文件内两张证据的聚合链路',
+  aggCross: '不同文件的证据聚合（归约）链路',
+  disaggSame: '同一文件的证据分解链路',
+  disaggCross: '不同文件的证据分解（按文件重取）链路',
+}
+/** 副标题：把“哪一类过程、关键代价在哪”一句话说清（弹框标题下面一行）。 */
+const SUBTITLE_BY_KIND = {
+  aggSame: '同一文件 · VC.Agg：只把节点凭证聚合起来，不需要全量值（毫秒级）',
+  aggCross: '不同文件 · 归约：先把各文件的承诺抬进一条合并位置集，再重开一份证据（秒级）',
+  disaggCross: '跨文件 · 按文件重取：合并向量上的证据拆不成另一份文件的证据，只能按那份文件自己的向量重取一次',
 }
 
 const processOpen = ref(false)
-const processKind = ref('aggregate')
+const processKind = ref('aggSame')
 const processTimings = ref(null)
 /** 本次过程弹框对应的端到端耗时（没计时就是 null，弹框退回后端口径）。 */
 const processE2eMs = ref(null)
 const processFacts = ref([])
-const processSteps = computed(() => STEPS_BY_KIND[processKind.value] || AGG_STEPS)
+/** 末步「可验证查询」的结论：true = 通过（由每一次操作自己的检验结果决定）。 */
+const processVerdict = ref(true)
+/** 单文件分解：本次目标子集（界面序号文本）与块数 —— 填进第 1、3 步的正文。 */
+const disaggScope = ref({ subset: '', count: 0 })
+
+/**
+ * 步骤正文里要填的**本次真实数字**（不编数字）。
+ *
+ * ★ 只在对应流程里填，其余步骤原样返回。
+ */
+const processSteps = computed(() => {
+  const base = STEPS_BY_KIND[processKind.value] || AGG_SAME_STEPS
+  const verdict = processVerdict.value ? QUERY_PASS_LINE : QUERY_FAIL_LINE
+  return base.map((s) => {
+    // ★ 末步「可验证查询」只摆一行结论（通过 / 不通过）。
+    if (s.en === 'QUERY') return { ...s, desc: verdict }
+    if (processKind.value !== 'disaggSame') return s
+    const sc = disaggScope.value
+    if (s.en === 'SUBSET') {
+      // 换行靠 ProcessDialog 里 `.desc` 的 `white-space: pre-line`。
+      return { ...s, desc: `当前选定目标子集为 ${sc.subset}\n${s.desc}` }
+    }
+    if (s.en === 'DONE') {
+      return {
+        ...s,
+        desc:
+          `分解所得证据覆盖位置索引 ${sc.subset}，共 ${sc.count} 块。\n` +
+          '证据仍为两个群元素且大小不超过 256 字节；分解过程不影响原证据。',
+      }
+    }
+    return s
+  })
+})
 const processTitle = computed(() => TITLE_BY_KIND[processKind.value] || '处理过程')
+const processSubtitle = computed(() => SUBTITLE_BY_KIND[processKind.value] || '')
 
 function showProcess(kind, timings, facts, e2eMs = null) {
   processKind.value = kind
@@ -662,7 +826,10 @@ async function aggregateCards() {
     } else {
       ElMessage.success(`已聚合 ${cardCount} 张卡片（同一文件内，使用 VC.Agg）`)
     }
-    showProcess('aggregate', card?.result?.timings, [
+    // ★ 四种过程分开演：同一文件内是 VC.Agg（只收凭证），跳文件是归约（取密文 + 重开）。
+    //   末步「可验证查询」的结论取这次聚合结果自己的公开检验结论。
+    processVerdict.value = card?.result?.ok !== false
+    showProcess(files.size > 1 ? 'aggCross' : 'aggSame', card?.result?.timings, [
       { k: '参与卡片', v: `${cardCount} 张` },
       { k: '涉及文件', v: `${files.size} 份` },
       { k: '覆盖块数', v: String(card?.indices?.length ?? 0) },
@@ -755,6 +922,9 @@ async function batchVerify() {
     ElMessage.warning('请先选择卡片')
     return
   }
+  // ★★ 本页的验证**不开动画**（用户 2026-10-18）：验证已经被做成四类流程的
+  //    最后一小步「可验证查询」，那里只摆一行结论。再弹一遍 7 步动画是重复的。
+  //    结论仍落在下面那块结果面板里（含两套耗时对照）。
   const t0 = performance.now()
   batchRunning.value = true
   batchResult.value = null
@@ -766,18 +936,6 @@ async function batchVerify() {
     }))
     const { data } = await evidenceApi.verifyBatch(items, true, true)
     batchResult.value = data
-    // ★ 点了要看得见：过程（每一步耗时 + 真实中间值）用弹框摆出来，
-    //   结论文本与两套耗时对照仍在下面那块结果面板里。
-    showProcess('verify', data?.timings, [
-      { k: '验证卡片数', v: `${cards.length} 张` },
-      { k: '一次结论', v: data?.ok ? '通过' : '未通过' },
-      { k: '批量验证耗时', v: data?.ms_batch != null ? `${data.ms_batch} ms` : '—' },
-      { k: '逐份对照耗时', v: data?.ms_separate != null ? `${data.ms_separate} ms` : '—' },
-      {
-        k: '结论覆盖范围',
-        v: `${data?.universe_n ?? 0} 个位置 / ${(data?.universe_files || []).length} 份文件`,
-      },
-    ], Math.round(performance.now() - t0))
   } catch (e) {
     const detail = e?.response?.data?.detail || '批量验证失败'
     // ★ 只有“卡来自不同合并向量”时后端才拒绝 —— 这不是故障（Def. 29 要求同一个承诺 C），
@@ -949,7 +1107,8 @@ async function confirmCrossDisagg() {
       `已从该跨文件卡片拆出 ${f.file_key} 的第 ${span(blocks)} 个分块（共 ${blocks.length} 个）` +
         '；该证据归属于该文件自身',
     )
-    showProcess('cross', data?.timings, [
+    processVerdict.value = data?.ok !== false
+    showProcess('disaggCross', data?.timings, [
       { k: '原卡覆盖', v: `${c.indices?.length ?? 0} 个位置` },
       { k: '拆出', v: `${f.file_key} 第 ${span(blocks)} 块` },
       { k: '新证据大小', v: '2 个群元素（≤ 256 B）' },
@@ -979,7 +1138,7 @@ const orderedCards = computed(() => {
   const single = []
   const cross = []
   for (const c of panel.cards) {
-    if (cardFiles(c).length > 1 || c.mergedUniverse) cross.push(c)
+    if (isCrossCard(c)) cross.push(c)
     else single.push(c)
   }
   return [...single, ...cross]
@@ -988,9 +1147,25 @@ const orderedCards = computed(() => {
 /** 某一组的第一张卡的位置（用于在它前面插图组标题）。 */
 const groupBoundary = computed(() => {
   const cards = orderedCards.value
-  const firstCross = cards.findIndex((c) => cardFiles(c).length > 1 || c.mergedUniverse)
+  const firstCross = cards.findIndex((c) => isCrossCard(c))
   return { firstCross, total: cards.length }
 })
+
+/** 这张卡算「跨文件证据」吗（合并向量上取得的，或覆盖了多份文件）。 */
+function isCrossCard(c) {
+  return cardFiles(c).length > 1 || !!c.mergedUniverse
+}
+
+/**
+ * 只清空**一个证据池**（单文件 / 跨文件）。
+ *
+ * ★ 用户要求：两个池子各带一个「清空」，右边工具栏那个总清空去掉 ——
+ *   总清空一次清两池，只想扔掉跨文件那几张时得先取消勾选，反而麻烦。
+ */
+function clearGroup(kind) {
+  const doomed = panel.cards.filter((c) => (kind === 'cross' ? isCrossCard(c) : !isCrossCard(c)))
+  for (const c of doomed) panel.removeCard(c.id)
+}
 
 /**
  * 第 ``i`` 张卡之前要不要插一个组标题。返回标题对象（不要插就返回 null）。
@@ -1003,18 +1178,21 @@ function groupHeadAt(i) {
   if (i === 0) {
     return firstCross === 0
       ? {
+          kind: 'cross',
           title: '跨文件证据（合并向量）',
           note:
             '由多份文件的承诺抬进同一条合并向量后取得，其位置属于那条合并向量，' +
             '不按单份文件编号；分解时不能按单文件块号切分。',
         }
       : {
+          kind: 'single',
           title: '单文件证据',
-          note: '只覆盖一份文件；聚合使用同一向量内的 VC.Agg，仅处理凭证，不涉及密文。',
+          note: '仅覆盖单文件；聚合使用同一向量内的 VC.Agg，仅处理凭证，不涉及密文。',
         }
   }
   if (i === firstCross && firstCross > 0) {
     return {
+      kind: 'cross',
       title: '跨文件证据（合并向量）',
       note:
         '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
@@ -1136,12 +1314,15 @@ async function confirmDisagg() {
     panel.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
     disaggOpen.value = false
     ElMessage.success(`已拆出覆盖 ${K.length} 个分块的证据`)
-    showProcess('disagg', data?.timings, [
+    // ★ 本次选定的子集（界面序号，用「、」分隔）+ 块数 —— 步骤正文要拿它填。
+    const subset = span(K).replace(/,\s*/g, '、')
+    disaggScope.value = { subset, count: K.length }
+    // ★ 末步「可验证查询」的结论：直接取后端这次检验的结论（`/api/evidence/disagg`
+    //   会用当前 δ 当场验一遍，验不过会抛错，所以到这里的 ok 就是真结论）。
+    processVerdict.value = data?.ok !== false
+    showProcess('disaggSame', data?.timings, [
       { k: '原证据覆盖', v: `${c.indices?.length ?? 0} 块` },
-      // ★ 用 `blockText` 而不是 `span`：前者会先折算成「哪份文件的第几块」，
-      //   后者打的是**全局位置号**（内部的数，界面上不该出现）。
-      { k: '拆出', v: `${blockText(c, K)}（${K.length} 块）` },
-      { k: '新证据大小', v: '2 个群元素（≤ 256 B）' },
+      { k: '本次拆分', v: `第 ${subset} 块（共 ${K.length} 块）` },
     ])
   } catch (e) {
     disaggResult.value = { ok: false, message: e?.response?.data?.detail || '分解失败' }
@@ -1342,7 +1523,6 @@ onMounted(() => {
         <el-button @click="openIncr">增量聚合演示</el-button>
         <el-button v-if="panel.cards.length" link @click="panel.selectAll()" :disabled="panel.selectedIds.length === panel.cards.length">全选</el-button>
         <el-button v-if="panel.selectedIds.length" link @click="panel.clearSelection()">取消选择</el-button>
-        <el-button v-if="panel.cards.length" link type="danger" @click="panel.clear()">清空</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
       <p class="sweep-hint text-3">
@@ -1371,7 +1551,16 @@ onMounted(() => {
            分组标题在渲染时按位置插（见 `groupHeadAt`）。 -->
       <template v-for="(card, i) in orderedCards" :key="card.id">
         <div v-if="groupHeadAt(i)" class="card-group-head">
-          <h5 class="group-title">{{ groupHeadAt(i).title }}</h5>
+          <div class="group-head-row">
+            <h5 class="group-title">{{ groupHeadAt(i).title }}</h5>
+            <el-button
+              link
+              type="danger"
+              size="small"
+              class="group-clear"
+              @click="clearGroup(groupHeadAt(i).kind)"
+            >清空</el-button>
+          </div>
           <p class="group-note">{{ groupHeadAt(i).note }}</p>
         </div>
         <div
@@ -1381,19 +1570,31 @@ onMounted(() => {
           @mousedown="startSweep(card.id, $event)"
           @click="onCardClick(card, $event)"
         >
-        <!-- 第 1 行：标题与「看完整标题」。勾选由整卡点击驱动，这个复选框只显示选中态。 -->
+        <!-- 第 1 行：标题（单文件卡只写文件名）+ 持有者。
+             勾选由整卡点击驱动，这个复选框只显示选中态。 -->
         <div class="card-row card-head">
           <el-checkbox :model-value="panel.selectedIds.includes(card.id)" @click.prevent>
             <!-- 挂 `title`：标题被省略号截断后，hover 仍能看到全称。 -->
-            <span class="card-title mono" :title="cardTitle(card)">{{ cardTitle(card) }}</span>
+            <span class="card-title mono" :title="cardTitle(card)">{{ isSingleFileCard(card) ? singleTitle(card) : cardTitle(card) }}</span>
           </el-checkbox>
-          <!-- 标题在卡上会被省略号截断，但它本身有信息量（哪几份文件、各第几块）。
-               原生 `title` 只在悬停时出现，触屏拿不到也不好复制，所以另给一个点得开的入口。 -->
-          <el-button link type="primary" size="small" @click="showFullTitle(card)">看完整标题</el-button>
+          <span v-if="isSingleFileCard(card) && singleOwner(card)" class="card-owner text-3">
+            持有者：{{ singleOwner(card) }}
+          </span>
+          <!-- 单文件卡的标题就是文件名，hover 能看全，不给按钮；
+               多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会被截断。 -->
+          <el-button
+            v-if="needFullTitle(card)"
+            link
+            type="primary"
+            size="small"
+            @click="showFullTitle(card)"
+          >完整标题</el-button>
         </div>
-        <!-- 第 2 行：取得位置、时间与来源。来源决定这张卡是「同文件内聚合」还是「跨文件归约」。 -->
+        <!-- 第 2 行：块范围 / 取得位置、时间与来源。
+             单文件卡直接说“第 1-9 块 · 共 12 块”（用户口径），不再印 n。 -->
         <div class="card-meta">
-          <span class="mono text-3">取得于 n = {{ card.n ?? '—' }}</span>
+          <span v-if="isSingleFileCard(card)" class="mono text-3">{{ singleBlockLine(card) }}</span>
+          <span v-else class="mono text-3">取得于 n = {{ card.n ?? '—' }}</span>
           <span class="mono text-3">{{ fmtAgo(card.ts) }}</span>
           <span v-if="card.src" class="text-3">{{ card.src }}</span>
         </div>
@@ -1771,7 +1972,7 @@ onMounted(() => {
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"
-
+      :subtitle="processSubtitle"
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"
@@ -1842,6 +2043,15 @@ onMounted(() => {
 .card-group-head {
   grid-column: 1 / -1;
   margin: 6px 0 0;
+}
+/* 标题与「清空」同一行：按钮靠右，不与下面那段说明挤在一起。 */
+.group-head-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.group-head-row .group-clear {
+  margin-left: auto;
 }
 .group-title {
   font-size: 15px;
@@ -2067,12 +2277,18 @@ onMounted(() => {
   gap: 10px;
   min-width: 0;
 }
-/* 第 1 行：标题占满剩余宽度，右侧固定放「看完整标题」。 */
+/* 第 1 行：标题占满剩余宽度，右侧固定放持有者 / 「完整标题」。 */
 .card-head {
   justify-content: space-between;
 }
 .card-head :deep(.el-checkbox) {
   flex: 1 1 auto;
+}
+/* 持有者：不要被标题挤成两行，也不参与伸缩。 */
+.card-owner {
+  flex: none;
+  white-space: nowrap;
+  font-size: 13px;
 }
 /* 第 3 行：结论与操作同排。 */
 .card-ops {

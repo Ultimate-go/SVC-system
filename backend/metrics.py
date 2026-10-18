@@ -169,7 +169,6 @@ ACTION_NAMES = {
     "append": "追加",
     "truncate": "截断",
     "delete": "删除文件",
-    "restore": "回退版本",
     "query": "查询",
     "query_files": "多文件查询",
     "verify_batch": "批量验证",

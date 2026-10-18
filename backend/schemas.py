@@ -299,19 +299,6 @@ class ReplayIn(BaseModel):
     on: bool = True
 
 
-class RestoreIn(BaseModel):
-    r"""**回退到上一版**：把若干块换成它们上一版的本体，并重新承诺。
-
-    :param block_indices: 要回退哪几块（**这份文件里的第几块**，0 起算）。
-        缺省/``None`` = 所有**留过上一版**的块。
-
-    ★ 回退**产生新的版本号**（只增不减），不是把版本号改回去 ——
-      所以它同样进审计、同样能再回退（"当前"与"上一版"会一起往后滚）。
-    """
-
-    block_indices: list[int] | None = Field(default=None, max_length=MAX_INDICES)
-
-
 class DisaggIn(BaseModel):
     """**分解**一份已有证据：从 :math:`\\pi_I` 里拆出 :math:`\\pi_K`（要求 K ⊆ I）。
 

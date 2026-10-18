@@ -43,7 +43,7 @@ from ..manager import (
     StoreManager,
 )
 from ..models import BlockRow, FileRow, UserRow
-from ..schemas import DecryptIn, FilePatchIn, ReplayIn, RestoreIn
+from ..schemas import DecryptIn, FilePatchIn, ReplayIn
 from core.keywrap import KeyWrapError
 from core.timing import collect
 from core.transport import TransportError, WriteError
@@ -762,75 +762,6 @@ def replay_route(
         ),
     )
     return out
-
-
-@router.get("/{file_id}/history")
-def history_route(
-    file_id: int,
-    user: UserRow = Depends(current_user),
-    mgr: StoreManager = Depends(get_manager),
-    db: Session = Depends(get_db),
-):
-    r"""这份文件**哪些块留了上一版**（★ 2026-10-12 新增）。
-
-    ★ 只回元数据，**不回密文**：界面只需要回答“哪几块能回退、是哪一版、多大”，
-      把密文发给前端除了多一份副本之外没有任何用处（回退在后端做）。
-    ★ 只要登录就能看：这是“这份文件的哪几块能回退”，与能否验证同一级别。
-    """
-    row = _file_or_404(db, file_id)
-    return {"blocks": mgr.history_of(row.owner, row.file_key)}
-
-
-@router.post("/{file_id}/restore")
-def restore_route(
-    file_id: int,
-    body: RestoreIn,
-    user: UserRow = Depends(current_user),
-    mgr: StoreManager = Depends(get_manager),
-    db: Session = Depends(get_db),
-):
-    r"""**回退到上一版**：把若干块换回留存的本体，并重新承诺（★ 2026-10-12 新增）。
-
-    它解决的问题：节点没了 / 当前那一版对不上时，**把上一版拿回来** ——
-    换回旧密文 → 重算分量 → 重新承诺 → 版本 +1 → 验证又能过。
-
-    ★ 三条纪律（用户定）：
-      * 留的是**本体**（密文），不是哈希 —— 哈希找不回原文；
-      * 回退产生**新版本号**，只增不减（不是把版本号改回去）；
-      * 进审计流水，写清“从第几版回退”。
-
-    ★ 只有所有者能回退（与改块同一级别的权限，管理员也不行）：它写的是
-      这台机器上那份密文，而且回来之后旧块密钥就又生效了。
-    """
-    row = _file_or_404(db, file_id)
-    if row.owner != user.username:
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            "files.not_owner_restore",
-            "仅文件所有者可以回退本文件的版本（回退会恢复旧密文与旧块密钥）。",
-        )
-    try:
-        with collect() as sw:
-            out = mgr.restore_previous(row.owner, row.file_key, body.block_indices)
-    except NotFound as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    except (OutOfRange, Conflict) as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    except WriteError as exc:
-        raise _write_failed(exc) from exc
-
-    audit(
-        db,
-        user.username,
-        "restore_previous",
-        f"{row.owner}/{row.file_key}",
-        detail=(
-            f"回退块 {out['restored']}（第 {out['count']} 块）→ 第 {out['version']} 版"
-        ),
-    )
-    metrics.record("restore", sw.total_ms(), sw.rows())
-    db.refresh(row)
-    return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 
 
 @router.post("/{file_id}/cipher")

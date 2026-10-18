@@ -200,14 +200,18 @@ function decHead16(dec) {
  *   C/U 的头几位、入库后的文件号与版本与位置段。
  *   （显示的都是**公开量**：分量是密文的 SM3，密钥与明文一概不出现。）
  */
-function enrichUploadSteps(data, detail, status, evidence) {
+function enrichUploadSteps(data, detail, evidence) {
   // ★ 上传响应里文件字段就在**顶层**（实测：`data.file` 是 undefined，
   //   于是中间量一直填不上）；两份都兼容一下。
   const file = data?.file || data?.uploaded || data || {}
   const layout = detail?.layout || []
-  const mine = (status?.delta?.files || []).find(
-    (f) => f.owner === file.owner && f.file_key === file.file_key,
-  )
+  // ★★ C / U 从**这份文件的详情**里取（`delta_C` / `delta_U`）。
+  //   以前是去问 `/api/system/status` —— 那个接口要**逐台探活**（跨进程时是每台
+  //   一次带密码学验证的真请求，manager.py 里自己写着“有一台掉线就要 6.7 s”），
+  //   却只是为了两步中间量的头 16 位。它还与上传无关，却把“上传完成”拖了秒级。
+  const delta = detail?.delta_U && detail?.delta_C
+    ? { U: detail.delta_U, C: detail.delta_C }
+    : null
   // ★ 「承诺生成」那一步要同时看到两个因子：
   //     · v_1 = SM3(第 1 块密文) —— 分量，浏览器也能从密文重算；
   //     · S_1 = g^(E/e_1)     —— 见证，向该块所在节点索取即可
@@ -246,8 +250,8 @@ function enrichUploadSteps(data, detail, status, evidence) {
       ...(s1 != null
         ? [{ k: '第 1 块见证 $S_1$', v: `$g^{\\,E/e_1} =$ ${decHead16(s1)}` }]
         : []),
-      ...(mine ? [{ k: '$C$', v: decHead16(mine.C) }] : []),
-      ...(mine ? [{ k: '$U$', v: decHead16(mine.U) }] : []),
+      ...(delta ? [{ k: '$C$', v: decHead16(delta.C) }] : []),
+      ...(delta ? [{ k: '$U$', v: decHead16(delta.U) }] : []),
     ],
     // 用户要求：逐块列 4 行；块更多的加一个省略标识（不无声截断）。
     '分发至存储节点': [
@@ -308,19 +312,31 @@ let elapsedT0 = 0
 function startElapsed() {
   stopElapsed()
   elapsedT0 = performance.now()
+  const t0 = elapsedT0
   uploadElapsed.value = 0
   elapsedTimer = setInterval(() => {
-    uploadElapsed.value = Math.round(performance.now() - elapsedT0)
+    uploadElapsed.value = Math.round(performance.now() - t0)
   }, 100)
 }
 
-/** 停止计时并**定格精确值**（可重复调用）。 */
+/**
+ * 停止计时并**定格精确值**（可重复调用 —— 从第二次起不再改动已定格的数）。
+ *
+ * ★★ 这里原来每次都用**最初**的 ``elapsedT0`` 重算，而 ``doUpload`` 的 ``finally``
+ *   还会再调一次 —— 那次发生在补中间量（详情 / 试查询）与 ``load()`` 之后，
+ *   于是把“上传之后的事”也算进了总耗时：2 KB 的文件真实上传 141 ms，
+ *   界面上却显示 3.04 s（用户 2026-10-18 实测到的那组数字就是这么来的）。
+ *   定格一次就把 ``elapsedT0`` 清零，后面的调用直接变成空操作。
+ */
 function stopElapsed() {
   if (elapsedTimer !== null) {
     clearInterval(elapsedTimer)
     elapsedTimer = null
   }
-  if (elapsedT0) uploadElapsed.value = Math.round(performance.now() - elapsedT0)
+  if (elapsedT0) {
+    uploadElapsed.value = Math.round(performance.now() - elapsedT0)
+    elapsedT0 = 0
+  }
 }
 
 const selectedFile = ref(null)
@@ -668,9 +684,8 @@ async function doUpload() {
     const own = (data?.file || data || {}).owner
     const key = (data?.file || data || {}).file_key
     try {
-      const [det, st, ev] = await Promise.all([
+      const [det, ev] = await Promise.all([
         filesApi.detail(fid, true).then((r) => r.data),
-        systemApi.status().then((r) => r.data),
         // ★ 只查第 1 块：一次普通的可验证查询（验证不受限，谁都能发），
         //   失败就当没这一步 —— 中间量少两行，不影响上传本身。
         evidenceApi
@@ -678,7 +693,7 @@ async function doUpload() {
           .then((r) => r.data)
           .catch(() => null),
       ])
-      enrichUploadSteps(data, det, st, ev)
+      enrichUploadSteps(data, det, ev)
     } catch (e) {
       // 中间量拿不到也不影响上传本身，但**不静默**：控制台留一句，方便查。
       console.warn('[上传过程] 中间量没填上：', e?.message || e)
@@ -1051,7 +1066,17 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [f, n, s] = await Promise.all([filesApi.list(), devicesApi.nodes(), systemApi.status()])
+    // ★★ 这两个请求都**不要逐台做密码学自检**：
+    //    ``/api/status`` 的 ``node_report()`` 与 ``/api/nodes`` 的默认
+    //    ``verify=True`` 会让每台对**每份文件**跑一遍 svc.verify，代价随文件数增长
+    //    （实测 7 份文件时 ~1.5~3 s）。本页只读部署参数（segment_* / crs）
+    //    与节点的「谁在线」，用不到 ``proved``；设备页才需要它。
+    //    以前这里两次调用都要做一遍，于是“上传完刷新列表”看着像上传慢。
+    const [f, n, s] = await Promise.all([
+      filesApi.list(),
+      devicesApi.nodes({ verify: false }),
+      systemApi.status({ probe: false }),
+    ])
     files.value = f.data
     nodes.value = n.data
     status.value = s.data
