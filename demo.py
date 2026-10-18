@@ -23,6 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from core import L, VectorStore, new_session  # noqa: E402
 from core.keywrap import (  # noqa: E402
     KeyWrapIntegrityError,
+    block_aad,
     make_user_keypair,
     public_bytes,
     unwrap_key,
@@ -185,15 +186,16 @@ def main() -> int:
     #: {(所有者, 文件名): {块序号: 封好的块密钥}} —— 块密钥**只以密文形式**存在
     key_cts: dict[tuple[str, str], dict[int, dict]] = {}
 
-    def make_sink(box: dict[int, dict], owner: str):
+    def make_sink(box: dict[int, dict], owner: str, fkey: str):
         """块密钥一生成就地封成密文，明文密钥不落到任何地方。
 
         用的是**这个文件所有者的公钥** —— 所以“谁能解密”在这一刻就定死了，
         后面不需要、也没有任何地方能再改它。
+        认证标签里一并绑上「所属文件的哪一块 + 那一块的数据段 IV」。
         """
 
-        def sink(pos: int, key: bytes) -> None:
-            box[pos] = wrap_key(pks[owner], key)
+        def sink(pos: int, key: bytes, iv: bytes) -> None:
+            box[pos] = wrap_key(pks[owner], key, aad=block_aad(owner, fkey, pos, iv))
 
         return sink
 
@@ -207,7 +209,7 @@ def main() -> int:
                 owner,
                 fkey,
                 payload(size, size % 251),
-                key_sink=make_sink(box, owner),
+                key_sink=make_sink(box, owner, fkey),
             )
         total_bytes += size
         _d = store.delta_of(owner, fkey)
@@ -268,12 +270,15 @@ def main() -> int:
 
     box_upd = key_cts[tgt]
 
-    def sink_into(pos: int, key: bytes) -> None:
+    def sink_into(pos: int, key: bytes, iv: bytes) -> None:
         """更新的新块密钥**就地封装**（与上传同一条纪律：明文密钥不落任何地方）。
 
         用的是这份文件所有者的公钥 —— 所以“改完之后谁能解密”与上传时一致。
+        认证标签里绑上「哪一块 + 那一块的数据段 IV」。
         """
-        box_upd[pos] = wrap_key(pks[tgt[0]], key)
+        box_upd[pos] = wrap_key(
+            pks[tgt[0]], key, aad=block_aad(tgt[0], tgt[1], pos, iv)
+        )
 
     d_before = store.delta_of(*tgt)
     t = Timer()
@@ -468,10 +473,13 @@ def main() -> int:
         """
         box = key_cts[(owner, fkey)]
         sk = unseal(who)
+        rec = store.files[(owner, fkey)]
 
         def key_of(pos: int) -> bytes:
             try:
-                return unwrap_key(sk, box[pos])
+                return unwrap_key(
+                    sk, box[pos], aad=block_aad(owner, fkey, pos, rec.ivs[pos])
+                )
             except KeyWrapIntegrityError as exc:
                 raise PermissionError(
                     f"第 {pos} 块的块密钥解不开 —— 它不属于你（别人的私钥对它无效）"

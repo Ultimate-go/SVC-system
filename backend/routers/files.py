@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager
+from ..errors import ApiError
 from ..manager import (
     Conflict,
     DecryptDenied,
@@ -89,7 +90,12 @@ def _write_failed(exc: WriteError) -> HTTPException:
 def _file_or_404(db: Session, file_id: int) -> FileRow:
     row = db.get(FileRow, file_id)
     if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"文件 {file_id} 不存在")
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "files.not_found",
+            f"文件 {file_id} 不存在",
+            file_id=file_id,
+        )
     return row
 
 
@@ -145,10 +151,12 @@ def _file_public(row: FileRow, mgr: StoreManager, *, owner_disabled: bool = Fals
         #    不能当区间用。要“这份文件到底占哪些位置”，只能用 ``indices``。
         "first_index": indices[0] if indices else None,
         "last_index": indices[-1] if indices else None,
-        # ★ 当前全局块数 n。带上它，前端才能回答"我手里那些旧证据还行吗"：
-        #   证据 π_I = (S_I, Λ_I) 里 S_I = g^{e_[n]/e_I}，是 **n 的函数** ——
-        #   所以一次写操作只会让**该文件**此前取到的证据失效（别的文件的证据不受影响）。
-        #   不标出来的话，界面上那些"验证通过"会一直是旧的结论。
+        # ★ 全系统在用块数（``store.n`` = 各文件块数之和）。**不是**本文件的 n ——
+        #   本文件的块数就是上面的 ``block_count``（另有 ``n`` 字段）。
+        #   它描述系统规模，界面用它判“集合里那些块还在不在”（块被删掉会变小）。
+        #   判“这份文件的旧证据还行吗”**不能**看它：一次写操作改变的是**本文件**的
+        #   承诺 δ，跨文件互不影响（改块甚至不改 n、只改 C），所以那个判据是
+        #   ``file_delta_fp``（= sha256("U:C:n")[:12]，逐文件）。
         "delta_n": store.n,
         # ★ 这份文件在全局位置轴上占的段（追加会让它变成好几截）。
         #   文件列表的「位置段」列渲染的就是它；没有这几个字段，那一列只能是 "—"。
@@ -203,11 +211,14 @@ def upload(
     """
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if not data:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件为空")
+        raise ApiError(status.HTTP_400_BAD_REQUEST, "files.empty", "文件为空")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
+        limit_mb = MAX_UPLOAD_BYTES // 1024 // 1024
+        raise ApiError(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限",
+            "files.too_large",
+            f"文件超过 {limit_mb} MB 上限",
+            limit_mb=limit_mb,
         )
 
     # 「手动指定分发」：逗号分隔的机器名。不传 / 传空 = 全部机器（老行为）。
@@ -215,8 +226,9 @@ def upload(
     if nodes is not None and nodes.strip():
         picked = [n.strip() for n in nodes.split(",") if n.strip()]
         if not picked:
-            raise HTTPException(
+            raise ApiError(
                 status.HTTP_400_BAD_REQUEST,
+                "files.bad_nodes",
                 "nodes 传了但没有一个有效的机器名（应当是逗号分隔，如 node-1,node-2）",
             )
 
@@ -297,11 +309,12 @@ def patch_file(
     #   收紧之后三条线各自一致：**验证**谁都能做（δ 公开）、
     #   **解密**只有所有者、**修改**也只有所有者。
     if row.owner != user.username:
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
+            "files.not_owner_modify",
             "仅文件所有者可以改写该文件：改写需要重新封装块密钥，"
             "与上传属于同一权限级别（管理员亦不具备该权限）。\n"
-            "  注意：该限制不影响完整性验证 —— 你仍可验证此文件的完整性。",
+            "  注意：该限制不影响验证 —— 你仍可验证此文件的完整性。",
         )
 
     if body.op == "zero":
@@ -512,8 +525,9 @@ def _do_truncate(
        接口这一层不再二次拦截。
     """
     if body.drop_blocks is None:
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_400_BAD_REQUEST,
+            "files.truncate_missing_drop",
             "op=truncate 必须提供 drop_blocks（需截断的末尾分块数）",
         )
     try:
@@ -580,10 +594,11 @@ def delete_file(
     # ★ 与改块同一条纪律：**只有所有者**。管理员也不行 —— 它能读的只有
     #   审计，而"能删不能读"会变成一个说不清的授权模型。
     if row.owner != user.username:
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
+            "files.not_owner_delete",
             "仅文件所有者可以删除该文件：该操作会把本文件的全部分块从所有节点上实际删除。\n"
-            "  注意：其他文件不受影响；完整性验证亦不受影响 —— 其他文件仍可正常验证。",
+            "  注意：其他文件不受影响；可验证查询亦不受影响 —— 其他文件仍可正常验证。",
         )
     owner, file_key = row.owner, row.file_key
     try:
@@ -724,10 +739,11 @@ def replay_route(
     """
     row = db.get(FileRow, file_id)
     if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "files.gone", "文件不存在")
     if row.owner != user.username and user.role != "admin":
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
+            "files.not_owner_replay",
             "仅文件所有者可以对该文件执行回滚演示",
         )
     try:
@@ -788,8 +804,9 @@ def restore_route(
     """
     row = _file_or_404(db, file_id)
     if row.owner != user.username:
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
+            "files.not_owner_restore",
             "仅文件所有者可以回退本文件的版本（回退会恢复旧密文与旧块密钥）。",
         )
     try:
@@ -855,7 +872,9 @@ def cipher_route(
             ok=False,
             detail="不是所有者",
         )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, DENIED_NOT_OWNER)
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN, "files.denied_not_owner", DENIED_NOT_OWNER
+        )
 
     try:
         with collect() as sw:
@@ -919,7 +938,9 @@ def decrypt(
             ok=False,
             detail="不是所有者",
         )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, DENIED_NOT_OWNER)
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN, "files.denied_not_owner", DENIED_NOT_OWNER
+        )
 
     # ★ 解密能力来自**本次登录解封出来的私钥**，不是从库里现查的。
     #   没有它就没法解密 —— 这是"口令封装私钥"的必然结果，也正是它想要的效果。
@@ -933,8 +954,9 @@ def decrypt(
             ok=False,
             detail="会话里没有私钥",
         )
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
+            "files.decrypt_needs_browser",
             "本次会话在服务端没有你的私钥 —— 这是「默认模型」的行为：\n"
             "  私钥在浏览器内用口令解封（登录响应中的 key_blob），服务端不解封、也不保存。\n"
             "  解密请使用客户端路径：POST /api/files/{id}/cipher 取回密文，"
@@ -955,9 +977,11 @@ def decrypt(
             ok=False,
             detail=f"密码学层拒绝：{exc}",
         )
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
-            f"{exc}\n注意：该限制不影响完整性验证 —— 这些分块仍可正常验证。",
+            "files.decrypt_denied",
+            f"{exc}\n注意：该限制不影响验证 —— 这些分块仍可正常验证。",
+            reason=str(exc),
         ) from exc
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
@@ -972,7 +996,7 @@ def decrypt(
         detail=f"{out['bytes']} B",
     )
     out["file_id"] = row.id
-    # ★ 阶段耗时：定位持有者 / 取回密文 / 解封块密钥（ECIES） / 解密（SM4） / 拼接
+    # ★ 阶段耗时：定位持有者 / 取回密文 / 块密钥解封装 / 数据块解密 / 拼接
     out["timings"] = sw.payload()
     return out
 

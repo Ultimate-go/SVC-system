@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import api from '../api/client'
 import { useCryptoStore } from './crypto'
-import { usePoolStore } from './pool'
+import { useAggregateStore } from './aggregate'
 import { useBasketStore } from './basket'
-import { forgetActivity } from '../utils/session'
+import { forgetActivity, markLogin } from '../utils/session'
 
 const TOKEN_KEY = 'vds_token'
 const USER_KEY = 'vds_user'
@@ -51,6 +51,9 @@ export const useAuthStore = defineStore('auth', {
       const { data } = await api.post('/api/auth/login', { username, password }, { skipAuthRedirect: true })
       this.setToken(data.token)
       this.setUser(data.user)
+      // ★ 盖一个"这次登录"的戳：系统初始化页那条流水线靠它做到"每次登录只演一遍"
+      //   （退出重登会刷新它 ⇒ 又能演一遍）。见 utils/session.js。
+      markLogin()
 
       // ★ 登录成功后顺手把私钥在**浏览器**里解出来。
       //   口令就在手上（用户刚输过），所以不必让他再输一次；
@@ -122,7 +125,7 @@ export const useAuthStore = defineStore('auth', {
     /**
      * 清掉**上一个账号**留在这个浏览器里的东西（安全审计 I3）。
      *
-     * 证据池（``vds_pool``，sessionStorage）与"看过的文件清单"
+     * 增量聚合与分解（``vds_pool``，sessionStorage）与"看过的文件清单"
      * （``vds_basket``，**localStorage**）都是**按浏览器**存的，与账号无关。
      * 以前登出只清 token 与 user，于是同一台机器上换个账号登录，
      * 还能看到**上一个用户**的证据卡片与文件清单 —— 那不是"残留体验"，
@@ -135,7 +138,7 @@ export const useAuthStore = defineStore('auth', {
       // store 还没初始化时（比如极端早的 401）不能把登出流程搞崩，
       // 所以各自 try 一次。
       try {
-        usePoolStore().clear()
+        useAggregateStore().clear()
       } catch {
         /* 忽略 */
       }

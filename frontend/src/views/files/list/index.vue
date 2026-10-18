@@ -4,8 +4,10 @@
  *
  * - 上传卡：选文件 + file_key + 切法三档（自动/按块大小/按块数）+ 存到哪几台。
  * - 上传前先问 /api/plan（两档口径一起问），把候选切法摆成一张表；ok:false 显著提示。
- * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 两把锁；
- *   行级操作直接摆在「操作」列：**详情 / 入池（已在池子里就是刷新）/ 试解密**。
+ * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 验证 / 两把锁；
+ *   「验证」是一个**可点的按钮**：当场取凭证、用公开的 δ 验一次，弹窗给结论，
+ *   证明刚上传的文件现在就能自证未被篡改。
+ *   行级操作直接摆在「操作」列：**详情 / 入池（已在聚合面板里就是刷新）/ 试解密**。
  *   —— 「详情」「入池」不信**点文件标识**去猜（太隐蔽）。
  * - 「试解密」不置灰：点下去才看到后端真的拒了你（演示亮点）。
  */
@@ -17,7 +19,7 @@ import { devicesApi } from '../../../api/devices'
 import { systemApi } from '../../../api/system'
 import { evidenceApi } from '../../../api/evidence'
 import { useAuthStore } from '../../../stores/auth'
-import { usePoolStore } from '../../../stores/pool'
+import { useAggregateStore } from '../../../stores/aggregate'
 import { useCryptoStore } from '../../../stores/crypto'
 import { openBlocks } from '../../../utils/crypto/index'
 import { forgetAnchorsOf, getDeltaAnchorFor } from '../../../utils/anchor'
@@ -28,6 +30,9 @@ import {
 } from '../../../utils/format'
 import { MAX_QUERY_INDICES, SPLIT_MODES } from '../../../utils/constants'
 import { autoSegmentBytes, ladderOptsFrom } from '../../../utils/split'
+// ★ 切块顾问那几句（“为什么推这一档” / “估算来源”）现在是**前端的常量**：
+//   后端只回数字（见 `backend/advisor.py`），改措辞不必重启后端。
+import { PLAN_SOURCE, planWhy, planReason } from '../../../data/copy'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import LockTag from '../../../components/security/LockTag.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
@@ -36,7 +41,7 @@ import EmptyState from '../../../components/common/EmptyState.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
 const auth = useAuthStore()
-const pool = usePoolStore()
+const panel = useAggregateStore()
 const router = useRouter()
 
 const loading = ref(false)
@@ -70,58 +75,58 @@ const uploadTimings = ref(null)
 --------------------------------------------------------------------------- */
 const UPLOAD_STEPS = [
   {
-    key: '切块（split_segments）',
-    name: '切块',
+    key: '明文分段',
+    name: '数据块切分',
     en: 'CHUNK',
-    desc: '明文按段大小切分为若干分块，各分块独立处理；分块编号自此刻起固定（界面从 1 起编号）。',
+    desc: '明文按分块大小切分为若干块，各块长度不超过 {seg}，最后一块不做长度补齐。块号在切分完成时确定，此后所有写操作均以块号为基准。',
   },
   {
-    key: '生成密钥与 IV',
-    name: '生成块密钥',
+    key: '块密钥与初始向量生成',
+    name: '块密钥生成',
     en: 'KEYGEN',
-    desc: '每个分块使用一把独立的随机块密钥（SM4），分块之间不共用密钥 —— 改一块不会牵连别的块。',
+    desc: '为每个分块独立生成一把 128 位 SM4 密钥与一个 128 位初始向量 IV。逐块独立能把影响限制在单块：一把密钥只服务一个分块，改写一块不牵动其余分块。',
   },
   {
-    key: '逐块加密（SM4）',
-    name: '逐块加密',
+    key: '数据块加密',
+    name: '数据块加密',
     en: 'ENCRYPT',
-    desc: 'SM4 将各分块加密为密文。自这一步起，协调者（服务端）不再接触明文，持有的仅为密文。',
+    desc: 'SM4-CTR 模式逐块加密。计数器模式下各块密文相互独立，任一字节的修改只影响本分块，这是改写代价与改动量成正比的前提。',
   },
   {
-    key: '封装块密钥（ECIES）',
-    name: '封装块密钥',
+    key: '块密钥封装',
+    name: '块密钥封装',
     en: 'WRAP',
-    desc: '每把块密钥以「当前用户自己的」SM2 公钥封装后入库：除私钥持有者外，其他主体均无法解封装。',
+    desc: 'SM4块密钥不直接存储，而是用文件持有者的 SM2 公钥做 ECIES 封装。封装时把文件和块序号等相关属性与这一块的初始向量一并作为附加数据绑定，因此换分块、换文件或换初始向量都无法正常解密；只有持有对应私钥才能顺利解密。',
   },
   {
-    key: '算向量分量（SM3）',
-    name: '算分量',
+    key: '块标识生成',
+    name: '块标识生成',
     en: 'DIGEST',
-    desc: '对每个分块的密文计算 SM3，得到其公开分量：该分量由密文唯一确定，服务端无法篡改。',
+    desc: '对分块密文计算 SM3 摘要，得到分块在向量上的公开分量。分量由密文唯一确定、任何一方都可以重新计算，因此它既是分块在承诺里的坐标值，也是它对外可核对的标识。',
   },
   {
-    key: '承诺（push_update）',
-    name: '形成承诺',
+    key: '承诺更新',
+    name: '承诺生成',
     en: 'COMMIT',
-    desc: '各分块的分量按其身份映射到素数并聚合，得到 δ = (U, C)：两个群元素，与文件大小无关。',
+    desc: '为每个分量计算两个群元素，累加器$U$与承诺$C$。$U_n = g^{E}$（$E$ 为该向量全部位置的身份之积，$e_i$ 是$i$位置的映射素数）； $C = \\prod S_i^{v_i}$，其中位置见证 $S_i = g^{E/e_i}$，分量 $v_i = \\mathrm{SM3}(\\text{该块密文})$。位置身份映射为互不相同的素数后，两部分聚合为 $\\delta = (U, C)$：$U_n$负责记录位置集合，$C$ 负责把每个位置的见证按它的分量加权后连乘。；验证时两者必须同时成立（$C$ 绑定内容、$U$ 绑定位置）',
   },
   {
-    key: '分发到节点',
-    name: '分散存放',
+    key: '分发至存储节点',
+    name: '分布式存储',
     en: 'REPLICATE',
-    desc: '密文按副本因子分发至各存储节点。节点仅持有密文与分块登记，不具备解封所需的密钥。',
+    desc: '密文按副本因子分发至各存储节点。节点取得密文与它那一段的位置登记，并持有该文件的公开承诺 δ 作为验证依据；用户私钥始终保存在文件所有者手中。后续取证由各节点就自己持有的分块作答。',
   },
   {
-    key: '落库（新块与块登记）',
-    name: '写入块账目',
-    en: 'PERSIST',
-    desc: '每个分块的位置、分量、IV、明文长度与已封装的块密钥各记一行：后续的更新、解密与取证均依据这份账目。',
+    key: '文件登记入库',
+    name: '用户端存储信息',
+    en: 'REGISTER',
+    desc: '用户端写入文件登记：文件标识、版本号、内容摘要，并记下这份文件的聚合承诺 δ。此后验证只需 δ 与分块编号即可独立复算，保证可验证查询。',
   },
   {
-    key: '落库（上传文件登记）',
-    name: '登记入库',
-    en: 'PERSIST',
-    desc: '文件登记与分块登记写入数据库。此后任何一次验证只需 δ 与分块编号即可独立复算，无需采信服务端的自述。',
+    key: '分块登记入库',
+    name: '节点存储信息',
+    en: 'LEDGER',
+    desc: '服务器节点逐块登记位置、公开分量、初始向量、明文长度与持有它的节点，后续能进行验证、更新与修复。',
   },
 ]
 
@@ -149,9 +154,23 @@ function readCalib() {
   }
 }
 
+/** 把步骤文案里的 `{seg}` 占位换成具体的块大小（部署里可改，不能写死）。 */
+function fillSeg(text, segBytes) {
+  const n = Number(segBytes) || 0
+  return String(text).replace('{seg}', n ? `${n} B` : '分块大小上限')
+}
+
 function buildUploadSteps() {
   const calib = readCalib()
-  return UPLOAD_STEPS.map((s) => ({ ...s, estMs: Number(calib[s.key]) || 0, facts: [] }))
+  // ★ 「数据块切分」那一步要写出**这次实际用的块大小**：此刻请求还没发，
+  //   用表单里当前生效的那个值（effectiveSplit）。响应回来后 enrich 会再填一次。
+  const seg = effectiveSplit.value.seg
+  return UPLOAD_STEPS.map((s) => ({
+    ...s,
+    desc: fillSeg(s.desc, seg),
+    estMs: Number(calib[s.key]) || 0,
+    facts: [],
+  }))
 }
 
 function saveCalib(timings) {
@@ -177,11 +196,11 @@ function decHead16(dec) {
  * 上传回来之后，把每一步的**真实中间量**填进去。
  *
  * ★ 全部来自刚拿到的响应、文件详情与系统状态，一个数字都不编：
- *   段大小/段数/总字节、每块密文长度与它落在哪几台、第一两块的 SM3 分量、
- *   δ 指纹与 C/U 的头几位、入库后的文件号与版本与位置段。
+ *   分块大小/块数/总字节、每块密文长度与它落在哪几台、第一两块的 SM3 分量、
+ *   C/U 的头几位、入库后的文件号与版本与位置段。
  *   （显示的都是**公开量**：分量是密文的 SM3，密钥与明文一概不出现。）
  */
-function enrichUploadSteps(data, detail, status) {
+function enrichUploadSteps(data, detail, status, evidence) {
   // ★ 上传响应里文件字段就在**顶层**（实测：`data.file` 是 undefined，
   //   于是中间量一直填不上）；两份都兼容一下。
   const file = data?.file || data?.uploaded || data || {}
@@ -189,53 +208,73 @@ function enrichUploadSteps(data, detail, status) {
   const mine = (status?.delta?.files || []).find(
     (f) => f.owner === file.owner && f.file_key === file.file_key,
   )
+  // ★ 「承诺生成」那一步要同时看到两个因子：
+  //     · v_1 = SM3(第 1 块密文) —— 分量，浏览器也能从密文重算；
+  //     · S_1 = g^(E/e_1)     —— 见证，向该块所在节点索取即可
+  //       （只查一块时 π_{i} = (S_i, Λ_i)，所以凭证里的 S_I 就是 S_1）。
+  //   两样都拿不到就**不摆这一行**，不编数字。
+  const v1 = evidence?.values?.[0] ?? layout[0]?.element
+  const s1 = evidence?.proof?.S_I
   const facts = {
-    '切块（split_segments）': [
-      { k: '段大小', v: `${file.segment_bytes} B` },
-      { k: '段数', v: `${file.block_count} 块` },
-      { k: '总字节', v: fmtBytes(file.total_bytes) },
+    '明文分段': [
+      { k: '分块大小', v: `${file.segment_bytes} B` },
+      { k: '分块数量', v: `${file.block_count} 块` },
+      { k: '明文长度', v: fmtBytes(file.total_bytes) },
     ],
-    '生成密钥与 IV': [
-      { k: '套数', v: `${file.block_count} 套（每块 1 把 SM4 密钥 + 1 个 128 位 IV）` },
-      { k: '去向', v: '协调者只留“用你公钥封好的”那份密文，不留明文密钥' },
+    '块密钥与初始向量生成': [
+      { k: '生成数量', v: `${file.block_count} 组（每组 1 把 128 位 SM4 密钥 + 1 个 128 位初始向量）` },
     ],
-    '逐块加密（SM4）': [
-      { k: '每块密文', v: `${layout[0]?.plain_len ?? file.segment_bytes} B（与明文等长）` },
-      { k: '第 1 块落在', v: (layout[0]?.replicas || []).join(' · ') || '—' },
+    '数据块加密': [
+      { k: '单块密文长度', v: `${layout[0]?.plain_len ?? file.segment_bytes} B（与明文等长）` },
+      { k: '首块存放节点', v: (layout[0]?.replicas || []).join(' · ') || '—' },
     ],
-    '封装块密钥（ECIES）': [
-      { k: '封装次数', v: `${file.block_count} 次（每块各用你的公钥封一次）` },
-      { k: '产物', v: 'blocks.key_ct（只能由你的私钥解开，服务端解不开）' },
+    '块密钥封装': [
+      { k: '封装范围', v: `${file.block_count} 次（每块用文件所有者的 SM2 公钥封装一次）` },
     ],
-    '算向量分量（SM3）': layout.slice(0, 2).map((b, i) => ({
+    '块标识生成': layout.slice(0, 2).map((b, i) => ({
       k: `第 ${i + 1} 块分量`,
       v: `SM3(密文) = ${decHead16(b.element)}`,
     })),
-    '承诺（push_update）': [
-      { k: 'δ 指纹', v: file.delta_fp || '—' },
-      ...(mine ? [{ k: 'C 头 16 位', v: decHead16(mine.C) }] : []),
-      ...(mine ? [{ k: 'U 头 16 位', v: decHead16(mine.U) }] : []),
+    '承诺更新': [
+      // ★ C = ∏ S_i^(v_i) 里的两个因子，在这一步第一次同时出现：
+      //   左边是见证、右边是分量（= 该块密文的 SM3）。
+      // ★ 标签走 LaTeX（`$...$`），**值里的十六进制不包 LaTeX** ——
+      //   渲染器会把单个字母排成斜体，`0x2f2e…` 里的 x 会变成变量。
+      ...(v1 != null
+        ? [{ k: '第 1 块分量 $v_1$', v: `$\\mathrm{SM3}(\\text{密文块}) =$ ${decHead16(v1)}` }]
+        : []),
+      ...(s1 != null
+        ? [{ k: '第 1 块见证 $S_1$', v: `$g^{\\,E/e_1} =$ ${decHead16(s1)}` }]
+        : []),
+      ...(mine ? [{ k: '$C$', v: decHead16(mine.C) }] : []),
+      ...(mine ? [{ k: '$U$', v: decHead16(mine.U) }] : []),
     ],
-    '分发到节点': layout.slice(0, 3).map((b, i) => ({
-      k: `第 ${i + 1} 块`,
-      v: (b.replicas || []).join(' · ') || '—',
-    })),
-    '落库（新块与块登记）': [
-      { k: '写入行数', v: `${file.block_count} 行块账目` },
-      { k: '每行内容', v: '位置 / 分量 / IV / 明文长度 / 块密钥密文' },
+    // 用户要求：逐块列 4 行；块更多的加一个省略标识（不无声截断）。
+    '分发至存储节点': [
+      ...layout.slice(0, 4).map((b, i) => ({
+        k: `第 ${i + 1} 块`,
+        v: (b.replicas || []).join(' · ') || '—',
+      })),
+      ...(layout.length > 4 ? [{ k: '……', v: `其余 ${layout.length - 4} 块略` }] : []),
     ],
-    '落库（上传文件登记）': [
-      { k: '文件', v: `#${file.id} ${file.owner}/${file.file_key}` },
+    '分块登记入库': [
+      { k: '登记行数', v: `${file.block_count} 块分量` },
+      { k: '每行字段', v: '位置 / 公开分量 / 初始向量 / 明文长度 / 持有节点' },
+    ],
+    '文件登记入库': [
+      { k: '所有者', v: file.owner },
+      { k: '文件标识', v: file.file_key },
       { k: '版本', v: `v${file.version}` },
-      {
-        k: '位置段',
-        v: file.indices?.length
-          ? `第 ${file.indices[0] + 1} 起，共 ${file.indices.length} 块`
-          : '—',
-      },
+      { k: '文件块数', v: `${file.block_count} 块` },
     ],
   }
-  uploadSteps.value = uploadSteps.value.map((s) => ({ ...s, facts: facts[s.key] || [] }))
+  // ★ desc 也重填一遍：切分那一步写的是**实际**用上的块大小（可能与开演时
+  //   表单里的预估值不同 —— 后端会按自身约束夹一下）。
+  uploadSteps.value = uploadSteps.value.map((s) => ({
+    ...s,
+    desc: fillSeg(s.desc, file.segment_bytes),
+    facts: facts[s.key] || [],
+  }))
 }
 
 const uploadFacts = computed(() => {
@@ -245,7 +284,7 @@ const uploadFacts = computed(() => {
     { k: '文件', v: `${f.owner} / ${f.file_key}` },
     { k: '大小', v: fmtBytes(f.total_bytes) },
     { k: '块数', v: String(f.block_count) },
-    { k: '段大小', v: `${f.segment_bytes} B` },
+    { k: '分块大小', v: `${f.segment_bytes} B` },
   ]
 })
 //: 行级「入池」的忙碌状态与它的分步耗时（与上传那条共用同一个时间线组件）。
@@ -480,16 +519,16 @@ function rowParts(row) {
   return v
 }
 
-/** 这份文件的块是不是**全部**都在池子里了（判据与 pool.addCard 的去重完全一致）。 */
+/** 这份文件的块是不是**全部**都在聚合面板里了（判据与 panel.addCard 的去重完全一致）。 */
 function inPool(row) {
   const { keys } = rowParts(row)
-  return keys.length > 0 && keys.every((k) => pool.indexKeys.has(k))
+  return keys.length > 0 && keys.every((k) => panel.indexKeys.has(k))
 }
 
 /**
- * 「入池」：把这份文件的块取一份证据，攒进证据池。
+ * 「入池」：把这份文件的块取一份证据，攒进增量聚合与分解。
  *
- * ★ 池子按**下标集合**去重（``stores/pool.js`` 的 ``addCard``）：命中时不新增卡片，
+ * ★ 聚合面板按**下标集合**去重（``stores/aggregate.js`` 的 ``addCard``）：命中时不新增卡片，
  *   而是用刚取到的最新证据**刷新**原来那张（δ 变过时这正好让它重新生效）。
  *   这件事必须明说 —— 不说的话，用户会以为点了两次就是两份，或者以为第二次没生效。
  */
@@ -508,9 +547,9 @@ async function addToPool(row, { silent = false } = {}) {
   if (already && !silent) {
     try {
       await ElMessageBox.confirm(
-        `这 ${indices.length} 块已经在池子里了。\n\n` +
+        `这 ${indices.length} 块已经在聚合面板里了。\n\n` +
           '继续只会用刚取到的证据刷新卡片，不会新增。',
-        '这份已在池子里',
+        '这份已在聚合面板里',
         { type: 'warning', confirmButtonText: '刷新那一张', cancelButtonText: '取消' },
       )
     } catch {
@@ -526,7 +565,7 @@ async function addToPool(row, { silent = false } = {}) {
       const { data } = await evidenceApi.query(parts[i], false)
       covered += (data.indices || parts[i]).length
       if (i === parts.length - 1) poolTimings.value = data.timings || null
-      pool.addCard({
+      panel.addCard({
         // ★ 一片一张卡：超过单次上限的文件会被切成几片，标题里如实写清。
         label: parts.length > 1
           ? `${row.owner}/${row.file_key}（第 ${i + 1}/${parts.length} 片）`
@@ -548,12 +587,12 @@ async function addToPool(row, { silent = false } = {}) {
     if (!silent) {
       ElMessage.success(
         already
-          ? `已刷新池子里那张卡（用时 ${ms} ms）`
+          ? `已刷新聚合面板里那张卡（用时 ${ms} ms）`
           : parts.length > 1
-            ? `已加入证据池：${row.block_count} 块分成 ${parts.length} 片，`
+            ? `已入池：${row.block_count} 块分成 ${parts.length} 片，`
                 + `每片各一份证据（用时 ${ms} ms）。单次取证上限 ${MAX_QUERY_INDICES} 块，`
                 + `与“文件能存多少块”无关。`
-            : `已加入证据池：${covered} 块合成一份证据（用时 ${ms} ms）。`
+            : `已入池：${covered} 块合成一份证据（用时 ${ms} ms）。`
                 + `跨文件验证会在合并位置集上重算证据，通常要 1~3 秒。`,
       )
     }
@@ -622,15 +661,24 @@ async function doUpload() {
     uploadTimings.value = data.timings
     saveCalib(data.timings)
     lastUpload.value = data
-    // 真实中间量：文件详情（分量/长度/副本）+ 系统状态（C / U）。
+    // 真实中间量：文件详情（分量/长度/副本）+ 系统状态（C / U）
+    // + 第 1 块的见证与分量（「承诺生成」那一步要摆的 S_1 与 v_1）。
     // 拿不到就不填 —— 宁可少几行，不编数字。
     const fid = (data?.file || data || {}).id
+    const own = (data?.file || data || {}).owner
+    const key = (data?.file || data || {}).file_key
     try {
-      const [{ data: det }, { data: st }] = await Promise.all([
-        filesApi.detail(fid, true),
-        systemApi.status(),
+      const [det, st, ev] = await Promise.all([
+        filesApi.detail(fid, true).then((r) => r.data),
+        systemApi.status().then((r) => r.data),
+        // ★ 只查第 1 块：一次普通的可验证查询（验证不受限，谁都能发），
+        //   失败就当没这一步 —— 中间量少两行，不影响上传本身。
+        evidenceApi
+          .queryFiles([[own, key]], [0])
+          .then((r) => r.data)
+          .catch(() => null),
       ])
-      enrichUploadSteps(data, det, st)
+      enrichUploadSteps(data, det, st, ev)
     } catch (e) {
       // 中间量拿不到也不影响上传本身，但**不静默**：控制台留一句，方便查。
       console.warn('[上传过程] 中间量没填上：', e?.message || e)
@@ -693,7 +741,7 @@ async function tryDecrypt(file) {
   if (!file.can_decrypt) {
     ElMessage.warning(
       '当前账户非文件所有者，无块密钥解封权限。' +
-        '完整性验证为公开能力，可在详情页查看。',
+        '可验证查询为公开能力 —— 点这一行的「可验证」就能当场验，不需要解密权限。',
     )
     return
   }
@@ -747,6 +795,42 @@ async function tryDecrypt(file) {
     ElMessage.error(e?.message || '本地解密失败')
   } finally {
     tip.close()
+  }
+}
+
+/**
+ * 行级「可验证」：对这份文件的**全部存活分块**发一次可验证查询。
+ *
+ * ★ 验证是本系统的**公开能力**（`/api/query/files` 不做所有权判断）：
+ *   谁都能验任意分块的完整性，既不要明文、也不要私钥。列表里点一下就能
+ *   看到「刚传完就能当场证明没被篡改」，比一句静态的“可验证”有说服力。
+ *
+ * ★ 块号传 `null`（整份）：要回答的是“这份文件现在还是不是那些字节”，
+ *   只看一两块回答不了。
+ */
+const verifyOpen = ref(false)
+const verifyBusy = ref(false)
+const verifyTarget = ref(null)
+const verifyResult = ref(null)
+const verifyError = ref('')
+const verifyMs = ref(0)
+
+async function runVerify(row) {
+  if (!row) return
+  verifyTarget.value = row
+  verifyResult.value = null
+  verifyError.value = ''
+  verifyBusy.value = true
+  verifyOpen.value = true
+  const t0 = performance.now()
+  try {
+    const { data } = await evidenceApi.queryFiles([[row.owner, row.file_key]], null)
+    verifyResult.value = data
+  } catch (e) {
+    verifyError.value = e?.response?.data?.detail || e?.message || '查询失败'
+  } finally {
+    verifyMs.value = Math.round(performance.now() - t0)
+    verifyBusy.value = false
   }
 }
 
@@ -819,7 +903,7 @@ const poolAllBusy = ref(false)
 const removeAllBusy = ref(false)
 
 /**
- * 「一键入池」：把**列表里全部**的文件（含他人的）各取一份证据收进证据池。
+ * 「一键入池」：把**列表里全部**的文件（含他人的）各取一份证据入池。
  *
  * ★ 逐个串行，**不并发**：每次入池都要向“持有那几块的节点”取密文，
  *   并发打上去只会把节点压住，还可能撞上协调者的写锁。一份一份走，
@@ -833,7 +917,7 @@ async function poolAll() {
   if (!list.length) return
   poolAllBusy.value = true
   let ok = 0
-  //: 这一批往池子里**真的加了几张卡**。
+  //: 这一批往聚合面板里**真的加了几张卡**。
   //: ★ 与“几份”不是一回事：块数超过单次上限的文件会被切成几片，
   //:   一篇一份证件、一片一张卡 —— 不说清的话，用户会以为“怎么多了这么多张”。
   let cards = 0
@@ -841,22 +925,22 @@ async function poolAll() {
   try {
     for (let i = 0; i < list.length; i++) {
       tip.message = `正在入池 ${i + 1} / ${list.length}：${list[i].file_key} …`
-      const before = pool.cards.length
+      const before = panel.cards.length
       try {
         // ★ 按**返回值**计数，不是“调用过就算成功”（审计 F1）。
         if (await addToPool(list[i], { silent: true })) ok += 1
       } catch {
         /* 单份失败不打断 */
       }
-      cards += Math.max(0, pool.cards.length - before)
+      cards += Math.max(0, panel.cards.length - before)
     }
   } finally {
     tip.close()
     poolAllBusy.value = false
   }
-  const split = cards > ok ? `（大文件按单次上限切成了几片，池子里共 ${cards} 张卡）` : ''
+  const split = cards > ok ? `（大文件按单次上限切成了几片，聚合面板里共 ${cards} 张卡）` : ''
   if (ok === list.length) {
-    ElMessage.success(`一键入池：${ok} / ${list.length} 份已收进证据池${split}`)
+    ElMessage.success(`一键入池：${ok} / ${list.length} 份已入池${split}`)
   } else {
     ElMessage.warning(
       `一键入池：成功 ${ok} / ${list.length} 份，` +
@@ -950,7 +1034,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="上传文件" subtitle="所有人可验证；持有者可解密" />
+<PageHeader title="上传文件" subtitle="所有人可验证；所有者可解密" />
 
     <div v-if="error" class="panel"><p class="text-danger">{{ error }}</p></div>
     <template v-else>
@@ -1013,7 +1097,7 @@ onMounted(load)
             :closable="false"
             class="mb-2"
             title="放不下"
-            :description="planAdvice.fewest.reason"
+            :description="planReason()"
           />
           <div class="plan-head">
             分块建议提供 {{ planRows.length }} 组候选。<b>选定某行方可启用对应方案</b>，
@@ -1054,9 +1138,9 @@ onMounted(load)
           </div>
           <el-collapse class="why">
             <el-collapse-item title="建议依据" name="why">
-              <p class="text-2" style="font-size: 12px">【块数最少】{{ planAdvice.fewest.why }}</p>
-              <p class="text-2" style="font-size: 12px">【粒度最细】{{ planAdvice.finer.why }}</p>
-              <p class="text-3" style="font-size: 11px">估算来源：{{ planAdvice.fewest.measured_source }}</p>
+              <p class="text-2" style="font-size: 12px">【块数最少】{{ planWhy(planAdvice.fewest) }}</p>
+              <p class="text-2" style="font-size: 12px">【粒度最细】{{ planWhy(planAdvice.finer) }}</p>
+              <p class="text-3" style="font-size: 11px">估算来源：{{ PLAN_SOURCE }}</p>
             </el-collapse-item>
           </el-collapse>
         </div>
@@ -1124,9 +1208,17 @@ onMounted(load)
           <el-table-column label="版本" width="70" align="center">
             <template #default="{ row }"><span class="mono">{{ row.version }}</span></template>
           </el-table-column>
-          <el-table-column label="验证" width="80" align="center">
-            <template #default>
-              <span class="text-accent" title="谁都能验证">可验证</span>
+          <el-table-column label="验证" width="86" align="center">
+            <template #default="{ row }">
+              <!-- ★ 做成按钮而不是一段静态文字：点下去真的去取凭证、用公开的 δ
+                   当场验一次，弹窗给结论 —— “可验证”这句话才有分量。 -->
+              <el-button
+                link
+                type="primary"
+                size="small"
+                title="谁都能验证：当场取回凭证，用公开的 δ 做一次配对检验"
+                @click="runVerify(row)"
+              >可验证</el-button>
             </template>
           </el-table-column>
           <el-table-column label="解密" width="90" align="center">
@@ -1167,14 +1259,65 @@ onMounted(load)
     <!-- 上传过程：与请求**同时**开演，请求回来再把真实耗时与中间量填进去。 -->
     <ProcessDialog
       v-model="processOpen"
-      title="这次上传走了哪几步"
-      subtitle="动画与请求同时进行；各步展示时长按上一次的实测耗时估算，并设有上下限。"
+      title="上传文件全链路"
       :steps="uploadSteps"
       :timings="lastUpload?.timings"
       :facts="uploadFacts"
       :e2e-ms="uploadElapsed"
       :pending="processPending"
     />
+
+    <!-- 行级「可验证」：当场查一次，只摆结论与几个公开量。 -->
+    <el-dialog
+      v-model="verifyOpen"
+      width="540px"
+      top="12vh"
+      append-to-body
+      title="可验证查询 · 当场自证"
+    >
+      <div v-loading="verifyBusy" class="vq-body">
+        <template v-if="verifyResult">
+          <div class="vq-headline" :class="verifyResult.ok ? 'ok' : 'danger'">
+            <Icon :name="verifyResult.ok ? 'check' : 'x'" :size="18" />
+            <span>{{ verifyResult.ok ? '验证通过 —— 未被篡改' : '验证未通过' }}</span>
+          </div>
+          <div class="vq-rows">
+            <div class="vq-row">
+              <span>文件</span>
+              <b class="mono">{{ verifyTarget?.owner }} / {{ verifyTarget?.file_key }}</b>
+            </div>
+            <div class="vq-row">
+              <span>覆盖分块</span>
+              <b class="mono">{{ (verifyResult.indices || []).length }} 块（全部分块）</b>
+            </div>
+            <div class="vq-row">
+              <span>文件指纹</span>
+              <b class="mono">{{ verifyResult.files?.[0]?.delta_fp || '—' }}</b>
+            </div>
+            <div class="vq-row">
+              <span>验证环节</span>
+              <b class="mono">{{ verifyResult.verify?.code_name || '—' }}</b>
+            </div>
+            <div class="vq-row">
+              <span>本次耗时</span>
+              <b class="mono">{{ verifyMs }} ms</b>
+            </div>
+          </div>
+          <p v-if="!verifyResult.ok && verifyResult.verify?.message" class="vq-msg">
+            {{ verifyResult.verify.message }}
+          </p>
+          <p class="vq-note">
+            本次只用了公开量：承诺 δ、凭证 π<sub>I</sub> 与分块编号；没有取明文，也没有用私钥。
+          </p>
+        </template>
+        <el-alert v-else-if="verifyError" type="error" :closable="false" :title="verifyError" />
+        <p v-else class="vq-note">正在向持有这些分块的节点取回凭证…</p>
+      </div>
+      <template #footer>
+        <el-button @click="verifyOpen = false">关闭</el-button>
+        <el-button type="primary" :loading="verifyBusy" @click="runVerify(verifyTarget)">再验一次</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1289,5 +1432,57 @@ onMounted(load)
 }
 .why {
   margin-top: 10px;
+}
+
+/* ---------- 行级「可验证」弹窗：一句结论 + 几行公开量 ---------- */
+.vq-body {
+  min-height: 92px;
+}
+.vq-headline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+.vq-headline.ok {
+  color: var(--ok);
+}
+.vq-headline.danger {
+  color: var(--danger);
+}
+/* 两列对齐：左列标签固定宽度，右列折行也不跑位。 */
+.vq-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.vq-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.vq-row > span {
+  color: var(--text-3);
+}
+.vq-row > b {
+  color: var(--text-1);
+  font-weight: 400;
+  word-break: break-all;
+}
+.vq-msg {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+.vq-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text-3);
 }
 </style>

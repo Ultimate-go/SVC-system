@@ -23,9 +23,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { deployApi } from '../../api/deploy'
 import { useAuthStore } from '../../stores/auth'
 import { emitDeployChanged } from '../../utils/deployBus'
+// ★ 台数那两句提示现在是**前端文案**：后端只回 ``note``（上次保存时记下的事实）
+//   与 ``node_count`` / ``running_count`` / ``restart_required``（见 copy.js）。
+import { deployNotice, deploySavedMessage, redistributeMessage } from '../../data/copy'
 import Icon from '../icons/Icon.vue'
 
 const info = ref(null)
+
+/** 卡片顶上那条部署提示；没话说就是空串（``v-if`` 靠它收放）。 */
+const noticeText = computed(() => deployNotice(info.value))
 const plan = ref(null)
 const want = ref(4)
 const loading = ref(false)
@@ -136,7 +142,7 @@ async function save() {
   saving.value = true
   try {
     const { data } = await deployApi.save(want.value, confirmShrink)
-    ElMessage.success(data.message?.split('\n')[0] || '已保存')
+    ElMessage.success(deploySavedMessage(data).split('\n')[0] || '已保存')
     await load()
     // ★ 台数一变，端口那张卡片的**行数**就得跟着变（每台节点一行），
     //   而它们俩是兄弟卡片 —— 用事件说一声（见 utils/deployBus.js）。
@@ -244,7 +250,7 @@ async function fixReplicas() {
   saving.value = true
   try {
     const { data } = await deployApi.redistribute()
-    ElMessage.success(data.message || '已处理')
+    ElMessage.success(redistributeMessage(data) || '已处理')
     await load()
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '操作失败'
@@ -307,12 +313,12 @@ defineExpose({ refresh: load })
     />
 
     <el-alert
-      v-if="info?.notice"
+      v-if="noticeText"
       :type="info.restart_required ? 'warning' : 'info'"
       :closable="false"
       class="mt-3"
       title="部署提示"
-      :description="info.notice"
+      :description="noticeText"
     />
 
     <el-alert

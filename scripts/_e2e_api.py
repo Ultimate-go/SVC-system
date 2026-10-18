@@ -1,5 +1,5 @@
 """接口层端到端（打真的 8000 端口）—— 上传 / 改块 / 追加 / 截断 / 检索 /
-批量验证 / 证据池 / 存储证明 / 故障演练，一条一条走下来。
+批量验证 / 增量聚合与分解 / 存储证明 / 故障演练，一条一条走下来。
 
 ★ 为什么要有它（而不是只靠那几个 ``verify_*.py``）：
   那些脚本大多在**进程内**跑，而这次线上事故恰恰是"进程内全绿、跨进程全挂"。
@@ -230,11 +230,14 @@ r = c.post("/api/admin/fault-drill", headers=H_ADMIN,
                  "mode": "destroyed"})
 check("★ 标记 2 台损毁 200", r.status_code == 200, show(r, 300))
 impact = r.json().get("impact") or {}
-note = str(impact.get("note", ""))
-print("        影响面：", note[:200])
-check("★ 影响面说清「本演练不删数据」", "不删数据" in note, note[:200])
-check("★ 影响面报出了会丢哪几块（预判）", int(impact.get("lost_count") or 0) > 0,
+# ★ 影响面那句“本演练不删数据”现在由前端拼（`frontend/src/data/copy.js`
+#   ），后端只回数字 —— 所以这里改看**数据**：会丢几块、涉及哪几份文件。
+print("        影响面：", {k: v for k, v in impact.items() if k != "lost_blocks"})
+check("★ 影响面报出了会丢几块", int(impact.get("lost_count") or 0) > 0,
       str(impact.get("lost_count")))
+check("★ 影响面报出了涉及哪几份文件",
+      len(impact.get("files_affected") or []) >= 1,
+      str(impact.get("files_affected"))[:120])
 
 r = c.post("/api/admin/fault-drill", headers=H_ADMIN,
            json={"action": "restore"})

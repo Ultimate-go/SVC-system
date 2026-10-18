@@ -38,22 +38,20 @@ def summary(
     _: UserRow = Depends(current_user),
     mgr: StoreManager = Depends(get_manager),
 ):
-    """返回性能画像：延迟分位数、吞吐、趋势序列、当前规模。"""
-    st = mgr.status()
+    """返回性能画像：延迟分位数、吞吐、趋势序列、当前规模。
+
+    ★★ 这里**不用** ``mgr.status()``（而用 :meth:`~backend.manager.StoreManager.perf_overview`）：
+       ``status`` 会逐台探活并**每台做一次密码学验证**，而本接口被面板**每 5 秒**
+       轮询一次 —— 机器一忙就会把请求拖到超时，界面上表现为“刷新快照失败”。
+       这份画像只要规模数字与 CRS 参数，内存里就有，零网络。
+    """
+    ov = mgr.perf_overview()
     # 把当前规模写进指标快照（同一份报告，别多探活一次）
-    metrics.set_scale(
-        blocks=st["blocks"],
-        files=st["files"],
-        nodes=st["nodes"],
-    )
+    metrics.set_scale(blocks=ov["blocks"], files=ov["files"], nodes=ov["nodes"])
     snap = metrics.snapshot()
     # 把友好名和规模参数一起带上，前端不必自己映射
     return {
         **snap,
         "names": metrics.ACTION_NAMES,
-        "crs": {
-            "n_bits": st["crs"]["N_bits"],
-            "l": st["crs"]["l"],
-            "n_max": st["crs"]["n_max"],
-        },
+        "crs": dict(ov["crs"]),
     }

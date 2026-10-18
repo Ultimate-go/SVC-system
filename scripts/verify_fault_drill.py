@@ -238,7 +238,7 @@ check("★ 取明文失败（副本全不可达）", kind, m[:90])
 kind, m = raises(lambda: store3.cipher_of(OWNER, FILE_KEY), Exception)
 check("★ 验证完整性失败", kind, m.split("\n")[0][:100])
 kind, m = raises(lambda: store3.query([target]), Exception)
-check("★ 证据池聚合失败", kind, m.split("\n")[0][:100])
+check("★ 增量聚合与分解聚合失败", kind, m.split("\n")[0][:100])
 check("★ 报错里列清了「谁持多少块、谁联系不上」", "联系不上" in m or "副本" in m, m[:110])
 
 # ★ 顺序很重要：``modify`` / ``truncate`` 会**先把新块密钥塞进 PlainKeyStore
@@ -318,7 +318,12 @@ check("管理端已装上演练代理", isinstance(mstore.transport, FaultyTrans
 
 st = mgr.fault_drill("status")
 check("status 动作可用", st["faulty"] == [] and st["impact"]["lost_count"] == 0)
-check("无故障时给出明确结论", "在线" in st["impact"]["note"], st["impact"]["note"][:60])
+# ★ 这里以前还断言过 ``impact["note"]`` 的措辞（“在线” / “副本” / “不可逆” /
+#   “不删数据”）。2026-10-16 起那句话由**前端**拼（``frontend/src/data/copy.js``
+#   的 ``faultImpactNote``）—— 后端只回数字与名单，所以这里改成断言**数据**，
+#   措辞那几条改由 ``frontend/tests/copy.test.js`` 钉住。
+check("无故障时影响面归零", st["impact"]["degraded_blocks"] == 0
+      and st["impact"]["files_affected"] == [], str(st["impact"]))
 
 # 挑一台**主副本**在场上的机器 —— 这样 degraded 一定 > 0
 mid_pos = mstore.registry.positions_of("alice", "mid")
@@ -328,8 +333,10 @@ check(f"掉线 {pick} 后 faulty 名单正确", st["faulty"] == [pick], str(st["
 check("影响面：主副本受损的块被数出来", st["impact"]["degraded_blocks"] > 0,
       f"degraded={st['impact']['degraded_blocks']}")
 check("影响面：不是永久丢失", st["impact"]["lost_count"] == 0)
-check("影响面文案说清「多副本救场」", "副本" in st["impact"]["note"],
-      st["impact"]["note"][:70])
+# “多副本救场”那句在前端拼，它只依赖下面这两个数：受损块 > 0、丢失块 == 0。
+check("影响面够前端拼出「多副本救场」那句",
+      st["impact"]["degraded_blocks"] > 0 and st["impact"]["lost_count"] == 0,
+      f"degraded={st['impact']['degraded_blocks']} lost={st['impact']['lost_count']}")
 
 # ★★ 真系统的关键性质：**写失败不会弄坏已经存下来的数据**。
 #    manager 里块密钥是"封好后只在 _finish 里落库"，写失败即丢弃 ——
@@ -358,13 +365,13 @@ check("★ 影响面报出会永久丢失的块", st["impact"]["lost_count"] >= 
 check("★ 影响面列清是哪份文件的哪一块",
       any(f["file_key"] == "mid" for f in st["impact"]["files_affected"]),
       str(st["impact"]["files_affected"])[:90])
-check("★ 文案点明「副本数不够 + 不可逆故障」", "不可逆" in st["impact"]["note"],
-      st["impact"]["note"][:80])
-# ★★ 这一条是给用户的**安全承诺**：文案必须说清它不会删数据。
-#    曾经的那个版本真的去清节点数据库，用户看到"永久损毁"四个字
-#    以为只是演示 —— 结果真丢了数据。
-check("★★ 文案说清「本演练不删数据」", "不删数据" in st["impact"]["note"],
-      st["impact"]["note"][-40:])
+# ★★ 两条**安全承诺**（“不可逆故障” / “本演练不删数据”）现在由前端那句话写
+#    在界面上（``copy.js::faultImpactNote``），所以它们在
+#    ``frontend/tests/copy.test.js`` 里被钉住。这里只把前端拼那句话所依赖的
+#    数据钉住：丢失块 >= 1、且能报出是哪几份文件。
+check("★★ 影响面足以说清「哪几块会永久丢失 + 涉及哪份文件」",
+      st["impact"]["lost_count"] >= 1 and len(st["impact"]["files_affected"]) >= 1,
+      f"lost={st['impact']['lost_count']} files={len(st['impact']['files_affected'])}")
 
 kind, m = raises(lambda: mgr.read_plain("alice", "mid",
                                         mgr.unseal_user_key("alice", "vds12345")),

@@ -44,8 +44,6 @@ from typing import Sequence
 
 __all__ = [
     "MEASURED_PER_BLOCK_MS",
-    "MEASURED_SCOPE",
-    "MEASURED_SOURCE",
     "recommend_plan",
 ]
 
@@ -54,14 +52,15 @@ __all__ = [
 #: ★★ **它只含“协调者本地那几步”，不含把密文推给各存储节点的那一段。**
 #:
 #: 量的时候跑的是**单进程**模式（``LocalTransport``，节点是同进程对象），
-#: 所以“分发到节点”几乎不花时间。真实部署是**跨进程**的，那一步走 HTTP ——
+#: 所以“分发至存储节点”几乎不花时间。真实部署是**跨进程**的，那一步走 HTTP ——
 #: 实测（4 台真节点、本机、2026-09-27）：一次 7 块的上传后端合计 2662 ms，
 #: 其中 **2351 ms** 是它（88%）。
 #: 也就是说这几个系数在跨进程部署下会把总耗时**少估两个数量级**。
 #:
 #: 所以它只适合用来**比较不同切法**（同样是本地的几步，相对关系仍然成立），
-#: 不能当成“上传要多久”。界面必须把这句话和数字一起摆出来
-#: （见 :data:`MEASURED_SCOPE`）。
+#: 不能当成“上传要多久”。界面必须把这句话和数字一起摆出来 ——
+#: 那句话与“来源”都是**前端常量**（``frontend/src/data/copy.js`` 的
+#: ``PLAN_SCOPE`` / ``PLAN_SOURCE``），后端只回这里的毫秒数。
 #:
 #: 来源：``scripts/bench_blocksize.py``（2026-09-26，本机，|N|=512 位、l=256、
 #: 4 台节点、单进程；当时每块还含一次 ABE 策略封装 —— 现在换成 ECIES，
@@ -73,18 +72,6 @@ __all__ = [
 #: 不取 256 档那种小块的每块代价：那里每块固定开销还没摊开（22.2 ms/块），
 #: 拿它当基准会把大块估慢一倍以上。
 MEASURED_PER_BLOCK_MS: dict[str, float] = {"upload": 13.3, "verify": 6.8}
-
-#: 上面那两个数从哪来的（界面上要标出来，不能把估算说成实测）。
-MEASURED_SOURCE = (
-    "scripts/bench_blocksize.py 实测（本机，2026-09-26；单进程模式，只含本地封装与承诺）"
-)
-
-#: 这批系数的**口径**。界面必须原样带出来 ——
-#: 一份“只算了本地几步”的估算，被摆成“预计上传约 X ms”就是谎报。
-MEASURED_SCOPE = (
-    "只含协调者本地几步（切块 / SM3 / SM4 / ECIES 封装 / 承诺）；"
-    "不含把密文推给各存储节点的分发（跨进程部署下分发才是大头）"
-)
 
 #: 候选档位：从最小块开始按 2 的幂往上翻，最后补上上限本身。
 #: 用 2 的幂是让界面上那几个候选看起来是“一档一档”的，而不是一堆怪数字。
@@ -197,8 +184,6 @@ def recommend_plan(
         "prefer": prefer,
         "alternatives": rows,
         "measured_per_block_ms": dict(MEASURED_PER_BLOCK_MS),
-        "measured_source": MEASURED_SOURCE,
-        "measured_scope": MEASURED_SCOPE,
     }
     # ``feasible`` 现在恒等于 ``rows``（allowed 恒真）—— 这个分支留着是因为
     # 它是"切法一个都不合法"（例如 ``ladder`` 给空、或块大小为 0）时的兜底，
@@ -209,31 +194,18 @@ def recommend_plan(
             "ok": False,
             "segment_bytes": None,
             "blocks": None,
-            "reason": "没有任何可用的切法（块大小候选为空？）—— 检查部署里的块大小范围。",
         }
 
     if prefer == "finer_updates":
         chosen = feasible[0]  # 允许范围内**最小**的块 ⇒ 改块粒度最细
-        why = (
-            f"粒度更细的一档：在允许范围内挑最小的可行块 "
-            f"{chosen['segment_bytes']} 字节，切 {chosen['blocks']} 块。"
-            f"代价是块数多、上传与验证更慢（本地那几步估算 {chosen['est_upload_ms']} ms / "
-            f"{chosen['est_verify_ms']} ms），也更占全局位置。"
-        )
     else:
         chosen = feasible[-1]  # 允许范围内**最大**的块 ⇒ 块数最少
-        why = (
-            f"块数最少的一档：块越大，每块的固定开销摊得越薄。"
-            f"{chosen['segment_bytes']} 字节一块，共 {chosen['blocks']} 块，"
-            f"本地那几步估算上传 {chosen['est_upload_ms']} ms、一次全量验证 "
-            f"{chosen['est_verify_ms']} ms（每块约 "
-            f"{MEASURED_PER_BLOCK_MS['upload']} ms / "
-            f"{MEASURED_PER_BLOCK_MS['verify']} ms，实测）。"
-            f"这几个数不含把密文推给各存储节点的分发，所以只适合比较切法；"
-            f"上传到底要多久，看上传完成后那条阶段耗时条。"
-            f"块大只影响改一块的粒度，不影响验证结果，证据大小也与块数无关。"
-        )
 
+    # ★ 这两档的"为什么"与"估算来源"以前由这里拼成整句回给前端（``why`` /
+    #   ``measured_source`` / ``measured_scope`` / ``reason``）。2026-10-16 改成
+    #   **只回数据**（``segment_bytes`` / ``blocks`` / ``est_*_ms`` /
+    #   ``measured_per_block_ms``），句子由前端拼（``frontend/src/data/copy.js``）
+    #   —— 改那句话的措辞不必重启后端。
     return {
         **base,
         "ok": True,
@@ -241,5 +213,4 @@ def recommend_plan(
         "blocks": int(chosen["blocks"]),
         "est_upload_ms": chosen["est_upload_ms"],
         "est_verify_ms": chosen["est_verify_ms"],
-        "why": why,
     }

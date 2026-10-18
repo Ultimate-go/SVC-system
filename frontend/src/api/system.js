@@ -17,5 +17,12 @@ export const systemApi = {
   /** 为一条审计流水写入 / 修改 / 清空人工备注；传空串即清空。 */
   setAuditRemark: (id, remark) =>
     api.patch(`/api/admin/audit/${id}/remark`, { remark }),
-  perfSummary: () => api.get('/api/perf/summary'),
+  /**
+   * 性能画像（总览页的「运行性能」面板默认**每 5 秒**轮询一次）。
+   *
+   * ★ ``silent``：轮询失败由面板自己就地说明（并继续重试），不再让拦截器弹
+   *   一个全局红条 —— 后端重启、代理抽一下都会让某一次请求拿不到响应，
+   *   而那不是需要用户处理的事（之前就是这里弹出「请求失败：Network Error」）。
+   */
+  perfSummary: () => api.get('/api/perf/summary', { silent: true }),
 }

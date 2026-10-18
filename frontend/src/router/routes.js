@@ -55,22 +55,28 @@ export const routes = [
         meta: { requiresAdmin: true, title: '用户详情' },
       },
       {
+        // ★ 2026-10-16：存储节点移到「管理员工作台」菜单下，路由同步加管理员限制
+        //   （后端 /api/nodes 那一族本来就要管理员，这里只是让“看不见”与“打不开”一致）。
         path: 'devices',
         name: 'devices',
         component: () => import('../views/devices/list/index.vue'),
-        meta: { title: '存储节点' },
+        meta: { requiresAdmin: true, title: '存储节点' },
       },
       {
         path: 'devices/add',
         name: 'devices-add',
         component: () => import('../views/devices/add/index.vue'),
-        meta: { title: '新增节点', parent: { title: '存储节点', path: '/devices' } },
+        meta: {
+          requiresAdmin: true,
+          title: '新增节点',
+          parent: { title: '存储节点', path: '/devices' },
+        },
       },
       {
         path: 'devices/:id',
         name: 'devices-detail',
         component: () => import('../views/devices/detail/index.vue'),
-        meta: { title: '节点详情' },
+        meta: { requiresAdmin: true, title: '节点详情' },
       },
       {
         path: 'profile',
@@ -115,16 +121,16 @@ export const routes = [
         },
       },
       {
-        path: 'evidence/pool',
-        name: 'pool',
-        component: () => import('../views/evidence/pool/index.vue'),
-        meta: { title: '证据池' },
+        path: 'evidence/aggregate',
+        name: 'aggregate',
+        component: () => import('../views/evidence/aggregate/index.vue'),
+        meta: { title: '增量聚合与分解' },
       },
       {
-        path: 'evidence/verify',
-        name: 'verify',
-        component: () => import('../views/evidence/verify/index.vue'),
-        meta: { title: '完整性验证' },
+        path: 'evidence/query',
+        name: 'query',
+        component: () => import('../views/evidence/query/index.vue'),
+        meta: { title: '可验证查询' },
       },
       {
         path: 'audit',
@@ -133,10 +139,14 @@ export const routes = [
         meta: { requiresAdmin: true, title: '审计流水' },
       },
       {
-        path: 'perf',
-        name: 'perf',
-        component: () => import('../views/admin/perf/index.vue'),
-        meta: { title: '性能' },
+        // ★ 2026-10-16：「性能」页并入「总览」，这里换成「系统初始化」。
+        //   搬过来的是原总览里的规模 / 系统参数 / 逐文件摘要 / 运行状态 / 密钥模型，
+        //   外加一段「算法与目的」。它们回答的都是「这套系统初始化成什么样了」，
+        //   与「现在跑得多快」不是一回事。
+        path: 'init',
+        name: 'init',
+        component: () => import('../views/admin/init/index.vue'),
+        meta: { requiresAdmin: true, title: '系统初始化' },
       },
     ],
   },

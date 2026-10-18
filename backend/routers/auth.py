@@ -12,6 +12,7 @@ from core.timing import collect
 
 from .. import metrics
 from ..deps import audit, current_token, current_user, get_db, get_manager, get_settings
+from ..errors import ApiError
 from ..manager import NotFound, StoreManager
 from ..models import UserRow
 from ..schemas import LoginIn, RegisterIn
@@ -71,10 +72,16 @@ def login(
     # 用户不存在与口令错误返回同一句话 —— 不给枚举用户名的机会
     if user is None or not verify_password(body.password, user.pwd_hash):
         audit(db, body.username, "login", ok=False, detail="用户名或口令错误")
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或口令错误")
+        raise ApiError(
+            status.HTTP_401_UNAUTHORIZED,
+            "auth.bad_credentials",
+            "用户名或口令错误",
+        )
     if user.disabled:
         audit(db, body.username, "login", ok=False, detail="账号已停用")
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被停用")
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN, "auth.account_disabled", "账号已被停用"
+        )
 
     # ★★ 这一步是「只有自己才能解密」的落点。
     #
@@ -96,9 +103,11 @@ def login(
                 blob = mgr.user_key_blob(user.username)
         except NotFound as exc:
             audit(db, user.username, "login", ok=False, detail="没有密钥对")
-            raise HTTPException(
+            raise ApiError(
                 status.HTTP_409_CONFLICT,
+                "auth.no_keypair",
                 f"这个账号还没有密钥对（{exc}）—— 请管理员重建，或者跑 seed --reset",
+                reason=str(exc),
             ) from exc
 
         token = create_token(user, settings)
@@ -114,10 +123,6 @@ def login(
             #: 私钥密文 —— 浏览器用口令解开它。后端不留副本。
             "key_blob": blob,
             "key_pbkdf2_iters": blob.get("iters"),
-            "notice": (
-                "私钥密文已交给浏览器，解封在你的机器上用口令完成 —— "
-                "后端不解封、内存里也不留私钥。"
-            ),
             "timings": sw.payload(),
         }
 
@@ -134,20 +139,23 @@ def login(
         #    而这个故障本身是**无损可修**的 —— 私钥好端端在库里，只是外面那层
         #    包裹的口令不对。正确做法：用旧口令解封出来，再用新口令重新封装。
         audit(db, user.username, "login", ok=False, detail="私钥解封失败")
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_409_CONFLICT,
+            "auth.key_unseal_failed",
             "口令对了，但私钥解不开 —— 口令与私钥的包裹不同步"
             "（改口令时重新封装那一步没落地）。\n"
-            "  ⚠ 请不要删除重建这个账号：那会换掉密钥对，"
+            "  请不要删除重建这个账号：那会换掉密钥对，"
             "此人名下的文件将永久无法解密。\n"
             "  正确修法：用旧口令解封私钥，再用当前口令重新封装 —— "
             "私钥本身完好，文件一把都不会丢。",
         ) from exc
     except NotFound as exc:
         audit(db, user.username, "login", ok=False, detail="没有密钥对")
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_409_CONFLICT,
+            "auth.no_keypair",
             f"这个账号还没有密钥对（{exc}）—— 请管理员重建，或者跑 seed --reset",
+            reason=str(exc),
         ) from exc
 
     token = create_token(user, settings)
@@ -187,7 +195,12 @@ def register(
         select(UserRow).where(UserRow.username == body.username)
     ).scalar_one_or_none()
     if exists is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"用户 {body.username} 已存在")
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "users.exists",
+            f"用户 {body.username} 已存在",
+            username=body.username,
+        )
 
     user = UserRow(
         username=body.username,
@@ -231,19 +244,13 @@ def logout(
         #   所以“退出登录”必须让这张令牌真的不能用。
         mgr.revoke_token(creds.credentials)
     audit(db, user.username, "logout", ok=True)
-    # ★ 把“退出到底做了什么”如实告诉前端。
-    #   这不是客套话：JWT 收不回来，所以“登出”**不等于令牌失效**。
-    #   真正被丢掉的是内存里那把私钥（＝解密能力）。说清楚，
-    #   免得让人以为“我退了，别人拿着我的令牌就用不了了”。
+    # ★ 这里以前还回两个字段 ``what_happened`` 与 ``notice``（解释"退出到底做了什么"）。
+    #   2026-10-16 核实：前端**从来没显示过**它们（只有 profile 页一句过期的注释
+    #   说要弹 notice）。既然要说的那件事没有任何界面承载，就不再占据响应字段 ——
+    #   真要重新告知用户，文案应该写在前端（改措辞不必重启后端）。
     return {
         "ok": True,
         "token_still_valid": False,
-        "what_happened": "服务端丢掉了本次会话的私钥，并把这张令牌加进了撤销表",
-        "notice": (
-            "已退出：本机令牌已清除，服务端也丢掉了这次的会话私钥，"
-            "并把「这张令牌」作废了 —— 它从现在起通不过任何校验。\n"
-            "注意：如果你在别处还登录着，那些令牌各自独立，不受这张的影响。"
-        ),
     }
 
 

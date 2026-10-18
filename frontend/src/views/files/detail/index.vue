@@ -2,20 +2,20 @@
 /**
  * 文件详情 / 更新文件（★ 2026-10-12 拆页面：同一个组件两种形态，靠路由 meta 区分）。
  *
- *   · files-detail        → 「文件详情」：只读 —— 摘要与参数 / 封装过程 /
- *                            块分布矩阵 / 块明细；
- *   · files-update-detail → 「更新文件」：在上面的基础上多出更新 / 置零 /
- *                            追加 / 截断 / 回滚演示 / 解密验证。
+ *   · files-detail        → 「文件详情」：只读 —— 摘要与参数（含封装过程说明）/
+ *                            分布矩阵 + 分量明细；
+ *   · files-update-detail → 「更新文件」：在上面的基础上多出替换 / 置零 /
+ *                            追加 / 删除 / 回滚演示 / 解密验证。
  *
  * ★ 为什么复用同一个组件而不是拷一份：这些能力读的是**同一份状态**
  *   （file / layout / δ 本地锚），拆成两个文件就会各拉一次详情、各维护一份锚 ——
  *   迟早分叉。用一个形态开关，改动只有一份代码。
  *
- * - 文件元信息 + 版本 + delta_n / delta_fp。
- * - 块分布矩阵（layout[].replicas 标主/副本）。
- * - **块明细表**：每块的公开分量（指纹）—— 跟着「简略/详细」开关
+ * - 文件元信息 + 版本 + delta_n / 文件指纹。
+ * - 分布矩阵（layout[].replicas 标主/副本），与分量明细并排一行（1:3）。
+ * - **分量明细表**：每块的公开分量 —— 跟着「简略/详细」开关
  *   决定要不要铺出来；详细模式会把每块的分量一起要回来（`?elements=1`）。
- * - 改块 / 追加 / 截断（三个写操作都显示 timings）。
+ * - 替换 / 置零 / 追加 / 删除（四个写操作都显示 timings）。
  * - 解密预览（**浏览器本地解密 + 本地验证**；hex → hexToText，用 hasBadBytes 区分残缺）。
  */
 import { ref, reactive, computed, onMounted, watch } from 'vue'
@@ -57,7 +57,7 @@ const theme = useThemeStore()
 
 const id = computed(() => route.params.id)
 
-/** 更新形态（改块 / 追加 / 截断 / 回滚演示 / 解密验证）开关，见文件头的说明。 */
+/** 更新形态（替换 / 置零 / 追加 / 删除 / 回滚演示 / 解密验证）开关，见文件头的说明。 */
 const showOps = computed(() => route.meta?.ops === true)
 /** 返回按钮的去处：从哪进来就回哪去。 */
 const backTo = computed(() => (showOps.value ? '/files/update' : '/files'))
@@ -192,7 +192,7 @@ async function copyDelta(which) {
   if (!text) return
   try {
     await navigator.clipboard.writeText(text)
-    ElMessage.success(which === 'fp' ? 'δ 指纹已复制' : `承诺分量 ${which} 已复制`)
+    ElMessage.success(which === 'fp' ? '文件指纹已复制' : `承诺分量 ${which} 已复制`)
   } catch {
     ElMessage.error('复制失败：浏览器未授予剪贴板权限')
   }
@@ -413,12 +413,12 @@ async function doModify() {
     writeTimings.value = data.timings
     markWriteEnd(t0)
     // ★ 内容是我自己刚写进去的 —— 顺手把本地锚更新掉，下次看这块就有判据了。
-    await anchorBytes(idx, new TextEncoder().encode(text), data, '更新')
+    await anchorBytes(idx, new TextEncoder().encode(text), data, '替换')
     // ★ δ 变了（是**你自己**改的）—— 把本地钉的那一份丢掉，
     //   让下一次解密变成"重新见证"，而不是默默把新 δ 收下。
     dropDeltaAnchor(id.value)
     oldInfo.value = null
-    ElMessage.success(`已更新第 ${humanIdx(idx)} 个分块；当前为第 ${data.version} 版（本地锚已更新）`)
+    ElMessage.success(`已替换第 ${humanIdx(idx)} 个分块；当前为第 ${data.version} 版（本地锚已更新）`)
     await load()
   } catch {
   } finally {
@@ -497,9 +497,9 @@ async function doAppend() {
 async function doTruncate() {
   try {
     await ElMessageBox.confirm(
-      `确认截断末尾 ${dropBlocks.value} 个分块。该操作不可撤销。`,
+      `确认删除末尾 ${dropBlocks.value} 个分块。该操作不可撤销。`,
       '二次确认',
-      { type: 'warning', confirmButtonText: '截断', cancelButtonText: '取消' },
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -513,7 +513,7 @@ async function doTruncate() {
     writeTimings.value = data.timings
     markWriteEnd(t0)
     dropDeltaAnchor(id.value)
-    ElMessage.success(`已截断末尾 ${data.dropped_blocks} 个分块`)
+    ElMessage.success(`已删除末尾 ${data.dropped_blocks} 个分块`)
     await load()
   } catch {
   } finally {
@@ -659,13 +659,13 @@ const replayBusy = ref(false)
 
 async function toggleReplay() {
   const on = replayArmed.value === null
-  // ★ 打开前问一次（与清零 / 截断同一手法）：这是**故意让验证不通过**的开关，
+  // ★ 打开前问一次（与置零 / 删除同一手法）：这是**故意让验证不通过**的开关，
   //   而且是发生在服务端的真改动（它真的会把旧版本交回）。
   if (on) {
     try {
       await ElMessageBox.confirm(
         `自此刻起，服务端将对第 ${humanIdx(replayIdx.value)} 个分块返回「当前版本」的旧密文。\n\n` +
-          '服务端会先留存该分块的当前内容；此后你更新该分块并执行解密时，服务端将返回旧的密文，' +
+          '服务端会先留存该分块的当前内容；此后你替换该分块并执行解密时，服务端将返回旧的密文，' +
           '于是浏览器重算的分量与当前基准不一致，验证不通过。\n\n' +
           '本功能用于演示「服务端不可信」，不会破坏数据；点击「关闭」即可恢复。',
         '开启回滚演示',
@@ -683,7 +683,7 @@ async function toggleReplay() {
       type: on ? 'warning' : 'success',
       duration: 6000,
       message: on
-        ? `自此刻起，服务端将对第 ${humanIdx(replayIdx.value)} 个分块返回「当前版本」的旧密文。请更新该分块后执行解密。`
+        ? `自此刻起，服务端将对第 ${humanIdx(replayIdx.value)} 个分块返回「当前版本」的旧密文。请替换该分块后执行解密。`
         : '已恢复：服务端重新返回当前版本。',
     })
   } catch (e) {
@@ -716,26 +716,31 @@ onMounted(load)
           <LockTag :can-decrypt="file.can_decrypt" />
         </div>
         <div class="kv-grid">
-          <div class="kv"><span class="k">文件</span><span class="v mono">{{ file.owner }} / {{ file.file_key }}</span></div>
+          <div class="kv"><span class="k">文件持有者</span><span class="v mono">{{ file.owner }}</span></div>
+          <div class="kv"><span class="k">文件标识</span><span class="v mono">{{ file.file_key }}</span></div>
           <div class="kv"><span class="k">大小</span><span class="v mono">{{ fmtBytes(file.total_bytes) }}</span></div>
           <div class="kv"><span class="k">块数 n</span><span class="v mono">{{ file.block_count }}</span></div>
-          <div class="kv"><span class="k">段大小</span><span class="v mono">{{ file.segment_bytes }} B</span></div>
+          <div class="kv"><span class="k">分块大小</span><span class="v mono">{{ file.segment_bytes }} B</span></div>
           <div class="kv"><span class="k">版本</span><span class="v mono">v{{ file.version }}</span></div>
           <div class="kv"><span class="k">创建时间</span><span class="v mono">{{ fmtTime(file.created_at) }}</span></div>
-          <div class="kv"><span class="k">当前全局块数 δ_n</span><span class="v mono">{{ file.delta_n }}</span></div>
+          <!-- ★ 这里显示的是 ``store.n``（全系统在用块数），**不是**本文件的 n
+               （本文件的 n 就在上面「块数 n」那一行）。它只用来描述系统规模。 -->
+          <div class="kv"><span class="k">全系统在用块数</span><span class="v mono">{{ file.delta_n }}</span></div>
           <div class="kv">
             <span class="k">位置段（全局编号）</span>
             <span class="v mono">{{ span(file.indices) }}</span>
           </div>
-          <!-- ★ δ 指纹是**逐文件**的：它由本文件承诺的 U / C 与长度决定，用来判定
-               「这份文件的证据还行吗」。悬浮给出本文件承诺的完整 U / C。 -->
+          <!-- ★ 两个东西别再叫混（用户口径）：
+               · δ = (U, C, n) —— 本文件的公开承诺，就这两个群元素加一个块数；
+               · **文件指纹** —— δ 的短摘要 sha256(U, C, n)[:12]，界面只需这一串。
+               悬浮/点开看完整承诺。 -->
           <div class="kv kv-full">
-            <span class="k">δ 指纹（本文件）</span>
+            <span class="k">文件指纹</span>
             <button
               type="button"
               class="v mono fp-link"
               :disabled="!file.delta_U"
-              title="点击查看完整承诺 U / C"
+              title="点击查看完整承诺 δ = (U, C, n)"
               @click="deltaDialogOpen = true"
             >{{ file.file_delta_fp }}</button>
           </div>
@@ -746,45 +751,54 @@ onMounted(load)
         <details class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            δ_n 是全系统当前的聚合承诺向量长度，与单个文件无关；证据 π_I 与之绑定，
-            因此任何一次上传都会使此前的证据失效；判断既有证据是否仍然有效应以 δ 指纹为准。
+            <b>δ = (U, C, n)</b> 是本文件对外公开的承诺：<b>U</b> 记录位置集合（累加器），
+            <b>C</b> 把每个位置的分量按它的权重连乘，<b>n</b> 是本文件的分块数。
+            界面上那个<b>文件指纹</b>是它的短摘要 —— sha256(U, C, n) 的前 12 位，仅供快速比对；
+            要核对完整承诺，点指纹看 U 与 C 的完整值。
+            全系统在用块数是各文件的块数之和（删文件或截断留下的空洞不计入，位置编号永不回收），
+            它描述系统规模，<b>不是</b>本文件的 n。
+            判断本文件的既有证据是否仍然有效，应以<b>文件指纹</b>为准：
+            它由本文件的 U / C 与其块数 n 决定，别的文件上传或改写都不改变它，
+            因此不会使本文件的证据失效；使本文件证据失效的，只有本文件自己的写操作。
             上传的摘要是入库时刻整份明文的摘要，文件内容更新后不会变动；
             文件当前的版本应以版本号为准。
           </p>
+          <!-- ★ 封装过程原来单独占一个面板；现在收进本来就该讲这件事的「说明」里 ——
+               它是上面那几行参数的来源，不属于需要一直铺在屏上的东西。 -->
+          <p class="note"><b>封装过程</b>：这份文件从明文到一份可验证的承诺，实际走了下面六步。</p>
+          <ol class="steps">
+            <li><b>分块</b><span>明文按分块大小切分为 {{ file.block_count }} 个分块，每个分块的长度不超过 {{ file.segment_bytes }} 字节。</span></li>
+            <li><b>逐块加密</b><span>每个分块使用独立的随机块密钥（SM4）加密；块密钥再以所有者的 SM2 公钥封装，仅所有者可解封装。</span></li>
+            <li><b>计算分量</b><span>每个分块在向量中占一个位置。分块是数据单位，分量是该分块在这个位置上对外公开的坐标值：公开分量 = SM3(该分块的密文)，由密文唯一确定。</span></li>
+            <li><b>形成承诺</b><span>各分块的分量按其身份映射到素数，聚合为 δ = (U, C, n)：U 记位置集合、C 记加权连乘、n 为分块数，两个群元素合计不超过 256 字节，与文件大小无关。</span></li>
+            <li><b>分散存放</b><span>{{ file.block_count }} 个分块按副本因子分布到各存储节点<span v-if="!showOps">（见下方分布矩阵）</span>。</span></li>
+            <li><b>按需生成凭证</b><span>要验证指定分块集合仍然存在，即对集合 I 生成凭证 π_I；验证仅使用 δ、π_I 与分块编号，无需明文。</span></li>
+          </ol>
           <p v-if="showOps" class="note">
-            <b>更新</b>（替换指定分块的内容）、
+            <b>替换</b>（改写指定分块的内容）、
             <b>置零</b>（将指定分块替换为等长的全 0 字节）、
             <b>追加</b>（在向量末尾增加分块）、
-            <b>截断</b>（移除本文件位置段的末尾部分）。
+            <b>删除</b>（移除本文件位置段的末尾部分）。
             四种操作都会重新加密受影响的分块、使版本号递增 1，并记入审计。
           </p>
         </details>
       </div>
 
-      <!-- 封装过程：这份文件从明文到证据实际走了哪几步（数字都是真的，不是示意图）。 -->
-      <div class="panel mb-3">
-        <h4 class="sec-title">封装过程</h4>
-        <ol class="steps">
-          <li><b>分块</b><span>明文按段大小切分为 {{ file.block_count }} 个分块，每个分块的长度不超过 {{ file.segment_bytes }} 字节。</span></li>
-          <li><b>逐块加密</b><span>每个分块使用独立的随机块密钥（SM4）加密；块密钥再以所有者的 SM2 公钥封装，仅所有者可解封装。</span></li>
-          <li><b>计算分量</b><span>每个分块在向量中占一个位置。分块是数据单位，分量是该分块在这个位置上对外公开的坐标值：公开分量 = SM3(该分块的密文)，由密文唯一确定。</span></li>
-          <li><b>形成承诺</b><span>各分块的分量按其身份映射到素数，聚合为 δ = (U, C) 两个群元素，与文件大小无关，恒不超过 256 字节。</span></li>
-          <li><b>分散存放</b><span>{{ file.block_count }} 个分块按副本因子分布到各存储节点<span v-if="!showOps">（见下方块分布矩阵）</span>。</span></li>
-          <li><b>按需生成证据</b><span>要证明指定分块集合仍然存在，即对集合 I 生成证据 π_I；验证仅使用 δ、π_I 与分块编号，无需明文。</span></li>
-        </ol>
-      </div>
-
-      <div v-if="!showOps" class="panel mb-3">
-        <h4 class="sec-title">块分布矩阵</h4>
-        <BlockMatrix :nodes="nodes" :layout="file.layout" />
-      </div>
-
-      <!-- 块明细：每一块的**公开分量**就是它的指纹。 -->
-      <div v-if="!showOps" class="panel mb-3">
-        <div class="sec-head">
-          <h4 class="sec-title" style="margin-bottom: 0">块明细（各分块的公开分量）</h4>
-          <DetailToggle />
+      <!-- 分布矩阵（左，约 1/4）与分量明细（右，3/4）并排一行：
+           矩阵只看「哪块在哪台」，格子很小，独占一行太浪费；两者又是同一件事的
+           两个视角（矩阵看位置、明细看内容），排在一起对照着看最方便。 -->
+      <div v-if="!showOps" class="matrix-row mb-3">
+        <div class="panel">
+          <h4 class="sec-title">分布矩阵</h4>
+          <BlockMatrix :nodes="nodes" :layout="file.layout" />
         </div>
+
+        <!-- 分量明细：每一块的**公开分量**就是它在这个位置上的坐标值。 -->
+        <div class="panel">
+          <div class="sec-head">
+            <h4 class="sec-title" style="margin-bottom: 0">分量明细</h4>
+            <DetailToggle />
+          </div>
         <BlockPreviewBar
           :total="(file.layout || []).length"
           :limit="BLOCK_PREVIEW_LIMIT"
@@ -837,6 +851,7 @@ onMounted(load)
             将指针悬停在分量上可查看完整值。
           </p>
         </details>
+        </div>
       </div>
 
       <!-- 这两块都是「对当前版本动手」的操作：左边把分块换回上一版本，
@@ -855,7 +870,7 @@ onMounted(load)
         </div>
 
         <p class="text-2" style="font-size: 13px; margin-top: 4px">
-          每次更新或置零之前，该分块当时的完整本体（密文、IV、分量、块密钥密文、长度）
+          每次替换或置零之前，该分块当时的完整本体（密文、IV、分量、块密钥密文、长度）
           会被自动留存一份，留存的是本体而非哈希。当节点数据丢失、或当前版本与基准不符时，
           将其替换为上一版本、重新计算分量并重新承诺，验证即可通过。
         </p>
@@ -866,7 +881,7 @@ onMounted(load)
           :closable="false"
           class="mb-2"
           title="当前没有可回退的版本"
-          description="执行一次更新或置零后，被替换下来的版本才会成为「上一版本」。每个分块只保留一份（当前版本 + 上一版本）。"
+          description="执行一次替换或置零后，被换下来的版本才会成为「上一版本」。每个分块只保留一份（当前版本 + 上一版本）。"
         />
 
         <div v-else v-loading="historyLoading" class="rev-list">
@@ -939,7 +954,7 @@ onMounted(load)
           </el-button>
         </div>
         <p v-if="decryptResult?.replayedBlocks?.length" class="note text-danger" style="margin-bottom: 0">
-          本次服务端返回的是<b>第 {{ humanList(decryptResult.replayedBlocks).join('、') }} 个分块</b>的<b>旧版本</b>（更新前的那一版），
+          本次服务端返回的是<b>第 {{ humanList(decryptResult.replayedBlocks).join('、') }} 个分块</b>的<b>旧版本</b>（替换前的那一版），
           因此上方的本地验证未通过。该情形属于<b>版本回滚</b>，而非数据损坏。
         </p>
 
@@ -947,7 +962,7 @@ onMounted(load)
           <summary>演示步骤</summary>
           <ol class="demo-steps">
             <li>在此填入分块序号，点击「开启演示」：服务端记下该分块此刻的密文。</li>
-            <li>到下方「更新」标签页改写这一块（内容随意），使密文与刚才记下的不同。</li>
+            <li>到下方「替换」标签页改写这一块（内容随意），使密文与刚才记下的不同。</li>
             <li>点击「解密并本地验证」：会看到本地验证未通过，并指出服务端返回的是哪一版的旧数据。</li>
             <li>点击「关闭演示」即可恢复，服务端重新返回当前版本。</li>
           </ol>
@@ -965,7 +980,7 @@ onMounted(load)
           description="块密钥以文件所有者的 SM2 公钥封装，其他主体（包括管理员）均无法解封装，因而无法修改。该限制来自密码学上的不可行性，与权限设置无关。"
         />
         <el-tabs v-else v-model="activeOp" class="ops-tabs">
-          <el-tab-pane label="更新" name="modify">
+          <el-tab-pane label="替换" name="modify">
             <div class="write-form">
               <div>
                 <span class="text-2">分块序号：</span>
@@ -1055,7 +1070,7 @@ onMounted(load)
               </div>
 
               <el-input v-model="modifyForm.text" type="textarea" :rows="3" placeholder="新内容（将重新加密并更换块密钥）" />
-              <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doModify">更新</el-button>
+              <el-button type="primary" :disabled="!isMine" :loading="writeRunning" @click="doModify">替换</el-button>
             </div>
             <details class="note-collapse">
               <summary>说明</summary>
@@ -1083,10 +1098,12 @@ onMounted(load)
             <details class="note-collapse">
               <summary>说明</summary>
               <p class="note">
-                「置零」将指定分块的内容替换为<strong>等长的全 0 字节</strong>：其操作类型为更新
-                （<span class="mono">op = mod</span>）而非删除，因此分块仍然存在、下标不变、总块数不变，
+                「置零」将指定分块的内容替换为<strong>等长的全 0 字节</strong>：其操作类型为改写
+                （论文 §8.2 的 <span class="mono">op = mod</span>；对应接口里的
+                <span class="mono">op = "zero"</span>）而非删除（<span class="mono">op = del</span>），
+                因此分块仍然存在、下标不变、总块数不变，
                 完整性校验仍可通过；全 0 内容仅在解封装后可见。
-                若需将某分块从向量中移除，只能截断<strong>末尾</strong>位置段（见「截断」）。
+                若需将某分块从向量中移除，只能删除<strong>末尾</strong>位置段（见「删除」）。
               </p>
             </details>
           </el-tab-pane>
@@ -1102,17 +1119,18 @@ onMounted(load)
               </p>
             </details>
           </el-tab-pane>
-          <el-tab-pane label="截断" name="truncate">
+          <el-tab-pane label="删除" name="truncate">
             <div class="write-form">
               <div>
-                <span class="text-2">截断末尾分块数：</span>
+                <span class="text-2">删除末尾分块数：</span>
                 <el-input-number v-model="dropBlocks" :min="1" :max="Math.max(1, file.block_count - 1)" />
               </div>
-              <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">截断</el-button>
-              <el-alert type="warning" :closable="false" class="trunc-warn" title="仅截断本文件位置段的末尾">
+              <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">删除</el-button>
+              <el-alert type="warning" :closable="false" class="trunc-warn" title="仅删除本文件位置段的末尾">
                 <template #default>
-                  <p style="font-size: 13px">① 当前方案下每份文件各占独立的位置段，因此截断仅移除本文件位置段的末尾部分，不影响其他文件；旧设计中「删除中间一份需连带删除其后全部」的限制已不再适用（若该文件本身不在全局末尾，服务端将返回 400）。</p>
-                  <p style="font-size: 13px">② 不允许截断至零个分块（整份删除属于另一操作）。此操作不可撤销。</p>
+                  <p style="font-size: 13px">① 每份文件各占一段独立的位置，删除只作用于本文件位置段的末尾：本文件之外的块一个字节都不动，因此不存在「删中间一份要连带删掉其后全部」的连带删除；本文件自己的中间块同样删除不了 —— 那需要重编号、重新承诺。</p>
+                  <p style="font-size: 13px">② 与写入顺序无关：旧坐标（全局素数表）下必须删“当前向量末尾”，所以那时只有最后写进向量的那份文件删得动尾巴；新坐标（块身份派生素数）下每份文件各占一段，这条限制已不存在 —— 后面压着别人后写的块，也照样删得动。</p>
+                  <p style="font-size: 13px">③ 不允许删除至零个分块（整份文件的删除是另一个操作）。此操作不可撤销。</p>
                 </template>
               </el-alert>
             </div>
@@ -1194,7 +1212,7 @@ onMounted(load)
               :closable="false"
               class="mb-2"
               :title="`分块边界处存在不完整字符（head=${decodePreview.head}, tail=${decodePreview.tail}）`"
-              description="更新该分块会破坏相邻分块边界处字符的完整性。"
+              description="替换该分块会破坏相邻分块边界处字符的完整性。"
             />
             <el-alert
               v-if="hasBadBytes(decryptResult.hex)"
@@ -1224,11 +1242,12 @@ onMounted(load)
       top="8vh"
       class="delta-dialog"
       append-to-body
-      title="文件承诺 δ = (U, C)"
+      title="文件承诺 δ = (U, C, n)"
     >
       <p class="dd-lead">
-        这是本文件当前公开承诺的完整值，在库里只占两个群元素（合计不超过 256 字节）。
-        界面上那个「δ 指纹」是它的短摘要 —— sha256("U:C:n") 的前 12 位，仅供快速比对；
+        这是本文件当前公开承诺的完整值：<b>U</b> 记位置集合、<b>C</b> 记加权连乘、
+        <b>n</b> 是本文件分块数，在库里只占两个群元素（合计不超过 256 字节）。
+        界面上那个「文件指纹」是它的短摘要 —— sha256(U, C, n) 的前 12 位，仅供快速比对；
         若要核对完整承诺，请以这里的 U 与 C 为准。
       </p>
 
@@ -1251,7 +1270,7 @@ onMounted(load)
       </div>
 
       <div class="dd-foot">
-        <span class="dd-hint">δ 指纹 = sha256("U:C:n") 的前 12 位</span>
+        <span class="dd-hint">文件指纹 = sha256(U, C, n) 的前 12 位</span>
         <span class="mono">{{ file?.file_delta_fp || '—' }}</span>
         <el-button link type="primary" size="small" @click="copyDelta('fp')">复制指纹</el-button>
       </div>
@@ -1357,6 +1376,24 @@ onMounted(load)
   font-weight: 500;
   margin-right: 8px;
 }
+/* 分布矩阵（左，约 1/4）与分量明细（右，3/4）并排一行。
+   矩阵一格只有一个 12px 的点，占满一整行纯属浪费；窄屏落回单列，
+   免得矩阵被压到只剩一条缝。 */
+.matrix-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+  gap: 16px;
+  align-items: start;
+}
+/* 网格项默认 min-width:auto，内部表格一宽就顶出去 —— 显式放开，让它自己滚。 */
+.matrix-row > .panel {
+  min-width: 0;
+}
+@media (max-width: 1100px) {
+  .matrix-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 /* 回退面板：一行一块 */
 .rev-list {
   display: flex;
@@ -1428,7 +1465,7 @@ onMounted(load)
 }
 .demo-steps li { margin-bottom: 2px; }
 
-/* δ 指纹：按钮外观做成链接，点开看完整承诺 U / C。
+/* 文件指纹：按钮外观做成链接，点开看完整承诺 U / C。
    选择器带上 .kv .v 是为了盖过 .kv .v 里定死的正文色（同权重时后者会赢）。 */
 .kv .v.fp-link {
   border: none;
@@ -1442,7 +1479,7 @@ onMounted(load)
 .kv .v.fp-link:disabled { color: var(--text-3); cursor: default; border-bottom-style: dotted; }
 .kv .v.fp-link:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
 
-/* 四个写操作（更新 / 追加 / 截断 / 置零）：做成小卡片，选中的那张拿出来。
+/* 四个写操作（替换 / 置零 / 追加 / 删除）：做成小卡片，选中的那张拿出来。
    字号比正文大一号；悬停上浮、选中亮起并带光晕，替换掉默认的下划线指示器。 */
 .ops-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
 .ops-tabs :deep(.el-tabs__nav-wrap::after) { display: none; }
@@ -1451,8 +1488,8 @@ onMounted(load)
   height: 34px;
   line-height: 34px;
   /* ★ 必须带 !important：Element Plus 会把**首项**的左侧、**末项**的右侧内边距
-     单独清零（原本是为了让下划线指示器贴边）。做成卡片之后这会让「更新」偏左、
-     「截断」偏右 —— 那两条规则的选不中（首项实际不是 :first-child，
+     单独清零（原本是为了让下划线指示器贴边）。做成卡片之后这会让「替换」偏左、
+     「删除」偏右 —— 那两条规则的选不中（首项实际不是 :first-child，
      active-bar 占了一位），所以只能整项盖掉。 */
   padding: 0 16px !important;
   margin-right: 8px;
@@ -1478,7 +1515,7 @@ onMounted(load)
   box-shadow: 0 3px 14px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 /* ★ Element Plus 会把**首项**的左侧与**末项**的右侧内边距清零（原本是为了让
-   下划线指示器贴边）；改成卡片之后，这会让「更新」偏左、「截断」偏右 —— 已在
+   下划线指示器贴边）；改成卡片之后，这会让「替换」偏左、「删除」偏右 —— 已在
    上面用 !important 一并盖掉，这里不再需要伪类规则。 */
 @media (prefers-reduced-motion: reduce) {
   .ops-tabs :deep(.el-tabs__item) { transition: none; }

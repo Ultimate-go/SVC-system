@@ -33,31 +33,34 @@ function toggle() {
  * 管理类页面进去的频次低）。
  * ★ 数组顺序就是界面顺序 —— 这里换位不需要动 routes.js。
  *
- * 权限口径（2026-10-12 调整）：总览与性能**对全体用户开放**，
- * 因此从「管理」组移入「核心」组。
- * ★ 2026-10-13：两个管理员项收进一个可展开入口「管理员控制台」——
- *   管理类页面进去的频次低，平铺两格既占地方，也和核心项混在一起。
+ * 顺序（2026-10-16 定）：总览 → 上传文件 → 可验证查询 → 增量聚合与分解 → 更新文件。
+ *   「上传文件」后面直接跟「可验证查询」与「增量聚合与分解」：传上去就要能验、
+ *   能在聚合面板里看；「更新文件」是同一件事的下一半，但用到的时机晚，排在增量聚合与分解之后。
+ * ★ 2026-10-16：「性能」从核心菜单里去掉 —— 它的内容整体搬进了「总览」。
+ * ★ 2026-10-16：「存储节点」也从核心菜单里去掉，改挂在**管理员工作台**下面。
+ *   理由：它不是普通用户的操作面（看一眼哪台在线并不能改变什么），而调台数与端口
+ *   本来就是管理员动作；演示也从「登录管理员 → 系统初始化」开始，节点那页跟在管理组里更顺。
  */
 const core = {
   items: [
     { path: '/', name: 'dashboard', icon: 'dashboard', label: '总览', exact: true },
     { path: '/files', name: 'files', icon: 'file', label: '上传文件' },
-    // ★ 2026-10-12：「更新文件」紧跟在「上传文件」后面（同一件事的下一半 ——
-    //   先传进来，之后要改就进这一页），与「完整性验证」并列。
+    { path: '/evidence/query', name: 'query', icon: 'shield', label: '可验证查询' },
+    { path: '/evidence/aggregate', name: 'aggregate', icon: 'list', label: '增量聚合与分解' },
     { path: '/files/update', name: 'files-update', icon: 'refresh', label: '更新文件' },
-    { path: '/evidence/verify', name: 'verify', icon: 'shield', label: '完整性验证' },
-    { path: '/evidence/pool', name: 'pool', icon: 'list', label: '证据池' },
-    // ★ 2026-10-13：菜单名统一为「存储节点」（页面标题、面包屑同步）。
-    { path: '/devices', name: 'devices', icon: 'server', label: '存储节点' },
-    { path: '/perf', name: 'perf', icon: 'chart', label: '性能' },
   ],
 }
 
-/** 管理员控制台：一个可展开的入口，展开后是它下面的两页。 */
+/** 管理员工作台：一个可展开的入口，展开后是它下面的四页。 */
 const adminConsole = {
-  label: '管理员控制台',
+  label: '管理员工作台',
   icon: 'lock',
   items: [
+    // ★ 2026-10-16 新增：原总览里的初始化现状与密钥模型都收在这一页，
+    //   初始化流水线与参数选择也在这一页的最上面。
+    { path: '/init', name: 'init', icon: 'key', label: '系统初始化' },
+    // ★ 2026-10-16 从核心菜单移过来（菜单名与页面标题统一为「存储节点」）。
+    { path: '/devices', name: 'devices', icon: 'server', label: '存储节点' },
     { path: '/users', name: 'users', icon: 'users', label: '用户管理' },
     { path: '/audit', name: 'audit', icon: 'activity', label: '审计流水' },
   ],
@@ -132,7 +135,7 @@ function go(item) {
         <span class="nav-item-txt">{{ item.label }}</span>
       </button>
 
-      <!-- 管理员控制台：点标题行展开 / 收起，展开后是它下面的两页。 -->
+      <!-- 管理员工作台：点标题行展开 / 收起，展开后是它下面的三页。 -->
       <template v-if="isAdmin">
         <div class="nav-divider" />
         <button
@@ -300,7 +303,7 @@ function go(item) {
   transform: scaleY(1);
 }
 
-/* 管理员控制台：标题行右侧的箭头，展开时转向下方 */
+/* 管理员工作台：标题行右侧的箭头，展开时转向下方 */
 .nav-caret {
   margin-left: auto;
   flex-shrink: 0;
@@ -312,7 +315,10 @@ function go(item) {
   opacity: 1;
 }
 
-/* 展开容器：用 max-height 过渡（不依赖子项个数，也不受 grid 子元素限制） */
+/* 展开容器：用 max-height 过渡（不依赖子项个数，也不受 grid 子元素限制）。
+   ★ 这个上限是**过渡用的假上限**，必须比展开后的真实高度大 —— 它不会
+     自动量，写小了就是把最后几项裁掉。四页 × (约 40px + 2px 边距) ≈ 170px，
+     原来写 140px，第四个「审计流水」只露出半截（实测）。留到 240px。 */
 .nav-sub {
   max-height: 0;
   overflow: hidden;
@@ -320,7 +326,7 @@ function go(item) {
   transition: max-height 0.22s ease, opacity 0.18s ease;
 }
 .nav-sub.open {
-  max-height: 140px;
+  max-height: 240px;
   opacity: 1;
 }
 /* 子项相对父项缩进一格（收起成图标轨时会被下面那条规则改回同一中线） */

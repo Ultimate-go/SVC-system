@@ -56,7 +56,7 @@ const isDark = computed(() => theme.theme === 'dark')
           <div class="desc">
             详细展示每一块的分量指纹（停在指纹上显示完整十六进制）；
             简略只展示块号、下标与结论；
-            文件详情 / 证据池 / 完整性验证三页共用同一偏好
+            文件详情 / 增量聚合与分解 / 可验证查询三页共用同一偏好
           </div>
         </div>
         <el-radio-group :model-value="theme.detailMode" @change="(v) => theme.setDetail(v)">

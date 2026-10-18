@@ -198,14 +198,15 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
       <section class="project-intro" :class="{ 'is-visible': showDescription }" aria-label="项目简介">
         <div class="intro-tag mono">VERIFIABLE · DECENTRALIZED · CRYPTOGRAPHIC</div>
         <h2>基于增量聚合向量承诺的<br />可验证分布式存储与查询系统</h2>
-        <p>
-          <h3>密码基石，构筑信任</h3>
-          <br>
-        </p>
+        <!-- ★ 这里原来是 ``<p><h3>…</h3><br></p>``：h3 不是 p 的合法子元素，
+             浏览器会**自动把 p 合上**（渲染结果与写成兄弟节点一样），Vite 也会报
+             “<h3> cannot be child of <p>”。直接去掉那层 p，渲染不变、告警消失。 -->
+        <h3>密码基石，构筑信任</h3>
+        <br>
         <ul>
           <li><span class="intro-dot" />非中心化存储</li>
           <li><span class="intro-dot" />证据恒为两个群元素（≤ 256 字节）</li>
-          <li><span class="intro-dot" />所有人可验证，只有持有者可解密</li>
+          <li><span class="intro-dot" />所有人可验证，只有所有者可解密</li>
           <li><span class="intro-dot" />承诺公开，可聚合可拆分</li>
         </ul>
       </section>

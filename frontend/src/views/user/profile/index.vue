@@ -18,6 +18,7 @@ import PageHeader from '../../../components/common/PageHeader.vue'
 import KeyStatusTag from '../../../components/security/KeyStatusTag.vue'
 import PubKeyFingerprint from '../../../components/security/PubKeyFingerprint.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
+import AccountParamsDialog from '../../../components/security/AccountParamsDialog.vue'
 
 const auth = useAuthStore()
 /** 浏览器侧的私钥状态（私钥只活在内存，见 stores/crypto.js）。 */
@@ -32,6 +33,10 @@ const changeTimings = ref(null)
 const changeElapsed = ref(0)
 
 const user = computed(() => auth.user)
+
+/** 手动打开「本账号的加密参数」弹窗。与自动弹的那一次**两回事** ——
+ *  这里不接 `@seen`，所以不会改动“只弹一次”的记录，想反复看就反复点。 */
+const paramsOpen = ref(false)
 
 /* ---------------------------------------------------------------------------
    SM2 密钥对展示
@@ -155,6 +160,10 @@ onMounted(() => {
   <div>
     <PageHeader title="个人中心">
       <div class="actions">
+        <!-- ★ 同一个「本账号的加密参数」弹窗这里有第二个入口。
+             它**不**改那条“只弹一次”的记录（不接 @seen）——
+             这里是手动看的，弹窗是自动弹的，两件事。 -->
+        <el-button @click="paramsOpen = true">查看账户参数</el-button>
         <el-button :loading="loading" @click="refresh">刷新</el-button>
         <el-button type="danger" @click="logout">退出登录</el-button>
       </div>
@@ -245,6 +254,8 @@ onMounted(() => {
         <p class="note">修改口令会重新生成并保存密钥</p>
       </details>
     </div>
+
+    <AccountParamsDialog v-model="paramsOpen" :user="user" />
   </div>
 </template>
 

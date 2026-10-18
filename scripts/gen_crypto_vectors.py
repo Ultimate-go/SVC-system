@@ -37,6 +37,7 @@ if str(ROOT) not in sys.path:
 
 from core.crypto import encrypt_segment, sm3_digest, vector_element  # noqa: E402
 from core.keywrap import (  # noqa: E402
+    block_aad,
     new_keypair,
     public_bytes,
     unwrap_key,
@@ -135,14 +136,32 @@ def sm2_vectors() -> dict:
 
 
 def block_key_vectors() -> list[dict]:
-    """块密钥封装 —— 前端写不出这格式，但必须**解得开**它。"""
+    """块密钥封装 —— 前端写不出这格式，但必须**解得开**它。
+
+    ★ 从 ``sm2-ecies-v2`` 起，解封要求调用方给出**同一个块身份**
+      （``owner`` / ``file_key`` / ``block_idx`` + 数据段 IV），所以这四项
+      必须一起进向量 —— 少一项前端就重建不出 AAD，也就解不开。
+    """
     out = []
-    for seed in (0x00, 0x55, 0xFF):
+    for i, seed in enumerate((0x00, 0x55, 0xFF)):
         sk, pk = new_keypair()
         key = bytes([seed]) * 16
-        ct = wrap_key(pk, key)
-        assert unwrap_key(sk, ct) == key  # 先自证一遍
-        out.append({"sk": str(sk), "key_hex": _h(key), "ct": ct})
+        owner, file_key, block_idx = "vds-probe", "vec", i
+        iv = bytes([0x40 + i]) * 16
+        aad = block_aad(owner, file_key, block_idx, iv)
+        ct = wrap_key(pk, key, aad=aad)
+        assert unwrap_key(sk, ct, aad=aad) == key  # 先自证一遍
+        out.append(
+            {
+                "sk": str(sk),
+                "key_hex": _h(key),
+                "ct": ct,
+                "owner": owner,
+                "file_key": file_key,
+                "block_idx": block_idx,
+                "data_iv_hex": _h(iv),
+            }
+        )
     return out
 
 
@@ -240,6 +259,9 @@ def client_pack() -> dict:
     crs_n = specialize(crs, 8)
 
     sk_owner, pk_owner = new_keypair()
+    #: 这份合成 pack 的文件身份 —— 必须与下面写进 pack 的 ``owner`` / ``file_key`` 一致，
+    #: 因为前端会拿 pack 里那两个字段 + 块号 + 数据段 IV 重建 AAD 去解封块密钥。
+    pack_owner, pack_key = "probe", "pack"
     plains = [b"hello-vds-pack", bytes(range(48)), b"X" * 70]
     blocks = []
     vals = []
@@ -257,7 +279,9 @@ def client_pack() -> dict:
                 "ciphertext_hex": ct.hex(),
                 "iv_hex": iv.hex(),
                 "plain_len": len(pt),
-                "key_ct": wrap_key(pk_owner, key),
+                "key_ct": wrap_key(
+                    pk_owner, key, aad=block_aad(pack_owner, pack_key, i, iv)
+                ),
                 "element": str(vals[-1]),
                 "holder": "node-1",
             }
@@ -276,8 +300,8 @@ def client_pack() -> dict:
         "plains_hex": [p.hex() for p in plains],
         "keys_hex": [k.hex() for k in keys],
         "pack": {
-            "owner": "probe",
-            "file_key": "pack",
+            "owner": pack_owner,
+            "file_key": pack_key,
             "offset": 0,
             "n": 8,
             "segment_bytes": 1024,

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
+from .errors import ApiError
 from .manager import StoreManager
 from .models import AuditRow, UserRow
 from .security import TokenError, decode_token
@@ -22,7 +23,6 @@ __all__ = [
     "current_token",
     "require_admin",
     "audit",
-    "http_error",
 ]
 
 _bearer = HTTPBearer(auto_error=False)
@@ -62,17 +62,21 @@ def current_user(
     mgr: StoreManager = Depends(get_manager),
 ) -> UserRow:
     if creds is None or not creds.credentials:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少令牌，请先登录")
+        raise ApiError(status.HTTP_401_UNAUTHORIZED, "auth.no_token", "缺少令牌，请先登录")
     try:
         claims = decode_token(creds.credentials, settings)
     except TokenError as exc:
+        # ★ 不挂 code：这是 ``backend/security.py`` 里抛出的原文透传（
+        #   “令牌已过期” / “签名不对”…），界面回退用 detail（见 backend/errors.py
+        #   里“边界”那一段）。
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
 
     # ★ 这张令牌被作废了吗（安全审计 I1）：`logout` 之后它必须**真的**不能用，
     #   否则“退出登录”只挡住了解密，而上传/改块/删除照样能发。
     if mgr.is_token_revoked(claims):
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_401_UNAUTHORIZED,
+            "auth.token_revoked",
             "这张令牌已被作废（已退出登录），请重新登录",
         )
 
@@ -81,15 +85,21 @@ def current_user(
         select(UserRow).where(UserRow.username == username)
     ).scalar_one_or_none()
     if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在")
+        raise ApiError(status.HTTP_401_UNAUTHORIZED, "auth.user_gone", "用户不存在")
     if user.disabled:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已被停用")
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "auth.account_disabled",
+            "账号已被停用",
+        )
     return user
 
 
 def require_admin(user: UserRow = Depends(current_user)) -> UserRow:
     if user.role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN, "auth.admin_required", "需要管理员权限"
+        )
     return user
 
 
@@ -107,7 +117,3 @@ def audit(
         AuditRow(actor=actor, action=action, target=target, ok=ok, detail=detail[:2000])
     )
     db.commit()
-
-
-def http_error(code: int, message: str) -> HTTPException:
-    return HTTPException(code, message)

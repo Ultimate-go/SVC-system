@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 
 import { bytesToBigInt, bytesToHex, hexToBytes } from '../src/utils/crypto/bytes.js'
 import { elementOf, publicKeyOf } from '../src/utils/crypto/index.js'
-import { unwrapKey, unwrapPrivateKey, KeyWrapIntegrityError } from '../src/utils/crypto/keywrap.js'
+import { unwrapKey, unwrapPrivateKey, blockAad, KeyWrapFormatError, KeyWrapIntegrityError } from '../src/utils/crypto/keywrap.js'
 import { kdf, ecdhShared, pointBytes } from '../src/utils/crypto/sm2.js'
 import { pbkdf2Sm3 } from '../src/utils/crypto/pbkdf2.js'
 import { sm3 } from '../src/utils/crypto/sm3.js'
@@ -58,9 +58,19 @@ test('SM2：公钥与 ECDH 共享点（双向必须相等）', () => {
   assert.equal(bytesToHex(z2), z_hex)
 })
 
-test('块密钥解封：能解开 Python 封的密文', () => {
+/** 向量的块身份 → AAD（与 `core/keywrap.py::block_aad` 同一套定长分帧）。 */
+const aadOf = (c, patch = {}) =>
+  blockAad(
+    patch.owner ?? c.owner,
+    patch.fileKey ?? c.file_key,
+    patch.blockIdx ?? c.block_idx,
+    patch.iv ?? hexToBytes(c.data_iv_hex),
+  )
+
+test('块密钥解封：能解开 Python 封的密文（v2，标签里带块身份）', () => {
   for (const c of V.block_keys) {
-    const key = unwrapKey(BigInt(c.sk), c.ct)
+    assert.equal(c.ct.kind, 'sm2-ecies-v2')
+    const key = unwrapKey(BigInt(c.sk), c.ct, aadOf(c))
     assert.equal(bytesToHex(key), c.key_hex)
     assert.equal(key.length, 16)
   }
@@ -71,7 +81,37 @@ test('块密钥解封：改一位就报完整性错误（而不是静默解出�
   const body = hexToBytes(c.ct.body)
   body[0] ^= 0x01
   const tampered = { ...c.ct, body: bytesToHex(body) }
-  assert.throws(() => unwrapKey(BigInt(c.sk), tampered), KeyWrapIntegrityError)
+  assert.throws(() => unwrapKey(BigInt(c.sk), tampered, aadOf(c)), KeyWrapIntegrityError)
+})
+
+test('块身份对不上就解不开（换块号 / 文件名 / 所有者 / 数据段 IV）', () => {
+  const c = V.block_keys[0]
+  const sk = BigInt(c.sk)
+  const patches = [
+    { why: '换块号', blockIdx: c.block_idx + 1 },
+    { why: '换文件名', fileKey: `${c.file_key}-x` },
+    { why: '换所有者', owner: `${c.owner}-x` },
+    { why: '换数据段 IV', iv: new Uint8Array(16) },
+  ]
+  for (const { why, ...patch } of patches) {
+    assert.throws(() => unwrapKey(sk, c.ct, aadOf(c, patch)), KeyWrapIntegrityError, why)
+  }
+})
+
+test('块身份分帧：("a","bc") 与 ("ab","c") 必须得到不同的 AAD', () => {
+  const iv = new Uint8Array(16)
+  assert.notEqual(
+    bytesToHex(blockAad('a', 'bc', 0, iv)),
+    bytesToHex(blockAad('ab', 'c', 0, iv)),
+  )
+})
+
+test('块密钥解封：旧 v1 格式被指名拒绝（说清缺块身份，而不是笼统报格式不认识）', () => {
+  const c = V.block_keys[0]
+  assert.throws(
+    () => unwrapKey(BigInt(c.sk), { ...c.ct, kind: 'sm2-ecies-v1' }, aadOf(c)),
+    (e) => e instanceof KeyWrapFormatError && /块身份/.test(e.message),
+  )
 })
 
 test('用户私钥解封：口令 + 密文 → 同一个标量', () => {

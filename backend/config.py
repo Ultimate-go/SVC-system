@@ -451,35 +451,51 @@ def effective_ports(
     nodes = node_ports_for(
         ids, stored.nodes, reserved=(stored.backend, stored.frontend)
     )
-    notes: list[str] = []
+    # ★ 返回**结构化**的“替你改了哪几个”而不是句子（2026-10-16 改）：
+    #   句子由界面拼（``frontend/src/data/copy.js::portsAutoFixed``），
+    #   改措辞不必重启后端。每条纹：``{"node", "was", "now"}``。
+    notes: list[dict] = []
     for nid in ids:
         raw = stored.nodes.get(str(nid))
         if raw is not None and nodes[str(nid)] != raw:
-            notes.append(
-                f"{nid} 的端口 {raw} 和别的端口重复了，改用 {nodes[str(nid)]}"
-            )
+            notes.append({"node": nid, "was": raw, "now": nodes[str(nid)]})
     return DeployPorts(stored.backend, stored.frontend, nodes), notes
 
 
 def check_port_conflicts(
     backend: int, frontend: int, nodes: dict[str, int]
-) -> list[str]:
-    """同一次配置里**自己撞自己**的端口；返回一句句中文，空列表 = 没问题。
+) -> list[dict]:
+    """同一次配置里**自己撞自己**的端口；返回**结构化**的逐条冲突，空列表 = 没问题。
+
+    ★ 返回的是**数据**，不是句子。句子由界面拼（``frontend/src/data/copy.js``
+      的 ``portConflictLine`` / ``portConflictDetail``）—— 改措辞不必重启后端。
+      后端自己那句 ``detail`` 由 :func:`backend.routers.admin._conflict_detail`
+      现拼，只给 curl / 脚本 / 日志看。
+
+    每条纹的形状::
+
+        {"kind": "backend" | "frontend" | "node",
+         "who": "后端" | "node-1", "with": "前端", "port": 5000}
+
+    ``with`` 是**先占住这个端口号的那一方**（先到先得，与判定顺序一致）。
 
     ★ 这一类**必须拦**（不像"被别的程序占用"只提示一下就放行）：
       两样东西填同一个端口，重启时后起的那个**一定**起不来 —— 那不是风险，
       是确定失败。所以 ``PUT /api/admin/ports`` 对它返回 409，而不是一条警告。
     """
-    problems: list[str] = []
+    problems: list[dict] = []
     seen: dict[int, str] = {}
-    for label, port in (("后端", int(backend)), ("前端", int(frontend))):
+    for kind, label, port in (
+        ("backend", "后端", int(backend)),
+        ("frontend", "前端", int(frontend)),
+    ):
         if port in seen:
-            problems.append(f"{label}与「{seen[port]}」填了同一个端口 {port}")
+            problems.append({"kind": kind, "who": label, "with": seen[port], "port": port})
         else:
             seen[port] = label
     for nid, port in nodes.items():
         if port in seen:
-            problems.append(f"{nid} 的 {port} 与「{seen[port]}」重复")
+            problems.append({"kind": "node", "who": nid, "with": seen[port], "port": port})
         else:
             seen[port] = nid
     return problems

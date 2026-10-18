@@ -4,7 +4,8 @@
  *
  * 呈现约束：
  *   ① 使用从左到右的填充条，不做分段堆叠；动画只播放一次并停在满格。
- *   ② 每一步单独一行显示该步耗时，颜色沿用 tone 区分。
+ *   ② 每一步做成一个**横向芯片**，按网格铺开（一行 3~4 个、左对齐）——
+ *      竖着排时八个阶段要占十几行，把上传区和下面的文件列表撑得很远。
  *   ③ `state` 为 `fail` 时填充条使用告警色。
  *
  * 数据约束：只绘制后端返回的毫秒值，不换算百分比。
@@ -87,8 +88,8 @@ const toneCss = {
         </span>
       </div>
 
-      <!-- 每一步单独一行：只给阶段名与调用次数。
-           时间不在这里重复 —— 标题里的总耗时是唯一的耗时刻度。 -->
+      <!-- 每一步一个芯片：颜色点表示它属于哪一类，右侧是调用次数（×N）。
+           按网格铺开，宽度不够时自动换行 —— 不再一路竖着排到底。 -->
       <ol class="stage-rows">
         <li v-for="(s, i) in perf.stages" :key="i" class="row">
           <span class="dot" :style="{ background: toneCss[s.tone] }" />
@@ -184,21 +185,34 @@ details[open] > .fill-summary .fill-tri { transform: rotate(90deg); }
   color: var(--text-1);
   font-size: 13px;
 }
-/* ---------- 每一步单独一行 ---------- */
+/* ---------- 每一步一个芯片，横向铺开 ---------- */
 .stage-rows {
   list-style: none;
-  margin: 2px 0 0;
+  margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  /* 固定 4 列：一行 4 个、逐行左对齐，比「能塞几个塞几个」更好看也更好数。
+     窄一点降到 3 列、再窄 2 列 —— 芯片本身不换行，行高始终一致。 */
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px 8px;
+}
+@media (max-width: 1180px) {
+  .stage-rows { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 780px) {
+  .stage-rows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 13px;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 9px;
+  font-size: 12px;
   color: var(--text-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
 }
 .dot {
   width: 7px;
@@ -207,6 +221,16 @@ details[open] > .fill-summary .fill-tri { transform: rotate(90deg); }
   flex: none;
   align-self: center;
 }
-.row .name { color: var(--text-2); }
-.row .count { color: var(--text-3); }
+/* 名字过长时用省略号，**不换行** —— 换行会把网格的行高搞成高低不齐。 */
+.row .name {
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row .count {
+  color: var(--text-3);
+  margin-left: auto;
+  flex: none;
+}
 </style>

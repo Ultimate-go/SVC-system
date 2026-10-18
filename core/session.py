@@ -514,7 +514,7 @@ class ExplicitPrimeGen:
 
     :class:`ShiftedPrimeGen` 与 :class:`MappingPrimeGen` 都建立在「有一张全局
     素数表」这个前提上（前者加个偏移，后者查一张下标对照表）。新方案里素数由
-    块身份派生，合并宇宙时手上只有「各文件的素数串接起来」这一串数 ——
+    块身份派生，合并向量时手上只有「各文件的素数串接起来」这一串数 ——
     没有表可查，于是用它直接承接。
 
     接口与 :class:`~svc.primegen.PrimeGen` 同口径，
@@ -706,7 +706,7 @@ class GlobalSession:
         )
 
     def view_crs_primes(self, primes) -> CRS:
-        """按**显式素数表**取视图 —— 跨文件合并（合并宇宙）走这条。
+        """按**显式素数表**取视图 —— 跳文件合并（合并向量）走这条。
 
         合并时手上没有「全局表 + 偏移」可用（素数是从各文件按身份派生的），
         只有串接起来的那一串素数，所以直接用 :class:`ExplicitPrimeGen` 承接。

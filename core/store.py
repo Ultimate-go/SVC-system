@@ -507,13 +507,17 @@ class VectorStore:
         file_key: str,
         plaintext: bytes,
         *,
-        key_sink: Callable[[int, bytes], None],
+        key_sink: Callable[[int, bytes, bytes], None],
         segment_bytes: int | None = None,
         nodes: Sequence[str] | None = None,
     ) -> FileRecord:
         """加密 + 分块 + 承诺 + 分发，把新块追加到**这份文件**的向量末尾。
 
-        :param key_sink: ``key_sink(pos, key)`` —— 每生成一把块密钥就交出去一次。
+        :param key_sink: ``key_sink(pos, key, iv)`` —— 每生成一把块密钥就交出去一次。
+            ``pos`` 是**文件内块号**（0 基），``iv`` 是**这一块的数据段 IV**。
+            两个都要传：封装块密钥时得把它们编进认证标签，
+            否则把别块的密钥密文配到这一块上，标签照样对得上（见
+            :func:`core.keywrap.block_aad`）。
             **必传，没有默认值**：本类**不保管任何密钥**，调用方必须显式
             决定"这把钥匙放哪里"。现在就是在这里用**所有者的公钥**
             把它包成密文（``core.keywrap.wrap_key``）。
@@ -562,20 +566,21 @@ class VectorStore:
         # ★ 下面这些 ``with stage(...)`` 是给前端报耗时用的（见 core/timing.py）。
         #   没有人在收集时它们返回 nullcontext —— **一次计时调用都不会发生**，
         #   所以对算法行为零影响。
-        with stage("切块（split_segments）"):
+        with stage("明文分段"):
             segs = split_segments(plaintext, seg_bytes)
         elements: list[int] = []
         cts: list[bytes] = []
         ivs: list[bytes] = []
         lens: list[int] = []
         for pos, seg in enumerate(segs):
-            with stage("生成密钥与 IV"):
+            with stage("块密钥与初始向量生成"):
                 k_i, iv_i = new_key(), new_iv()
-            with stage("逐块加密（SM4）"):
+            with stage("数据块加密"):
                 ct = encrypt_segment(seg, k_i, iv_i)
-            # ★ 即时交给调用方（由它用所有者公钥包起来），本函数不留副本、本类不留副本
-            key_sink(pos, k_i)
-            with stage("算向量分量（SM3）"):
+            # ★ 即时交给调用方（由它用所有者公钥包起来），本函数不留副本、本类不留副本。
+            #   ``iv_i`` 一起给：封装时要把「块身份 + 数据段 IV」绑进认证标签。
+            key_sink(pos, k_i, iv_i)
+            with stage("块标识生成"):
                 v_i = vector_element(ct)
             ivs.append(iv_i)
             lens.append(len(seg))
@@ -626,7 +631,7 @@ class VectorStore:
         block_idx: int,
         plaintext: bytes,
         *,
-        key_sink: Callable[[int, bytes], None],
+        key_sink: Callable[[int, bytes, bytes], None],
     ) -> tuple[bytes, int]:
         """改**一块**的内容：重新加密它，并让全网跟上新的向量分量。
 
@@ -636,7 +641,7 @@ class VectorStore:
         这个顺序换来的：每块一把密钥、一个 IV，块与块互不牽连，
         所以也不需要按块大小重新切。
 
-        :param key_sink: 同 :meth:`upload`，``key_sink(块号, 新密钥)``。
+        :param key_sink: 同 :meth:`upload`，``key_sink(块号, 新密钥, 新 IV)``。
             改块必然产生**新的**块密钥（旧密钥连同旧密文一起作废），
             调用方必须**重新封装**它（现在就是拿所有者的 SM2 公钥再封一次）
             —— 否则新内容连所有者自己也解不开。
@@ -672,14 +677,15 @@ class VectorStore:
             )
 
         gidx = rec.indices[block_idx]
-        with stage("生成密钥与 IV"):
+        with stage("块密钥与初始向量生成"):
             key_new, iv_new = new_key(), new_iv()
-        with stage("逐块加密（SM4）"):
+        with stage("数据块加密"):
             ct_new = encrypt_segment(plaintext, key_new, iv_new)
-        with stage("算向量分量（SM3）"):
+        with stage("块标识生成"):
             v_new = vector_element(ct_new)
-        # ★ 与 upload 同一条纪律：密钥一生成就交出去，本类不留副本
-        key_sink(block_idx, key_new)
+        # ★ 与 upload 同一条纪律：密钥一生成就交出去，本类不留副本；
+        #   IV 一起给，供调用方把它绑进块密钥的认证标签。
+        key_sink(block_idx, key_new, iv_new)
 
         # ★ 两套下标：gidx 是这个块在**全局素数表**里的位置（记账、问节点都用它）；
         #   block_idx 是它在**这份文件内**的块号 —— vds 层只认后者（它假定
@@ -689,7 +695,7 @@ class VectorStore:
         # 推送方只要出 S_K，而 S_K 与谁发起无关（K 不在 I 里时退回直接模幂，
         # 见 vds.updates._S_K），所以协调者用空视图占位即可 ——
         # 它**不需要**持有这一块，也就不必为了一次改块把明文调进来。
-        with stage("承诺（push_update）"):
+        with stage("承诺更新"):
             pushed = push_update(
                 self.session,
                 delta_old,
@@ -733,7 +739,7 @@ class VectorStore:
 
         # 每一份副本都要拿到新密文 —— 只推一份的话，从别的副本读到的就是旧内容
         try:
-            with stage("分发到节点"):
+            with stage("分发至存储节点"):
                 self.transport.apply_update(
                     delta_new=pushed.delta,
                     op_delta=op_delta,
@@ -802,7 +808,7 @@ class VectorStore:
             raise ValueError(
                 f"留存的本体有 {len(ciphertext)} 字节，超过单块上限 {rec.segment_bytes}"
             )
-        with stage("分量校验（SM3）"):
+        with stage("块标识校验"):
             v_new = int(element)
             if vector_element(ciphertext) != v_new:
                 raise ValueError(
@@ -813,7 +819,7 @@ class VectorStore:
         iv_new = bytes(iv)
         delta_old = self.delta_of(owner, file_key)
         op_delta = UpdateDelta(op="mod", K=(block_idx,), F_new=(v_new,))
-        with stage("承诺（push_update）"):
+        with stage("承诺更新"):
             pushed = push_update(
                 self.session,
                 delta_old,
@@ -839,7 +845,7 @@ class VectorStore:
         }
 
         try:
-            with stage("分发到节点"):
+            with stage("分发至存储节点"):
                 self.transport.apply_update(
                     delta_new=pushed.delta,
                     op_delta=op_delta,
@@ -862,7 +868,7 @@ class VectorStore:
         file_key: str,
         plaintext: bytes,
         *,
-        key_sink: Callable[[int, bytes], None],
+        key_sink: Callable[[int, bytes, bytes], None],
     ) -> FileRecord:
         """在文件**末尾追加**一段 —— 只新增块，已有的块一个字节都不动。
 
@@ -872,7 +878,8 @@ class VectorStore:
 
         :param key_sink: 同 :meth:`upload`，但 ``pos`` 是**块序号**（接着已有的
             往下排，不是从 0 开始）—— 与 :meth:`upload` / :meth:`modify`
-            的约定一致，调用方可以照同样的方式按块号逐一封装新密钥。
+            的约定一致，调用方可以照同样的方式按块号逐一封装新密钥（第三个
+            参数是那一块的数据段 IV，同样要绑进认证标签）。
 
         .. important::
 
@@ -925,19 +932,19 @@ class VectorStore:
         #   否则上传后改过默认值，追加的块就会与老块尺寸不一，
         #   而 “一份文件 = 一序列等长块 + 一个尾块” 这个形状是读/验都默认的前提。
         base_pos = len(rec.indices)
-        with stage("切块（split_segments）"):
+        with stage("明文分段"):
             segs = split_segments(plaintext, rec.segment_bytes)
         elements: list[int] = []
         cts: list[bytes] = []
         ivs: list[bytes] = []
         lens: list[int] = []
         for t, seg in enumerate(segs):
-            with stage("生成密钥与 IV"):
+            with stage("块密钥与初始向量生成"):
                 k_i, iv_i = new_key(), new_iv()
-            with stage("逐块加密（SM4）"):
+            with stage("数据块加密"):
                 ct = encrypt_segment(seg, k_i, iv_i)
-            key_sink(base_pos + t, k_i)  # ★ 与 upload 同：密钥一生成就交出去
-            with stage("算向量分量（SM3）"):
+            key_sink(base_pos + t, k_i, iv_i)  # ★ 与 upload 同：密钥一生成就交出去
+            with stage("块标识生成"):
                 v_i = vector_element(ct)
             ivs.append(iv_i)
             lens.append(len(seg))
@@ -1018,7 +1025,7 @@ class VectorStore:
         )
         # 走 vds 层已审计过的 PushUpdate 来算新摘要与更新密钥；
         # 推送方只是一个占位（它的新状态与本次追加无关，直接丢掉）。
-        with stage("承诺（push_update）"):
+        with stage("承诺更新"):
             pushed = push_update(
                 self.session,
                 delta_pv,
@@ -1039,9 +1046,9 @@ class VectorStore:
         )
         pushed = PushedUpdate(delta_new, pushed.node, pushed.witness)
 
-        with stage("分片规划（_plan）"):
+        with stage("分片规划"):
             assignments, per_index = self._plan(K, pool)
-        with stage("打包待推密文"):
+        with stage("待推送密文打包"):
             ct_of = dict(zip(K, cts))
             blobs = {
                 nid: {j: ct_of[j] for j in seg} for nid, seg in assignments.items() if seg
@@ -1065,7 +1072,7 @@ class VectorStore:
 
         try:
             # 节点自己算新状态；协调者只告诉它们"发生了什么"和"你负责哪些位置"
-            with stage("分发到节点"):
+            with stage("分发至存储节点"):
                 self.transport.apply_append(
                     delta_old=delta_old,
                     delta_new=delta_new,
@@ -1663,7 +1670,7 @@ class VectorStore:
           于是"服务器返回给我的东西"本身无法被客户端独立检验；
         * ``cipher_of`` **一个字节都不解** —— 它只把节点上的密文段、IV、
           明文长度，以及一份覆盖这些位置的证据取回来。块密钥的解封
-          （SM2 ECDH + KDF）与内容解密（SM4）都留给调用方，
+          （SM2 ECDH + KDF）与内容数据块解密都留给调用方，
           服务端**不掌握任何秘密**。
 
         交付物全部可被客户端独立校验：密文 → 分量（自己 ``SM3``）→
@@ -1771,7 +1778,7 @@ class VectorStore:
 
         :returns: ``(全局位置号 -> 密文, 全局位置号 -> 主副本, 用到的节点, 缺的位置)``
         """
-        with stage("探测各节点（report）"):
+        with stage("探测节点持有情况"):
             report = {row["node_id"]: row for row in self.transport.report()}
         held: dict[int, dict[str, set[int]]] = {}
         for nid, row in report.items():
@@ -1832,7 +1839,7 @@ class VectorStore:
         local_of = {g: i for i, g in enumerate(delta.positions)}
         remaining = {local_of[g] for g in gs}
         certs: list[Certificate] = []
-        with stage("探测各节点（report）"):
+        with stage("探测节点持有情况"):
             report = {row["node_id"]: row for row in self.transport.report()}
         for nid, row in report.items():
             if not remaining:
@@ -1892,10 +1899,10 @@ class VectorStore:
             delta = self.delta_of(*file_id)
             certs = self._certs_for(file_id, groups[file_id])
             client = ClientNode(self.session, delta)
-            with stage("聚合凭证"):
+            with stage("证据合成"):
                 pi = client.aggregate_certificates(certs)
             Q_local = self._local_of(file_id, Q)
-            with stage("承诺验证（VerRetrieve）"):
+            with stage("承诺验证"):
                 rep = client.ver_retrieve(Q_local, tuple(valmap[g] for g in Q), pi)
             return rep, pi
         return self._prove_merged(groups, Q, valmap)
@@ -1905,7 +1912,7 @@ class VectorStore:
 
         * ``P`` = 这些文件全部位置的并集（有序）；
         * ``E = ∏_{j∈P} e_j``、``U' = g^E``、``C' = ∏_f C_f^{E/E_f}``
-          —— 「把每份文件在 ``E_f`` 世界里的承诺搬进 ``E`` 世界」，一份一次模幂；
+          —— 「把每份文件在 ``E_f`` 上的承诺搬到 ``E`` 上」，一份一次模幂；
         * ``loc`` = ``全局位置 → 合并向量里的局部下标``（CRS 的指数用它）。
 
         ★★ **一份文件时它退化为那份文件自己**：``P = pos(f)`` ⇒ ``E = E_f``、
@@ -1914,7 +1921,7 @@ class VectorStore:
         :meth:`core.session.Session.crs_n_for` 的快路（直接用摘要里的 ``U``，不重算）。
 
         这是论文 ``StrgNode.CreateFrom``（子集 → 新摘要）的跨文件版：
-        换宇宙的那一步只是重算承诺（公开可算，不需要任何块的值）。
+        换到合并向量的那一步只是重算承诺（公开可算，不需要任何块的值）。
         """
         fids = sorted({(str(o), str(k)) for o, k in file_ids})
         if not fids:
@@ -1924,7 +1931,7 @@ class VectorStore:
             P = tuple(self.registry.positions_of(*fids[0]))
             return self.session.crs_n_for(fd), fd.C, P, {p: i for i, p in enumerate(P)}
 
-        with stage("合并位置集 P"):
+        with stage("合并位置集合"):
             P = tuple(
                 sorted({p for f in fids for p in self.registry.positions_of(*f)})
             )
@@ -1966,7 +1973,7 @@ class VectorStore:
     def _prove_merged(self, groups, Q, valmap):
         """跨文件：造出一条合并向量 ``(U', C')``，再在它上面重开一份证据。
 
-        宇宙的构造全在 :meth:`universe_for`；这里只负责“在它上面开一份证据”。
+        合并向量的构造全在 :meth:`universe_for`；这里只负责“在它上面开一份证据”。
 
         **抬得动的是承诺，抬不动的是证据**（理由见 :meth:`_prove`）。
         所以这里不是把两边的凭证拼起来，而是拿合并集的**全量值**重开一份。
@@ -1977,7 +1984,7 @@ class VectorStore:
         full = [self.values[pos] for pos in P]
         with stage(f"重算合并证据（Open，|P|={len(P)}）"):
             pi = open_subvector(crn, I, vals, full)
-        with stage("承诺验证（合并向量）"):
+        with stage("合并向量上的承诺验证"):
             rep = verify(crn, C, I, vals, pi)
         return rep, pi
 
@@ -1999,7 +2006,7 @@ class VectorStore:
 
         :returns: ``(凭证, 每个下标的主副本, 用到的节点, 密文段, 缺的下标集合)``
         """
-        with stage("探测各节点（report）"):
+        with stage("探测节点持有情况"):
             report = {row["node_id"]: row for row in self.transport.report()}
         remaining = set(Q)
         certs: list[Certificate] = []
@@ -2069,7 +2076,7 @@ class VectorStore:
         by_off: dict[int, tuple[str, str]] = {
             int(d.offset): fid for fid, d in self.deltas.items()
         }
-        with stage("探测各节点（report）"):
+        with stage("探测节点持有情况"):
             report = {row["node_id"]: row for row in self.transport.report()}
         #: 全局位置 -> 真的有密文、而且答得上话的那几台
         held: dict[int, set[str]] = {}
@@ -2161,12 +2168,12 @@ class VectorStore:
             #   参数求值发生在 with 体内，混在一起会把椭圆曲线标量乘的时间
             #   算到 SM4 头上；那两段量级差很多，混了就没意义了。
             key = key_of(loc)
-            with stage("解密（SM4）"):
+            with stage("数据块解密"):
                 pt = decrypt_segment(ct_of[loc], key, rec.ivs[loc])
             if len(pt) != rec.plain_lengths[loc]:
                 raise ValueError(f"块 {loc} 解密后长度不对")
             out[loc] = pt
-        with stage("拼接明文"):
+        with stage("明文拼接"):
             return b"".join(out[loc] for loc in want_local)
 
     # -------------------------------------------------------------------
@@ -2274,7 +2281,7 @@ class VectorStore:
         # ① 把 r 按主副本归属拆开 —— 副本会让多台持有同一下标，
         #    而聚合要求份额两两不交。
         per_node: dict[str, list[int]] = {}
-        with stage("按主副本拆挑战"):
+        with stage("按主副本分派挑战"):
             for i in challenge.indices:
                 per_node.setdefault(self.holder_of(pos_all[i]), []).append(i)
 
@@ -2289,7 +2296,7 @@ class VectorStore:
                 )
                 continue
             try:
-                with stage("各节点生成证明"):
+                with stage("各节点生成证明份额"):
                     proof = self.transport.pos_prove(nid, delta.offset, want)
             except TransportError as exc:
                 # 答不上来本身就是审计结论，不要在这里抛 ——
@@ -2335,7 +2342,7 @@ class VectorStore:
         # ③ 合并成**一份**（论文：分布式生成、大小与参与节点数无关）
         crs_n = self.session.crs_n_for(delta)
         try:
-            with stage("聚合份额"):
+            with stage("份额合成证据"):
                 done, agg = pos_aggregate_all(crs_n, challenge, proofs, strict=False)
         except ValueError as exc:
             return {**base, "ok": False, "message": f"份额合并失败：{exc}"}
@@ -2353,7 +2360,7 @@ class VectorStore:
             }
 
         # ④ 验证一次（判据两道：Q = r，且内容没被换掉）
-        with stage("验证证明"):
+        with stage("配对检验"):
             report = pos_ver(ClientNode(self.session, delta), challenge, agg)
         return {
             **base,
@@ -2391,7 +2398,7 @@ class VectorStore:
             e_all=E,
             n=n,
         )
-        with stage("对整份文件做一次 commit"):
+        with stage("整份文件承诺重算"):
             com = commit(crs_n, [self.values[g] for g in pos])
         return Digest(
             U=crs_n.U_n,
@@ -2760,7 +2767,7 @@ class PlainKeyStore(VectorStore):
                 owner,
                 file_key,
                 plaintext,
-                key_sink=lambda pos, k: box.__setitem__(pos, k),
+                key_sink=lambda pos, k, iv: box.__setitem__(pos, k),
                 segment_bytes=segment_bytes,
                 nodes=nodes,
             )
@@ -2811,7 +2818,7 @@ class PlainKeyStore(VectorStore):
             file_key,
             block_idx,
             plaintext,
-            key_sink=lambda pos, k: box.__setitem__(pos, k),
+            key_sink=lambda pos, k, iv: box.__setitem__(pos, k),
         )
 
     def append(self, owner: str, file_key: str, plaintext: bytes) -> FileRecord:
@@ -2828,5 +2835,5 @@ class PlainKeyStore(VectorStore):
             owner,
             file_key,
             plaintext,
-            key_sink=lambda pos, k: box.__setitem__(pos, k),
+            key_sink=lambda pos, k, iv: box.__setitem__(pos, k),
         )

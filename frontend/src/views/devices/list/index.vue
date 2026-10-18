@@ -11,6 +11,8 @@
  *   它是这一页最上面那块，因为"几台机器"就是这一页在讲的东西。
  * - **端口卡片（仅管理员）**：后端 / 前端 / 每一台节点各自的端口 ——
  *   与台数同一套模型（改 → 保存 → 重启生效），紧挨着台数卡。
+ *   ★ 2026-10-16：曾短暂搬到「系统初始化」的参数弹框里，同日又搬回这里 ——
+ *     那里最后只留一个「系统初始化」按钮放开场动画（见 InitFlow.vue）。
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -18,6 +20,8 @@ import { devicesApi } from '../../../api/devices'
 import { systemApi } from '../../../api/system'
 import { usePermission } from '../../../composables/usePermission'
 import { nodeSelfCheck } from '../../../utils/format'
+// ★ 影响面那句话现在是**前端文案**（后端只回数字与名单，见 `copy.js`）。
+import { faultImpactNote } from '../../../data/copy'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import StatCard from '../../../components/common/StatCard.vue'
 import NodeCountCard from '../../../components/common/NodeCountCard.vue'
@@ -49,6 +53,8 @@ const porElapsed = ref(0)
 //   ``drill`` 是后端返回的“现状 + 影响面”，不是前端自己推的 ——
 //   “哪些块已经取不到了”只有协调者算得出来（它手里有副本表）。
 const drill = ref(null)
+/** 影响面那句话（前端拼，见 `data/copy.js::faultImpactNote`）。 */
+const impactNote = computed(() => faultImpactNote(drill.value))
 const drillNodes = ref([])
 const drillRunning = ref(false)
 const drillFaulty = computed(() => new Set(drill.value?.faulty || []))
@@ -130,8 +136,8 @@ async function runDrill(action, mode = 'down') {
     } else {
       ElMessage.warning(
         mode === 'destroyed'
-          ? '已模拟永久损毁（不可逆），影响范围见下方；可在「完整性验证」或「更新文件」页继续观察'
-          : '已模拟掉线（可恢复），影响范围见下方；可在「完整性验证」或「更新文件」页继续观察',
+          ? '已模拟永久损毁（不可逆），影响范围见下方；可在「可验证查询」或「更新文件」页继续观察'
+          : '已模拟掉线（可恢复），影响范围见下方；可在「可验证查询」或「更新文件」页继续观察',
       )
     }
     await load()
@@ -208,7 +214,7 @@ async function refreshAll() {
             : (drill.impact.degraded_blocks
               ? `${drill.impact.degraded_blocks} 个分块的主副本不可用（其余副本仍在线，当前不影响读取）`
               : '当前无故障节点')"
-          :description="drill.impact.note"
+          :description="impactNote"
         />
         <div v-if="drill && drill.impact && drill.impact.files_affected && drill.impact.files_affected.length" class="mt-2">
           <span class="text-3" style="font-size: 13px">受影响文件：</span>
@@ -224,7 +230,7 @@ async function refreshAll() {
         <details v-if="drill && drill.faulty && drill.faulty.length" class="note-collapse">
           <summary>说明</summary>
           <p class="note">
-            故障生效期间，对「完整性验证」或「文件详情」页中相关数据的读取会失败，
+            故障生效期间，对「可验证查询」或「文件详情」页中相关数据的读取会失败，
             对存放在故障节点上的副本的写入同样会失败。点击「恢复全部」后重新执行一次写入即可恢复一致，
             也可直接在「上传文件」页重新上传。
           </p>

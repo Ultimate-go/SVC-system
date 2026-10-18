@@ -43,6 +43,7 @@ from ..config import (
     write_deploy_ports,
 )
 from ..deps import audit, current_token, current_user, get_db, get_manager, require_admin
+from ..errors import ApiError
 from ..manager import Conflict, NotFound, StoreManager
 from ..models import AuditRow, FileRow, UserRow, utcnow
 from ..schemas import (
@@ -88,7 +89,12 @@ def create_user(
         select(UserRow).where(UserRow.username == body.username)
     ).scalar_one_or_none()
     if exists is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"用户 {body.username} 已存在")
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "users.exists",
+            f"用户 {body.username} 已存在",
+            username=body.username,
+        )
 
     # ★ 已删除过的用户名**可以**复用 —— 但旧数据必须先改挂到墓碑名下。
     #
@@ -158,7 +164,7 @@ def patch_user(
     """
     user = db.get(UserRow, user_id)
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "users.not_found", "用户不存在")
 
     is_self = user.id == actor.id
     is_admin = actor.role == "admin"
@@ -166,11 +172,17 @@ def patch_user(
     privileged = body.role is not None or body.disabled is not None
 
     if not is_admin and (not is_self or privileged):
-        raise HTTPException(
+        # ★ 拆成两个码，不再用三元表达式拼一句话：
+        #   两句话是两件事（“你不是管理员” vs “管理员也不能动别人的角色”），
+        #   界面也就不用再去解析“到底是哪句”。
+        if not is_self:
+            raise ApiError(
+                status.HTTP_403_FORBIDDEN, "auth.admin_required", "需要管理员权限"
+            )
+        raise ApiError(
             status.HTTP_403_FORBIDDEN,
-            "需要管理员权限"
-            if not is_self
-            else "只有管理员能改角色或停用状态（改口令与显示名可以自己改）",
+            "users.privileged_only",
+            "只有管理员能改角色或停用状态（改口令与显示名可以自己改）",
         )
 
     if body.display_name is not None:
@@ -179,7 +191,9 @@ def patch_user(
         user.role = body.role
     if body.disabled is not None:
         if is_self and body.disabled:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能停用自己")
+            raise ApiError(
+                status.HTTP_400_BAD_REQUEST, "users.cannot_disable_self", "不能停用自己"
+            )
         user.disabled = body.disabled
 
     if body.password:
@@ -195,11 +209,13 @@ def patch_user(
         #     * 管理员改别人的 —— 拿不到那人的私钥，**只能拒绝**。
         #       这不是偷懒：真做了就是把他的数据永久锁死。
         if not is_self:
-            raise HTTPException(
+            raise ApiError(
                 status.HTTP_400_BAD_REQUEST,
+                "users.cannot_change_password",
                 f"不能替 {user.username} 改口令：他的私钥是用他自己的口令包的，"
                 f"改了他的口令就把他手里的私钥永久弄丢（他以前的文件会全部解不开）。\n"
                 f"  让他自己登录后改（管理员可以在「用户管理」里停用他）。",
+                username=user.username,
             )
         sk = mgr.session_key_of(token)
         if sk is None:
@@ -211,8 +227,9 @@ def patch_user(
             #   在本地用新口令封好交上来，服务端只验“解得开”与“私钥还是原来那把”
             #   （见 :meth:`StoreManager.rekey_with_blob`）。
             if body.sk_wrapped is None:
-                raise HTTPException(
+                raise ApiError(
                     status.HTTP_409_CONFLICT,
+                    "users.session_no_key",
                     "这次会话里没有你的私钥（默认模型：后端不持有）—— "
                     "请用「浏览器改口令」：前端会在本地用新口令把私钥重新封装，"
                     "再把密文交上来。\n"
@@ -310,13 +327,9 @@ def delete_user(
         "files_deleted": n_files,
         "blocks_deleted": n_blocks,
         "deleted_files": out.get("deleted_files") or [],
-        "warning": (
-            f"{username} 已删除，用户名可以重新使用了。\n\n"
-            f"他名下的 {n_files} 份文件（共 {n_blocks} 块）已随账号一起删除：\n"
-            f"  · 文件不再出现在列表里，也不能再被验证；\n"
-            f"  · 各存储节点上对应的分块份额已一并清除，密文与块密钥均不可恢复。\n\n"
-            f"重新建一个同名的 {username} 是一个全新的账号，不会继承任何东西。"
-        ),
+        # ★ 以前这里回一段 ``warning``（“X 已删除，用户名可以重新使用了…”整段）。
+        #   2026-10-16 那段话移到前端（``copy.js::userDeletedWarning``）：
+        #   上面这四个数据字段够它拼，改措辞不必重启后端。
     }
 
 
@@ -545,12 +558,15 @@ def set_audit_remark(
     """
     row = db.get(AuditRow, audit_id)
     if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "这条流水不存在")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "audit.not_found", "这条流水不存在")
 
     text = (body.remark or "").strip()
     if len(text) > 2000:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "备注最长 2000 字"
+        raise ApiError(
+            status.HTTP_400_BAD_REQUEST,
+            "audit.remark_too_long",
+            "备注最长 2000 字",
+            max_chars=2000,
         )
 
     before = row.remark or ""
@@ -602,7 +618,12 @@ def run_check(
             notes = mgr.check()
     except Exception as exc:  # noqa: BLE001 - 自检失败要把原因原样给出
         audit(db, actor.username, "check", ok=False, detail=str(exc))
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"自检失败：{exc}") from exc
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "check.failed",
+            f"自检失败：{exc}",
+            reason=str(exc),
+        ) from exc
     audit(db, actor.username, "check", ok=True, detail="；".join(notes))
     metrics.record("check", sw.total_ms(), sw.rows())
     # 「自检通过」那一句是方案常量（描述这项检查查了哪几类东西），已移到前端
@@ -724,8 +745,9 @@ def _deploy_shrink_guard(mgr: StoreManager, want: int, confirm: bool) -> dict:
     if plan["lost"]:
         shown = "、".join(str(i) for i in plan["lost"][:12])
         more = f"…（共 {len(plan['lost'])} 块）" if len(plan["lost"]) > 12 else ""
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_409_CONFLICT,
+            "deploy.capacity_loss",
             f"{head}，但有 {len(plan['lost'])} 块现在搬不走：\n"
             f"  下标 {shown}{more}\n"
             f"  它们的每一份副本都在联系不上的机器上"
@@ -733,15 +755,26 @@ def _deploy_shrink_guard(mgr: StoreManager, want: int, confirm: bool) -> dict:
             f"  现在收缩 = 这几块永久丢失（承诺里那把锁还在，内容没了）。\n"
             f"  正确做法是先把那几台机器起起来，再收缩 —— 那时它们就搬得动了。\n"
             f"  确实要带着这个损失继续，请在界面上勾选「我知道这几块会丢」。",
+            from_count=running,
+            to_count=want,
+            lost_count=len(plan["lost"]),
+            indices=list(plan["lost"][:12]),
+            down=list(plan["down"]),
         )
-    raise HTTPException(
+    raise ApiError(
         status.HTTP_409_CONFLICT,
+        "deploy.confirm_redistribute",
         f"{head}，需要重新分配 {len(plan['orphan'])} 块：\n"
         f"  这些块现在只在 {', '.join(plan['remove']) or '——'} 上还留着副本。\n"
         f"  保存时会趁那几台还活着的时候，把内容和证据搬到 "
         f"{', '.join(plan['keep'])} 上 ——\n"
         f"  块内容、全局下标和承诺一个字都不变，不会丢。\n"
         f"  确认请再点一次（界面上会问你一句）。",
+        from_count=running,
+        to_count=want,
+        orphan_count=len(plan["orphan"]),
+        remove=list(plan["remove"]),
+        keep=list(plan["keep"]),
     )
 
 
@@ -785,17 +818,22 @@ def _spawn_restart(script_args: list[str]) -> None:
     """
     script = ROOT / "scripts" / "restart.py"
     if not script.exists():
-        raise HTTPException(
+        raise ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "deploy.restart_script_missing",
             f"找不到重启脚本：{script}（工程被挪过？）",
+            path=str(script),
         )
     cmd = [sys.executable, str(script), *script_args]
     flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
     try:
         subprocess.Popen(cmd, cwd=str(ROOT), creationflags=flags)
     except OSError as exc:
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, f"拉不起重启脚本：{exc}"
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "deploy.restart_failed",
+            f"拉不起重启脚本：{exc}",
+            reason=str(exc),
         ) from exc
 
 
@@ -827,16 +865,12 @@ def get_deploy(
             change = {"prev": prev, "now": running, "to_be": saved}
 
     note = str(info.get("note") or "")
-    if note:
-        notice = note + (f" 点「立刻重启」让 {saved} 台生效。" if restart_required else "")
-    elif restart_required:
-        notice = (
-            f"服务器台数已从 {running} 台改成 {saved} 台，重启后生效 —— "
-            f"现在跑的还是 {running} 台（{', '.join(running_ids)}）。"
-        )
-    else:
-        notice = ""
 
+    # ★ 以前这里把 ``note`` 与“台数已从 A 改成 B，重启后生效…”拼成 ``notice`` 回给前端。
+    #   2026-10-16 改成：只回**数据**（``note`` 是上次保存时记下的事实，
+    #   ``running_count`` / ``node_count`` / ``restart_required`` / ``running_node_ids``），
+    #   句子由前端拼（``frontend/src/data/copy.js::deployNotice``）——
+    #   改措辞不必重启后端。
     return {
         "node_count": saved,
         "running_count": running,
@@ -846,7 +880,9 @@ def get_deploy(
         #: 本次启动才加入的机器（还没有块）—— 与"老节点恰好一块没分到"不是一回事。
         "fresh_nodes": mgr.joined_now(),
         "last_redistribute": mgr.last_redistribute(),
-        "notice": notice,
+        #: 上次保存时写进 ``nodes/deploy.json`` 的那句事实（**记录**，不是文案；
+        #:  空串 = 没记下什么）。
+        "note": note,
         "min": MIN_NODE_COUNT,
         "max": MAX_NODE_COUNT,
         "default": DEFAULT_NODE_COUNT,
@@ -884,10 +920,9 @@ def redistribute_now(
     )
     return {
         "ok": True,
-        "message": (
-            f"补了 {out['moved_blocks']} 块（{out['moved_copies']} 份副本）"
-            + (f"；另有 {len(out['lost'])} 块搬不动：" f"{out['lost'][:12]}" if out["lost"] else "")
-        ),
+        # ★ 这句以前由后端拼成 ``message``（“补了 N 块（M 份副本）…”）。
+        #   2026-10-16 移到前端（``copy.js::redistributeMessage``）：
+        #   下面这几个数字够它拼。
         **out,
         "timings": sw.payload(),
     }
@@ -970,28 +1005,15 @@ def set_deploy(
         detail=note or "台数未变",
     )
 
-    if moved is not None:
-        msg = (
-            f"服务器数量减少，文件块已重新分配：{moved['moved_blocks']} 块"
-            f"已铺到剩下的 {want} 台上。"
-        )
-        if moved["lost"]:
-            msg += f"\n另有 {len(moved['lost'])} 块没能搬走 —— 每一份副本都联系不上。"
-        msg += f"\n点「立刻重启」让这 {want} 台生效。"
-    elif want == running:
-        msg = f"台数没变（还是 {running} 台）。"
-    else:
-        msg = (
-            f"台数已从 {running} 台改成 {want} 台，重启后生效"
-            f"（现在跑的还是 {running} 台）。\n点「立刻重启」即可。"
-        )
-    if clamped:
-        msg += f"\n（{body.node_count} 超出台数范围，取 {want}）"
-
+    # ★ 以前这里（以及另外两个分支）就地拼成 ``message`` 回给前端。
+    #   2026-10-16 句子移到前端（``copy.js::deploySavedMessage``）：
+    #   这里只回数据 —— ``redistribute`` / ``node_count`` / ``running_count`` /
+    #   ``restart_required`` / ``clamped`` / ``requested``。
     return {
         "ok": True,
-        "message": msg,
         "node_count": want,
+        #: 使用者**原样发上来的**那个数（超范围时它与 ``node_count`` 不同）。
+        "requested": body.node_count,
         "running_count": running,
         "restart_required": want != running,
         "clamped": clamped,
@@ -1216,57 +1238,35 @@ def _probe_ports(ports: DeployPorts, running: dict) -> list[dict]:
                 "scope": scope,
                 "id": label,
                 "port": port,
+                # 只有状态，没有句子：中文由界面按 status 查表
+                # （``frontend/src/components/common/PortsCard.vue`` 的 STATUS_TEXT）。
+                # 后端以前还回一句 ``note``，而界面**从来没显示过**它。
                 "status": status,
-                "note": {
-                    "free": "空闲",
-                    "ours": "本系统当前就在用（重启时会让出来）",
-                    "occupied": "有别的程序在占用，重启时这一样会起不来",
-                }[status],
             }
         )
     return out
 
 
-def _port_warnings(probe: list[dict]) -> list[str]:
-    """把占用情况收成**给界面看的一整句话**（空列表 = 没有要提醒的）。"""
-    bad = [x for x in probe if x["status"] == "occupied"]
-    if not bad:
-        return []
-    shown = "、".join(f"{x['id']} {x['port']}" for x in bad[:10])
-    more = f"（共 {len(bad)} 个）" if len(bad) > 10 else ""
+def _occupied_ports(probe: list[dict]) -> list[dict]:
+    """被别的程序占着的那几个 —— **结构化**回给界面（空列表 = 没有要提醒的）。
+
+    ★ 这里以前直接拼成一句话（``_port_warnings``）。2026-10-16 改成回数据：
+      句子由 ``frontend/src/data/copy.js::portsOccupiedWarning`` 拼。
+    """
     return [
-        f"{shown}{more} 现在有别的程序在占用 —— 重启时这几样会起不来。"
-        f"换一个端口，或者先把占用它的那个程序停掉。"
+        {"id": x["id"], "port": x["port"]}
+        for x in probe
+        if x["status"] == "occupied"
     ]
 
 
-def _ports_notice(effective: DeployPorts, running: dict) -> str:
-    """「改了端口还没重启」那一条提示（仅在真的要重启时给）。"""
-    diffs: list[str] = []
-    for key, label in (("backend", "后端"), ("frontend", "前端")):
-        now = running.get(key)
-        if now is not None and now != getattr(effective, key):
-            diffs.append(f"{label} {now} → {getattr(effective, key)}")
-    for nid, port in effective.nodes.items():
-        now = running["nodes"].get(nid)
-        if now is not None and now != port:
-            diffs.append(f"{nid} {now} → {port}")
-    body = f"：{'；'.join(diffs)}。" if diffs else "。"
-    # ★ 只在前端端口**真的变了**时才提"新地址"：没变的时候说"这个页面会失效"
-    #   是错的（地址没变，刷新一下就行）—— 提示里说错一句，使用者就会白找一圈。
-    now_frontend = running.get("frontend")
-    if now_frontend is not None and now_frontend != effective.frontend:
-        tail = (
-            f"重启后前端在 http://127.0.0.1:{effective.frontend} —— "
-            f"现在这个页面会失效，重启器会自动在新地址开一个。"
-        )
-    else:
-        tail = "重启期间页面会连不上，起来之后刷新一下即可（要重新登录一次）。"
-    return f"端口改了，还没重启{body}{tail}"
+def _ports_payload(mgr: StoreManager, *, occupied: list[dict] | None = None) -> dict:
+    """``GET /api/admin/ports`` 的响应体；``PUT`` 复用它，省得两份字段名分叉。
 
-
-def _ports_payload(mgr: StoreManager, *, warnings: list[str] | None = None) -> dict:
-    """``GET /api/admin/ports`` 的响应体；``PUT`` 复用它，省得两份字段名分叉。"""
+    ★ 这里的字段全是**数据**（端口号、状态、上次替你改过哪几个）："端口改了还没
+      重启"那句提示由前端拼（``frontend/src/data/copy.js::portsNotice``），
+      依据是同在响应里的 ``running`` / ``restart_required`` / ``*-*-`` 现值。
+    """
     ids = effective_node_ids()
     effective, notes = effective_ports(ids)
     running = _running_ports(mgr)
@@ -1287,9 +1287,10 @@ def _ports_payload(mgr: StoreManager, *, warnings: list[str] | None = None) -> d
         },
         #: 台数与端口存在同一个文件里 —— 界面把这句话指出来（"改的是哪个文件"）。
         "source": "nodes/deploy.json",
-        "notice": _ports_notice(effective, running) if restart_required else "",
-        "notes": notes,
-        "warnings": list(warnings or []),
+        #: 读配置时**替你改过**的那几个端口（同一个号只能给一样东西用，重复的被让开）。
+        #: 每条纹：``{"node": "node-1", "was": 9101, "now": 9102}``。
+        "auto_fixed": notes,
+        "occupied": list(occupied or []),
     }
 
 
@@ -1306,9 +1307,14 @@ def _candidate_ports(body: PortsIn) -> tuple[DeployPorts, dict[str, int], list[s
     ids = effective_node_ids()
     for label, port in (("后端端口", body.backend), ("前端端口", body.frontend)):
         if not (MIN_PORT <= int(port) <= MAX_PORT):
-            raise HTTPException(
+            raise ApiError(
                 status.HTTP_400_BAD_REQUEST,
+                "ports.out_of_range",
                 f"{label}超出范围：{port}。允许 {MIN_PORT}–{MAX_PORT}。",
+                label=label,
+                port=int(port),
+                min=MIN_PORT,
+                max=MAX_PORT,
             )
     raw: dict[str, int] = {}
     if body.nodes is not None:
@@ -1318,9 +1324,16 @@ def _candidate_ports(body: PortsIn) -> tuple[DeployPorts, dict[str, int], list[s
                 # 界面不会这么发（它按配置里的台数列行）；真有就当没看见。
                 continue
             if not (MIN_PORT <= int(port) <= MAX_PORT):
-                raise HTTPException(
+                # ★ 与上面同一套措辞（只把 label 换成「<节点名> 的端口」），
+                #   所以两边共用一个码 —— 界面那一句只需写一遍。
+                raise ApiError(
                     status.HTTP_400_BAD_REQUEST,
+                    "ports.out_of_range",
                     f"{name} 的端口超出范围：{port}。允许 {MIN_PORT}–{MAX_PORT}。",
+                    label=f"{name} 的端口",
+                    port=int(port),
+                    min=MIN_PORT,
+                    max=MAX_PORT,
                 )
             raw[name] = int(port)
     conflicts = check_port_conflicts(body.backend, body.frontend, raw)
@@ -1332,13 +1345,26 @@ def _candidate_ports(body: PortsIn) -> tuple[DeployPorts, dict[str, int], list[s
     )
 
 
-def _conflict_detail(conflicts: list[str]) -> str:
-    """端口填重了那 409 的正文（要短、要能照着改）。"""
+def _conflict_detail(conflicts: list[dict]) -> str:
+    """端口填重了那 409 的正文（要短、要能照着改）。
+
+    ★ 这是**后端自己那一句**（给 curl / 脚本 / 日志）。界面不用它 ——
+      界面拿 ``params.conflicts`` 自己拼（见 ``frontend/src/data/copy.js``
+      的 ``portConflictDetail``），所以改那句话的措辞不必重启后端。
+    """
+    lines = [_conflict_line(c) for c in conflicts]
     return (
         "同一个端口只能给一样东西用 —— 下面这几处撞了，重启时后起的那个一定起不来：\n  "
-        + "\n  ".join(conflicts)
+        + "\n  ".join(lines)
         + "\n\n改掉其中一方再保存。"
     )
+
+
+def _conflict_line(c: dict) -> str:
+    """一条冲突的后端写法（与前端 ``portConflictLine`` 逐字对应）。"""
+    if c.get("kind") == "node":
+        return f"{c['who']} 的 {c['port']} 与「{c['with']}」重复"
+    return f"{c['who']}与「{c['with']}」填了同一个端口 {c['port']}"
 
 
 def _stop_ports_to_keep(running: dict) -> list[int]:
@@ -1392,7 +1418,9 @@ def plan_ports(
         "ok": not conflicts,
         "conflicts": conflicts,
         "probe": probe,
-        "warnings": _port_warnings(probe),
+        #: 被别的程序占着的那几个（**数据**；句子由界面拼）。
+        "occupied": _occupied_ports(probe),
+        #: 后端自己那一句（给 curl / 脚本看；界面不用它）。
         "detail": _conflict_detail(conflicts) if conflicts else "",
     }
 
@@ -1415,7 +1443,12 @@ def set_ports(
     """
     candidate, _, conflicts = _candidate_ports(body)
     if conflicts:
-        raise HTTPException(status.HTTP_409_CONFLICT, _conflict_detail(conflicts))
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "ports.conflict",
+            _conflict_detail(conflicts),
+            conflicts=conflicts,
+        )
 
     ids = effective_node_ids()
     old, _ = effective_ports(ids)
@@ -1427,7 +1460,7 @@ def set_ports(
     )
 
     probe = _probe_ports(candidate, running)
-    warnings = _port_warnings(probe)
+    occupied = _occupied_ports(probe)
     diffs = _ports_diff(old, candidate)
     audit(
         db,
@@ -1440,19 +1473,12 @@ def set_ports(
         ),
     )
 
-    if diffs:
-        msg = "端口已保存：" + "；".join(diffs) + "。重启后生效。"
-    else:
-        msg = "端口没变，配置已按当前值写回。"
-    if any("前端" in d for d in diffs):
-        msg += (
-            f"\n重启后前端在 http://127.0.0.1:{candidate.frontend}"
-            f" —— 这个地址会失效，重启器会自动在新地址开一个页面。"
-        )
+    # ★ 以前这里拼两句 ``message``（"端口已保存：…" / "端口没变，配置已按当前值写回。"）。
+    #   2026-10-16 句子移到前端（``copy.js::portsSavedMessage``）：
+    #   界面用响应里的 ``running``、各类现值与 ``occupied`` 自己拼。
     return {
-        **_ports_payload(mgr, warnings=warnings),
+        **_ports_payload(mgr, occupied=occupied),
         "ok": True,
-        "message": msg,
         "probe": probe,
         "conflicts": [],
     }

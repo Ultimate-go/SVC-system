@@ -46,7 +46,7 @@ describe('pctOf', () => {
 
 describe('stageColor（阶段名 → 颜色 tone）', () => {
   it('加密 / 封装归 warn', () => {
-    assert.equal(stageColor('逐块加密（SM4）'), 'warn')
+    assert.equal(stageColor('数据块加密'), 'warn')
   })
   it('承诺归 accent', () => {
     assert.equal(stageColor('承诺（commit）'), 'accent')
@@ -61,7 +61,7 @@ describe('buildPerf（timings → 渲染结构）', () => {
     total_ms: 120,
     stages: [
       { stage: '切块', ms: 10, count: 1 },
-      { stage: '逐块加密（SM4）', ms: 40, count: 3 },
+      { stage: '数据块加密', ms: 40, count: 3 },
     ],
   }
 

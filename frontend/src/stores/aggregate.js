@@ -1,5 +1,5 @@
 /**
- * 证据池。
+ * 增量聚合与分解。
  *
  * ★ 它为什么必须存在：
  *
@@ -10,16 +10,16 @@
  *   而同一份文件内的块天然在同一条向量里，所以把它的那些下标聚成
  *   一份证据、一次验证是顺理成章的事；跨文件才要在合并位置集上重算。
  *
- * Pinia 只放两样东西：auth 与 pool。这就是那个 pool。
+ * Pinia 只放两样东西：auth 与这份证据面板。这就是那份面板。
  */
 
 import { defineStore } from 'pinia'
 import api from '../api/client'
 import { span } from '../utils/format'
 
-const CACHE_KEY = 'vds_pool'
+const CACHE_KEY = 'vds_aggregate'
 
-/** 从 sessionStorage 恢复池子（关掉标签页就没了，这是刻意的）。 */
+/** 从 sessionStorage 恢复聚合面板（关掉标签页就没了，这是刻意的）。 */
 function loadCache() {
   try {
     const raw = sessionStorage.getItem(CACHE_KEY)
@@ -41,7 +41,7 @@ const cached = loadCache()
 /** id 要接着已有的往下发，否则恢复后新卡片会和旧卡片撞 id。 */
 let seq = cached.cards.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
 
-export const usePoolStore = defineStore('pool', {
+export const useAggregateStore = defineStore('aggregate', {
   state: () => ({
     cards: [...cached.cards],
     selectedIds: [...cached.selectedIds],
@@ -64,7 +64,7 @@ export const usePoolStore = defineStore('pool', {
     /**
      * ★ 已作废的卡片 id 集合。
      *
-     * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**更新 / 清零 / 追加 / 截断**
+     * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**替换 / 置零 / 追加 / 删除**
      * 只改 C（在合并向量上）**不改全局位置总数 n** —— 所以只比 n 是抓不住改块的。
      *
      *   正确的判据是：**这张卡覆盖的每一份文件，它当时的指纹与现在的比** ——
@@ -121,7 +121,7 @@ export const usePoolStore = defineStore('pool', {
     isEmpty: (s) => s.cards.length === 0,
 
     /**
-     * 池子里已有的**下标集合**（拼成字符串便于查找）。
+     * 聚合面板里已有的**下标集合**（拼成字符串便于查找）。
      *
      * ★ 判据必须与 :meth:`addCard` 的去重**完全一致** —— 文件列表页的「已入池」
      *   标记就是拿它判的；两边口径不一致会出现“标着已入池，点下去却又新增了一张卡”。

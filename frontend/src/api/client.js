@@ -1,5 +1,8 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+// ★ 带扩展名：这份文件被 `frontend/tests/apiDetail.test.js` 直接 import，
+//   而 Node 的 ESM 解析器**不**会像 Vite 那样自动补 `.js`。
+import { apiErrorText } from '../data/errors.js'
 
 /**
  * 把后端 `detail` 变成**一句人话**。
@@ -70,8 +73,13 @@ api.interceptors.response.use(
   (resp) => resp,
   (err) => {
     const status = err.response?.status
+    // ★★ 先试**错误码**（2026-10-16 起）：后端在 `ApiError` 里多带一个
+    //   `code`（+ 可选 `params`），界面按它查 `data/errors.js` 取自己那一份措辞
+    //   —— 改界面文案不必重启后端。查不到（库异常原文透传、FastAPI 的 422…）
+    //   才回退成后端那句话。
+    const coded = apiErrorText(err.response?.data)
     // ★ 归一成一句人话（后端 422 的 detail 是数组，见 readableDetail）
-    const detail = readableDetail(err.response?.data?.detail)
+    const detail = coded || readableDetail(err.response?.data?.detail)
 
     // ★★ 归一要**全局生效**（审计 N8）：以前只归一拦截器自己要弹的那条 toast，
     //   而视图层大量 `catch` 直接把 `e?.response?.data?.detail` 摆到界面上

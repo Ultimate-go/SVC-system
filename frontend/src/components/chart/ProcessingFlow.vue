@@ -9,25 +9,33 @@
 import { computed, ref } from 'vue'
 import { rich } from '../../utils/tex'
 
+/*
+ * 六张卡片的副标题（卡片上那行小字）。
+ *
+ * ★ 一句一条，只说**本项目实际做了什么** —— 卡片只是目录，深的东西在点开后的
+ *   PRINCIPLES 里。这里写长句会把卡片撑高，而总览这一屏的重点是下面那块运行性能。
+ */
 const STAGES = [
-  { key: 'upload', label: '上传切块', en: 'CHUNK', detail: '接收文件并按段大小切块', tone: 'cyan' },
-  { key: 'encrypt', label: '加密', en: 'ENCRYPT', detail: '逐块加密并封装块密钥', tone: 'blue' },
-  { key: 'commit', label: '生成承诺', en: 'COMMIT', detail: '映射位置并聚合出承诺', tone: 'violet' },
-  { key: 'store', label: '分布式存储', en: 'REPLICATE', detail: '写入节点并创建副本', tone: 'green' },
-  { key: 'query', label: '查询取证', en: 'PROVE', detail: '按指定块取证', tone: 'amber' },
-  { key: 'verify', label: '完整性验证', en: 'VERIFY', detail: '公开验证完整性', tone: 'rose' },
+  { key: 'upload', label: '数据块切分', en: 'CHUNK', detail: '明文切 n 块，块号随切分固定', tone: 'cyan' },
+  { key: 'encrypt', label: '加密与密钥封装', en: 'ENCRYPT', detail: '每块一把 SM4 密钥，SM2 公钥封装', tone: 'blue' },
+  { key: 'commit', label: '承诺生成', en: 'COMMIT', detail: '位置映射素数，分量聚合为 δ', tone: 'violet' },
+  { key: 'store', label: '分布式存储', en: 'REPLICATE', detail: '密文按副本因子分发至各节点', tone: 'green' },
+  { key: 'query', label: '可验证查询', en: 'QUERY', detail: '取回凭证，凭 δ 当场配对检验', tone: 'amber' },
+  { key: 'aggregate', label: '增量聚合与分解', en: 'AGGREGATE', detail: '证据可合可分，代价只随变动', tone: 'rose' },
 ]
 
 /**
  * 六个阶段各自的密码学原理（点开卡片时弹出）。
  *
- * ★ 卡片与「上传页八步埋点」的对应（清单见 files/list/index.vue 的 UPLOAD_STEPS：
+ * ★ 卡片与「上传页九步埋点」的对应（清单见 files/list/index.vue 的 UPLOAD_STEPS：
  *   那份 key 与后端 `with stage("…")` 的名字对齐，见 core/timing.py）：
- *     ① 上传切块   ← ① 切块（split_segments）
- *     ② 加密       ← ② 生成密钥与 IV / ③ 逐块加密（SM4）/ ④ 封装块密钥（ECIES）
- *     ③ 生成承诺   ← ⑤ 算向量分量（SM3）/ ⑥ 承诺（push_update，含素数映射）
- *     ④ 分布式存储 ← ⑦ 分发到节点 / ⑧ 落库
- *     ⑤ 查询取证、⑥ 完整性验证 —— 这两环在上传链路之外。
+ *     ① 数据块切分   ← ① 明文分段
+ *     ② 加密与密钥封装 ← ② 块密钥与初始向量生成 / ③ 数据块加密/ ④ 块密钥封装
+ *     ③ 承诺生成     ← ⑤ 块标识生成/ ⑥ 承诺（push_update，含素数映射）
+ *     ④ 分布式存储   ← ⑦ 分发至存储节点 / ⑧ 分块登记 / ⑨ 文件登记
+ *     ⑤ 可验证查询、⑥ 增量聚合与分解 —— 这两环在上传链路之外。
+ *   （⑤ 内部再分「检索取证」与「配对检验」两页：取出证据、当场验它，
+ *     本来就是一次查询的两半；⑥ 内部再分「证据聚合」与「证据分解」两页。）
  *   这样分的原因：先在明文层「切块」，再密文层「加密」，再代数层「承诺」；
  *   位置素数既是「这一块落在哪里」的坐标，也是累加器的指数，因此与承诺同卡。
  *
@@ -44,7 +52,7 @@ const PRINCIPLES = {
       { t: '两步组织：先规划、再上传', d: '块大小顾问依据文件体积给出候选切法，列出块数、预计耗时与所依据的实测样本，并给出分发建议；顾问只提供建议，采纳与否由用户确认。' },
       { t: '段大小：部署给区间，文件各自记录', d: '部署配置规定的段大小区间是 64 字节至 1 MiB；某份文件按多少字节切分，会逐文件记录在该文件的元数据里，因此日后调整部署默认值不会影响既有文件。' },
       { t: '最后一段可以短，且不补齐', d: '末段不足段大小时按原样保留，不做填充：每段各自独立加密，填充反而会把长度信息搅乱；明文长度由调用方另行记录，段边界完全由长度决定，拼接时不需要任何填充约定。' },
-      { t: '块号自此刻起固定', d: '分块编号在切分完成时即行确定并固定下来；后续的内容更新、置零、追加与截断，都以这个编号为坐标。' },
+      { t: '块号自此刻起固定', d: '分块编号在切分完成时即行确定并固定下来；后续的内容替换、置零、追加与删除，都以这个编号为坐标。' },
       { t: '为什么必须定长', d: '每个分块要一一对应到向量上的一个位置，长度不统一就无法用「块号 → 位置」这条简单映射；定长同时使每块参与承诺的分量固定为 256 位，与块本身大小无关。' },
     ],
     formulas: [
@@ -59,7 +67,7 @@ const PRINCIPLES = {
       { t: '每段一把独立密钥', d: '每个分块用一把即时生成的 16 字节密钥独立加密，目的是按段隔离：某一块出问题只影响该块；代价是每段都要单独保护自己的密钥，这正是下面用 SM2 公钥逐块封装的理由。' },
       { t: '工作模式的选择（CTR）', d: 'CBC 具有错误传播：一段被改动会破坏其后所有分段。本系统的核心操作是仅替换指定分块、其余分块保持不变；若采用带传播性的模式，改写一个分块将导致其后全部分段重算，改写与追加的代价不再与改动量成正比。CTR 各段相互独立，任意一段均可单独解密，这是随机访问与增量更新的前提。' },
       { t: 'IV 不复用', d: 'CTR 下 IV 复用等价于同一密钥下重复使用计数器序列，两段明文异或后会泄露信息，因此每次加密都必须换新的随机 IV。' },
-      { t: '块密钥的保护：ECIES 封装', d: '该段的 SM4 密钥以文件所有者的 SM2 公钥按 ECIES 封装后入库，明文密钥在封装后立即销毁，唯一留存形式是密文列；系统里不存在能解开它的第二把钥匙，因此「解密仅限所有者」是密码学强制的，而不是靠权限表。' },
+      { t: '块密钥的保护：ECIES 封装', d: '该段的 SM4 密钥以文件所有者的 SM2 公钥按 ECIES 封装，明文密钥在封装后立即销毁；系统里不存在能解开它的第二把钥匙，因此「解密仅限所有者」是密码学强制的，而不是靠权限表。' },
       { t: '边界', d: '纯 CTR 仅保证机密性，不提供完整性：被篡改的密文仍能解出内容。本方案的完整性由向量承诺承担：验证方自行从收到的密文重算分量，能通过承诺验证即说明密文未被改动，因此无需再叠加认证加密层。' },
     ],
     formulas: ['$c_j = m_j \\oplus E_k(\\mathrm{ctr}_j)$　　（第 $j$ 段密文；$k$ 为该段独立密钥）'],
@@ -115,8 +123,20 @@ const PRINCIPLES = {
     formulas: ['$\\delta = ((U, C),\\ n)$', '$G = (N, g)$，$N = p \\cdot q$，$\\varphi(N)$ 不可得'],
   },
   query: {
-    headline: '取出若干块，并附上一份恒为两个群元素的证据',
-    blocks: [
+    /*
+     * ★ 这张卡把原来的「结果验证」并了进来：一次可验证查询本来就是两半 ——
+     *   先取证（生成 $\pi_I$），再当场验它（两条配对检查）。在此之前，
+     *   这两半分在两张卡上，而「配对检验」又和「聚合/分解」挤在同一张卡的
+     *   页签里；现在按主题拆干净：
+     *     ⑤ 可验证查询    = 检索取证 + 配对检验
+     *     ⑥ 增量聚合与分解 = 证据聚合 + 证据分解
+     */
+    tabs: [
+      {
+        key: 'prove',
+        label: '检索取证',
+        headline: '取出若干块，并附上一份恒为两个群元素的证据',
+        blocks: [
       { t: '子向量打开', d: '对位置子集 $I$ 生成证据 $\\pi(I) = (S(I),\\ \\Lambda(I))$，仅由两个群元素构成；承诺与证据的大小只与安全参数有关，不随向量长度 $n$ 或打开位置个数 $|I|$ 增长（简洁性）。' },
       { t: '第二个分量 $\\Lambda$ 的定义', d: '$S(I)$ 只由位置集合 $I$ 本身决定，是一条普通模幂；$\\Lambda(I)$ 则要把「不在 $I$ 里」的那些位置的值全部卷进来 —— 它是这些位置的加权见证之积，再开 $E(I)$ 次根。因此它的支撑集是 $I$ 的补集，计算代价与向量总长度同阶。约定：$I$ 覆盖全部位置时乘积为空，按空乘积取 $\\Lambda(I) = 1$。' },
       { t: '可聚合', d: '同一承诺下两个不相交集合 $I$、$J$ 的证据可合并为覆盖 $I \\cup J$ 的一份证据，大小仍是两个群元素；合并次数不受限制，顺序任意，结果相同。' },
@@ -129,20 +149,11 @@ const PRINCIPLES = {
       '$\\Lambda(I) = (\\prod_{j \\notin I} S_j^{v_j})^{1 / E(I)} \\bmod N$　（$j$ 取遍不在 $I$ 中的位置）',
       '$\\Lambda(I) = \\prod_{j \\notin I} (g^{E / (e_j \\cdot E(I))})^{v_j} \\bmod N$　（等价写法：每项都是普通模幂，不求根）',
       '$\\mathrm{root} = \\mathrm{root}_x^{\\,b} \\cdot \\mathrm{root}_y^{\\,a} \\bmod N$，　$a \\cdot x + b \\cdot y = 1$',
-    ],
-  },
-  verify: {
-    /*
-     * ★ 这张卡内容最多，弹框里带**页签**：验证本体 / 证据聚合 / 证据分解。
-     *   页签不止这一张有 —— 上面「生成承诺」也有两页；没有 tabs 的卡片，
-     *   模板会退回单页（见 shownPage）。
-     *   公式取自已发货的实现（svc/scheme.py 的 open_subvector / verify /
-     *   disagg / agg 四个函数的文档，那几段直接引了论文 §5.2 与清单 #22~#24）。
-     */
-    tabs: [
+        ],
+      },
       {
         key: 'ver',
-        label: '完整性验证',
+        label: '配对检验',
         headline: '两条检查相互配合，零信任地判定内容未被篡改',
         blocks: [
           { t: '检查①：结构合法性', d: '要求 $S(I)^{E(I)} = U_n$。该检查把 $S(I)$ 唯一确定为 $U_n$ 的 $E(I)$ 次根，不涉及任何数据值。它之所以必要：验证方并不持有单个 $S_i$，后者是从 $S(I)$ 现场重构的；若不先把 $S(I)$ 锁死，敌手可以任选一个 $S(I)$ 去凑第②式。' },
@@ -159,6 +170,17 @@ const PRINCIPLES = {
           '$S_i = S(I)^{\\,E(I)/e_i}$　（$i \\in I$；由 $S(I)$ 现场重构，无需预先持有）',
         ],
       },
+    ],
+  },
+  aggregate: {
+    /*
+     * ★ 这张卡原来挂在「结果验证」里当两个页签（证据聚合 / 证据分解）。
+     *   聚合与分解是同一件事的两个方向：一个把小集合并大、一个把大集合拆小，
+     *   两者配合能处理任意形状的集合运算，所以合成一卡两页。
+     *   公式取自已发货的实现（svc/scheme.py 的 agg / disagg 两个函数的文档，
+     *   那几段直接引了论文 §5.2 与清单 #22~#24）。
+     */
+    tabs: [
       {
         key: 'agg',
         label: '证据聚合',
@@ -214,7 +236,7 @@ const currentStage = computed(() => STAGES.find((s) => s.key === openKey.value) 
 const currentPrinciple = computed(() => (openKey.value ? PRINCIPLES[openKey.value] : null))
 
 /**
- * 带页签的卡片（目前只有「完整性验证」）。
+ * 带页签的卡片（目前只有「结果验证」）。
  *
  * ``tabs`` 存在 ⇒ 弹框里出现页签条，内容按页渲染；
  * 其余卡片没有这个字段 ⇒ ``shownPage`` 退回整份 principle，与改动前完全一致。
@@ -404,15 +426,15 @@ function openPrinciple(key) {
   padding: 2px 0 4px;
   overflow: hidden;
 }
-.flow-head { position: relative; z-index: 3; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
-.flow-kicker { position: relative; color: var(--text-3); font-size: 13px; letter-spacing: .14em; }
+.flow-head { position: relative; z-index: 3; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 10px; }
+.flow-kicker { position: relative; color: var(--text-3); font-size: 12px; letter-spacing: .14em; }
 .flow-kicker::after {
   content: ''; position: absolute; left: 0; bottom: -4px; width: 46px; height: 1px;
   background: linear-gradient(90deg, var(--accent), transparent);
   animation: kicker-glow 4.6s ease-in-out infinite;
 }
-.flow-caption { color: var(--text-1); font-size: 18px; font-weight: 600; letter-spacing: -.01em; margin: 6px 0 0; }
-.flow-state { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 13px; white-space: nowrap; }
+.flow-caption { color: var(--text-1); font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 4px 0 0; }
+.flow-state { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 12px; white-space: nowrap; }
 .flow-state i {
   width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 13%, transparent);
@@ -455,7 +477,10 @@ function openPrinciple(key) {
 .pipeline > .stage { z-index: 2; }
 .stage {
   --stage-color: var(--accent);
-  position: relative; flex: 1 1 112px; min-width: 106px; padding: 11px 10px 12px;
+  /* ★ 紧凑一档（2026-10-17）：卡片只是目录，撑高了会把总览的「运行性能」挤下去。
+     压的是内边距、图标与字号，**宽度留给文字** —— 六个标题里最长的
+     「加密与密钥封装 / 增量聚合与分解」要能在一行里放下。 */
+  position: relative; flex: 1 1 104px; min-width: 100px; padding: 8px 8px 9px;
   border: 1px solid color-mix(in srgb, var(--stage-color) 30%, var(--line)); border-radius: 8px;
   background: linear-gradient(145deg, color-mix(in srgb, var(--stage-color) 8%, var(--bg-raised)), var(--bg-panel));
   animation: stage-live var(--cycle) cubic-bezier(.34, .01, .2, 1) infinite;
@@ -559,22 +584,22 @@ function openPrinciple(key) {
 .spark.s2 { left: 50%; animation: spark-rise var(--cycle) ease-out infinite; animation-delay: calc(var(--i) * var(--step) + .34s); }
 .spark.s3 { left: 72%; animation: spark-rise var(--cycle) ease-out infinite; animation-delay: calc(var(--i) * var(--step) + .62s); }
 
-.stage-topline { display: flex; justify-content: space-between; align-items: center; color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
-.stage-status { color: var(--stage-color); font-size: 13px; opacity: .8; }
+.stage-topline { display: flex; justify-content: space-between; align-items: center; color: var(--text-3); font-size: 12px; letter-spacing: .08em; }
+.stage-status { color: var(--stage-color); font-size: 12px; opacity: .8; }
 .stage-index { color: var(--stage-color); animation: index-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
-.icon-wrap { position: relative; width: 48px; height: 48px; margin: 8px auto 6px; display: grid; place-items: center; color: var(--stage-color); }
-.stage-icon { width: 42px; height: 42px; overflow: visible; position: relative; z-index: 1; animation: icon-lift var(--cycle) cubic-bezier(.34, .01, .2, 1) infinite; animation-delay: calc(var(--i) * var(--step)); }
+.icon-wrap { position: relative; width: 34px; height: 34px; margin: 5px auto 3px; display: grid; place-items: center; color: var(--stage-color); }
+.stage-icon { width: 30px; height: 30px; overflow: visible; position: relative; z-index: 1; animation: icon-lift var(--cycle) cubic-bezier(.34, .01, .2, 1) infinite; animation-delay: calc(var(--i) * var(--step)); }
 .icon-stroke { fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
 .icon-stroke.faint { opacity: .55; stroke-width: 1.8; }.icon-fill { fill: currentColor; }
 .icon-pulse { position: absolute; inset: 6px; border: 1px solid currentColor; border-radius: 50%; opacity: .12; animation: icon-ring 2.4s ease-out infinite; animation-delay: calc(var(--i) * .8s); }
 /* 图标外的冲击波：点亮的那一刻扩出去一圈 */
 .icon-shock { position: absolute; inset: 3px; border: 1.5px solid currentColor; border-radius: 50%; opacity: 0; animation: icon-shock var(--cycle) cubic-bezier(.2, .7, .3, 1) infinite; animation-delay: calc(var(--i) * var(--step)); }
-.stage-label { color: var(--text-1); font-size: 13px; font-weight: 600; text-align: center; white-space: nowrap; }
-.stage-en { color: var(--stage-color); font-size: 13px; letter-spacing: .12em; text-align: center; margin-top: 3px; animation: en-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
-.stage-detail { color: var(--text-3); font-size: 13px; line-height: 1.5; text-align: center; margin-top: 8px; min-height: 40px; }
+.stage-label { color: var(--text-1); font-size: 12px; font-weight: 600; text-align: center; white-space: nowrap; letter-spacing: -.01em; }
+.stage-en { color: var(--stage-color); font-size: 11px; letter-spacing: .12em; text-align: center; margin-top: 2px; animation: en-glow var(--cycle) ease-in-out infinite; animation-delay: calc(var(--i) * var(--step)); }
+.stage-detail { color: var(--text-3); font-size: 12px; line-height: 1.45; text-align: center; margin-top: 5px; min-height: 34px; }
 
 /* ③ 块与块之间：轨道 + 流动虚线 + 彗星 + 依次亮起的箭头 */
-.link { position: relative; z-index: 2; flex: 0 0 30px; height: 2px; align-self: center; margin: -28px 2px 0; }
+.link { position: relative; z-index: 2; flex: 0 0 30px; height: 2px; align-self: center; margin: -24px 2px 0; }
 .rail { position: absolute; inset: 0; background: var(--line-strong); overflow: hidden; }
 .rail::after {
   content: ''; position: absolute; inset: 0; opacity: .8;

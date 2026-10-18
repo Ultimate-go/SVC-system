@@ -676,7 +676,7 @@ def verify_batch(
     rho: Sequence[int] | None = None,
     locate: bool = True,
 ) -> BatchReport:
-    r"""``VC.BatchVer`` —— **一次验多份证据**（跨文件、跨用户、跨证据池）。
+    r"""``VC.BatchVer`` —— **一次验多份证据**（跨文件、跨用户、跨多份证据）。
 
     需求原句是「选择若干证据验证、**聚合验证**」。逐份验那条路已经走了
     （:func:`verify`）；这里是"**一次结论**"那条路：挑随机系数

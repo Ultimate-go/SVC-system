@@ -33,6 +33,7 @@ from core.keywrap import (
     KeyWrapError,
     KeyWrapFormatError,
     KeyWrapIntegrityError,
+    block_aad,
     make_user_keypair,
     public_bytes,
     public_from_bytes,
@@ -50,6 +51,7 @@ from core.timing import stage
 from core.faults import MODE_DESTROYED, MODE_DOWN, FaultyTransport
 from core.transport import NodeTransport, TransportError, WriteError
 from svc import Opening, VerifyCode, as_index_set
+from svc import agg as svc_agg
 from svc import disagg as svc_disagg
 from svc import verify as svc_verify
 from svc import verify_batch as svc_verify_batch
@@ -296,7 +298,7 @@ class StoreManager:
             row = self._user_row(db, username)
             if row.pub_key and row.sk_wrapped:
                 return False
-            with stage("生成密钥对并封装私钥"):
+            with stage("密钥对生成与私钥封装"):
                 _sk, pk, blob = make_user_keypair(password)
             row.pub_key = public_bytes(pk).hex()
             row.sk_wrapped = json.dumps(blob, ensure_ascii=False)
@@ -329,7 +331,7 @@ class StoreManager:
 
         def _write(session: object) -> None:
             row = self._user_row(session, username)
-            with stage("重新封装私钥（PBKDF2-HMAC-SM3）"):
+            with stage("私钥重新封装"):
                 row.sk_wrapped = json.dumps(
                     wrap_private_key(new_password, old_sk), ensure_ascii=False
                 )
@@ -427,7 +429,7 @@ class StoreManager:
             #   抬高暴力破解的代价。
             #   注：阶段名里**不写"20 万次"** —— 迭代数是可配置的
             #   （测试档就是 2000），写死一个可能不准的数比不写更糟。
-            with stage("解封私钥（PBKDF2-HMAC-SM3）"):
+            with stage("私钥解封装"):
                 return unwrap_private_key(password, json.loads(row.sk_wrapped))
 
     def user_key_blob(self, username: str) -> dict:
@@ -816,7 +818,18 @@ class StoreManager:
             return
 
         if self.settings.distributed:
-            hint = "（节点数据目录丢了？或者这份库是用单进程模式写的？）"
+            hint = (
+                "（对着上面两列看是哪一种：\n"
+                "    · 节点多出协调者没有的 offset —— 有一笔写没推完：节点收了，"
+                "协调者回滚了自己的账（这种可以按下面第 1 条重来，或先停节点跑 "
+                "scripts/_node_forget_stray.py 看一眼要清什么）；\n"
+                "    · 同一个 offset 的 n 两边不一样、或某台多出一整段 —— "
+                "库被重建过但节点目录没跟着清，节点还停在上一代的位置账上。\n"
+                "  两种都别手改数据，按协调者的账重来一遍：\n"
+                "    python scripts\\start_all.py --reset      # 库与节点目录一起清\n"
+                "  ★ 不要用 scripts\\seed.py --reset 来修这个错：它只删协调者的表，"
+                "节点目录不动，重启还是同一个错（★ 2026-10-16 实测踩到）。）"
+            )
         else:
             hint = (
                 "（这份库是用跨进程模式写的：那时节点状态存在各节点自己的库里，"
@@ -1330,11 +1343,15 @@ class StoreManager:
             n0 = store.n
             key_cts: dict[int, dict] = {}
 
-            def sink(pos: int, key: bytes) -> None:
+            def sink(pos: int, key: bytes, iv: bytes) -> None:
                 # ★ 明文 key 只在这里出现一瞬：包完立刻被丢弃。
                 #   本函数不留副本 —— 延续 core/store.py 那条性质。
-                with stage("封装块密钥（ECIES）"):
-                    key_cts[pos] = wrap_key(pk_owner, key)
+                # ★ ``iv`` 是这一块**数据段**的 IV：把「块身份 + 数据段 IV」绑进认证
+                #   标签，把别块的密钥密文配到这一块上就解不开了。
+                with stage("块密钥封装"):
+                    key_cts[pos] = wrap_key(
+                        pk_owner, key, aad=block_aad(owner, file_key, pos, iv)
+                    )
 
             def _finish() -> FileRow:
                 """把这次上传**落库**。
@@ -1359,8 +1376,10 @@ class StoreManager:
                     raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
                 raise OutOfRange(msg) from exc
 
-            with stage("落库（上传文件登记）"):
-                frow = self._persist_once(_finish)
+            # ★ 落库那一步的埋点**在 `_finish_upload` 里面**（文件登记 / 分块登记
+            #   两段），这里不再包一层 —— 阶段不许嵌套（见 core/timing.py 那条纪律），
+            #   外面再包一次就会把里面两段重复计一遍。
+            frow = self._persist_once(_finish)
             # 记一下这次上传把该文件的向量推到了哪个位置段，方便排查
             assert store.n == n0 + frow.block_count
             return frow
@@ -1417,9 +1436,11 @@ class StoreManager:
             # ② 真正改：新密钥在 sink 里就地包成密文，明文不留
             wrapped: dict[int, dict] = {}
 
-            def sink(pos: int, key: bytes) -> None:
-                with stage("封装块密钥（ECIES）"):
-                    wrapped[pos] = wrap_key(pk_owner, key)
+            def sink(pos: int, key: bytes, iv: bytes) -> None:
+                with stage("块密钥封装"):
+                    wrapped[pos] = wrap_key(
+                        pk_owner, key, aad=block_aad(owner, file_key, pos, iv)
+                    )
 
             def _finish() -> dict:
                 """③ 再写库（理由同 :meth:`upload`）。
@@ -1488,7 +1509,10 @@ class StoreManager:
             except ValueError as exc:
                 raise OutOfRange(str(exc)) from exc
 
-            with stage("落库（新密文与块登记）"):
+            # ★ 名字用「改写」而不是「替换」：这一步 ``modify`` 与 ``zero`` 共用
+            #   （置零就是“往那一块写等长的全 0 字节”，走的是同一条 ``op = mod``）。
+            #   叫「替换」的话，置零的步骤条上会出现一个说不通的名字。
+            with stage("分块登记入库（改写）"):
                 return self._persist_once(_finish)
 
     # -------------------------------------------------------------------
@@ -1805,9 +1829,11 @@ class StoreManager:
             # ② 真正追加：新密钥在 sink 里就地包成密文，明文不留
             wrapped: dict[int, dict] = {}
 
-            def sink(pos: int, key: bytes) -> None:
-                with stage("封装块密钥（ECIES）"):
-                    wrapped[pos] = wrap_key(pk_owner, key)
+            def sink(pos: int, key: bytes, iv: bytes) -> None:
+                with stage("块密钥封装"):
+                    wrapped[pos] = wrap_key(
+                        pk_owner, key, aad=block_aad(owner, file_key, pos, iv)
+                    )
 
             def _finish() -> dict:
                 """③ 再写库（理由同 :meth:`upload`）。
@@ -1837,7 +1863,7 @@ class StoreManager:
                         )
                     frow = db.get(FileRow, file_id)
                     assert frow is not None
-                    # 版本号 +1 —— 防重放的那个序号，同时让旧证据（含证据池里的卡）作废
+                    # 版本号 +1 —— 防重放的那个序号，同时让旧证据（含增量聚合与分解里的卡）作废
                     frow.version += 1
                     frow.block_count = cur.block_count
                     frow.total_bytes = cur.total_bytes
@@ -1868,7 +1894,7 @@ class StoreManager:
                 msg = str(exc)
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
-            with stage("落库（新块与块登记）"):
+            with stage("分块登记入库（追加）"):
                 return self._persist_once(_finish)
 
     def truncate_file(self, owner: str, file_key: str, drop_blocks: int) -> dict:
@@ -1879,14 +1905,19 @@ class StoreManager:
 
         .. important::
 
-           **只有"当前向量末尾"的块删得动。** 这不是实现偷懒，是方案的限制：
-           ``vds.updates._push_del`` 要求待删集合恰好是 ``range(n-k, n)``
-           （新摘要用到 :math:`e_{[n]} = e_{[n-k]} \cdot e_K` 这个因式分解）。
-           所以"删文件中间的块"在数学上就不是一次 ``del``。
+           **只删得动“这份文件位置段的末尾”那几块。** “删这份文件中间的块”
+           在数学上不是一次 ``del``（那要重编号、重新承诺），所以
+           :meth:`~core.store.VectorStore.truncate` 只需校验“要删的那几块确实是
+           这份文件自己的末尾”，其余情况会报错并说清原因。
 
-           使用上的推论：**只有最后写进向量的那份文件才删得动尾巴**。别的文件
-           就算排在末尾，它前面也可能压着别人后写的块 —— 那种情况
-           :meth:`~core.store.VectorStore.truncate` 会报错并**说清是哪些下标卡住**。
+           ★ 历史（★ 2026-10-16 实测订正）：旧坐标（全局素数表）下 ``_push_del``
+           要求待删集合恰好是 ``range(n-k, n)``（新摘要用到
+           :math:`e_{[n]} = e_{[n-k]} \cdot e_K` 这个因式分解），于是当时
+           **只有最后写进向量的那份文件才删得动尾巴**；换成新坐标
+           （块身份派生素数）后每份文件各占一段，这条束缚**已不存在** ——
+           后面压着别人后写的块也照样删得动。
+           实测：一份写在前面、后面又写过别的文件的文件，截断返回 200。
+           所以**能否删除与写入顺序无关**，界面上也就不该再提那条旧限制。
 
         .. important::
 
@@ -1952,7 +1983,7 @@ class StoreManager:
                                 NodeBlobRow.global_index.in_(doomed)
                             )
                         )
-                    # 版本号 +1：与改块/追加同一语义 —— 旧证据（含证据池里的卡）作废
+                    # 版本号 +1：与改块/追加同一语义 —— 旧证据（含增量聚合与分解里的卡）作废
                     frow.version += 1
                     frow.block_count = cur.block_count
                     frow.total_bytes = cur.total_bytes
@@ -1979,7 +2010,7 @@ class StoreManager:
                 msg = str(exc)
                 raise (Conflict(msg) if "已存在" in msg else OutOfRange(msg)) from exc
 
-            with stage("落库（删除登记）"):
+            with stage("分块登记入库（删除）"):
                 out = self._persist_once(_finish)
             out["dropped_from"] = n_before
             return out
@@ -2092,7 +2123,7 @@ class StoreManager:
                     f"账目里的块数={len(rec.indices)}"
                 )
 
-            with stage("落库（删除上传文件）"):
+            with stage("文件注销登记"):
                 out = self._persist_once(_finish)
             out["dropped_from"] = n_before
             return out
@@ -2294,6 +2325,32 @@ class StoreManager:
     # 分解再聚合（需求 5）
     # -------------------------------------------------------------------
 
+    @staticmethod
+    def _card_files_entry(fid, fd, gs, loc, delta_fp) -> list[dict]:
+        r"""把「这一份文件」的一块摘要塞进响应里 —— 与 ``/api/query`` 的 ``files`` 同形。
+
+        界面拿它把**全局位置号**折算成「哪份文件的第几块」（``cardScope`` 只认
+        ``files``，不认 ``refs``）。少了它，分解 / 合并出来的卡片标题就会退化成
+        一串内部坐标（7-12 这种），而那些数是本方案刻意不让人看见的。
+
+        :param gs: 这份证据覆盖的**全局位置号**（升序）。
+        :param loc: ``全局位置号 → 文件内局部块号`` 的换算表。
+        :param delta_fp: 这份文件的 δ 指纹（判「这张卡还有效吗」用）。
+        """
+        return [
+            {
+                "owner": fid[0],
+                "file_key": fid[1],
+                "offset": fd.offset,
+                "n": fd.n,
+                "delta_fp": delta_fp,
+                #: 与 ``indices`` **同序**：`indices[k]` 是这条文件里的第
+                #: ``block_indices[k]`` 块。
+                "block_indices": [loc[g] for g in gs],
+                "indices": list(gs),
+            }
+        ]
+
     def disagg(self, evidence: dict, K: Sequence[int]) -> dict:
         r"""**分解**：从一份已有证据里拆出子集的证据 —— **不向节点取数据**。
 
@@ -2303,7 +2360,7 @@ class StoreManager:
         这是需求 5「分解再聚合」里"分解"的那一半。
 
         :param evidence: ``{"I": [...], "values": [...], "S_I": "...", "Lambda_I": "..."}``
-            —— 就是 ``/api/query`` 响应里那几个字段，前端把池子里的卡片
+            —— 就是 ``/api/query`` 响应里那几个字段，前端把聚合面板里的卡片
             **原样传回来**即可，不必另造一份数据结构。
 
         .. important::
@@ -2334,7 +2391,7 @@ class StoreManager:
                 raise OutOfRange(
                     f"分解只能取出「子集」：{missing} 不在原证据覆盖的 {list(I)} 里。\n"
                     "  含「新」下标的证据必须另外去取（向持有那些块的节点定向 fetch），"
-                    "再与分解出来的部分聚合 —— 这正是证据池存在的理由。"
+                    "再与分解出来的部分聚合 —— 这正是聚合面板存在的理由。"
                 )
 
             # ★ 按文件取 crs_n：新方案里每份文件一条向量，素数视图必须与
@@ -2369,7 +2426,7 @@ class StoreManager:
             #   ``svc.disagg`` 算的是 :math:`S_I^{e_K}`，指数必须走**局部**号 ——
             #   拿全局号进去，只有 ``offset = 0`` 的那份文件恰好相等，其余文件
             #   要么报 ``S_I 校验失败``、要么报 ``下标越界``。
-            #   （实测踩过：池子里除第一份文件外「分解」全废，而报错还赖到
+            #   （实测踩过：聚合面板里除第一份文件外「分解」全废，而报错还赖到
             #   “旧的 δ”头上 —— 卡片明明是刚取的。）
             loc = {g: i for i, g in enumerate(_fd.positions)}
             stray = sorted(set(I) - set(loc))
@@ -2387,12 +2444,12 @@ class StoreManager:
                 _to_int(evidence["Lambda_I"], what="Lambda_I"),
                 as_index_set(I_loc),
             )
-            with stage("拆出子集证据（svc.disagg）"):
+            with stage("拆出子集证据"):
                 pi_K = svc_disagg(crs_n, I_loc, vals_I, pi_I, K_loc)
 
             val_of = dict(zip(I, vals_I))
             F_K = tuple(val_of[i] for i in K_set)
-            with stage("验证拆出来的证据（VerRetrieve）"):
+            with stage("校验拆出的证据"):
                 report = ClientNode(store.session, _fd).ver_retrieve(
                     list(K_loc), list(F_K), pi_K
                 )
@@ -2419,6 +2476,14 @@ class StoreManager:
             return {
                 #: 这份结论覆盖到的**全局位置总数**。
                 "delta_n": store.n,
+                #: ★ 这份文件的 δ 指纹 —— 界面靠它判“这张卡还有效吗”。
+                #:   缺了它，分解/合并出来的卡就永远显示成“有效”，
+                #:   而那正是文件改过之后最危险的一种状态。
+                "delta_fp": self.delta_fingerprint(_fids[0]),
+                #: 界面拿它把内部坐标折算回“哪份文件的第几块”。
+                "files": self._card_files_entry(
+                    _fids[0], _fd, K_set, loc, self.delta_fingerprint(_fids[0])
+                ),
                 "indices": list(K_set),
                 "values": [str(v) for v in F_K],
                 "proof": {
@@ -2454,10 +2519,192 @@ class StoreManager:
                 "dropped": sorted(set(I) - set(K_set)),
             }
 
+    def agg(self, a: dict, b: dict) -> dict:
+        r"""**合并**：把两份**已有**证据并成一份 —— **不向节点取数据**。
+
+        与 :meth:`disagg` 正好相反的方向，用的是同一个 ``svc`` 函数族：
+
+        ==================  ==========================  ==========================
+        方向                函数                        代价
+        ==================  ==========================  ==========================
+        :math:`\pi_I \to \pi_K`（K ⊆ I）  ``svc.disagg``  :math:`O(\ell|I \setminus K|)` 次乘法
+        :math:`\pi_I \otimes \pi_J`       ``svc.agg``     Shamir 技巧 + 两次求根，**一次网络都不发**
+        ==================  ==========================  ==========================
+
+        .. important::
+
+           **这是「增量聚合」那一步。** 两份证据都是**已经存在**的
+           （聚合面板里取的、或上一次合并出来的），合并只用到它们自己的
+           :math:`(I, v_I, \pi_I)` 与 :math:`(J, v_J, \pi_J)` ——
+           不重新取密文、不重算分量。所以"先合一半、以后再把新来的并进来"
+           是真的**复用**，代价只与**新并进来的那部分**有关。
+
+           实测（``scripts/verify_incremental_agg.py``）：先聚合前 3 块、再聚合后 3 块、
+           然后合并这两份中间结果，所得 :math:`(S, \Lambda)` 与**一次性取全部 6 块**
+           得到的**逐位相同**；换划分、换顺序、多层嵌套也一样。
+
+        .. important::
+
+           两份证据必须落在**同一条向量**上：本方案里每份文件各占一条向量
+           （各有自己的 :math:`C_f`），所以这里同样只支持**一份文件**的下标。
+           跨文件的那条路不是这个接口 —— 它得把各文件的承诺抬进一条合并向量，
+           代价是 :math:`O(\sum_f |f|)` 次大指数模幂，见
+           :meth:`core.store.VectorStore._prove_merged`。
+
+           :math:`I \cap J = \varnothing` 是硬约束（``svc.agg`` 的前提）。
+           有重叠时应当先 :meth:`disagg` 把重叠部分去掉再合。
+
+        :param a: ``{"indices": [...], "values": [...], "proof": {"S_I", "Lambda_I", "I"}}``
+            —— ``/api/query`` 响应里那几项，前端把卡片原样传回来即可。
+        """
+        with self._lock:
+            store = self._require()
+
+            def _parse(card: dict, tag: str):
+                idx = as_index_set(card["indices"])
+                pf = card["proof"]
+                vals = [_to_int(v, what=f"{tag} 的 values") for v in card["values"]]
+                if len(vals) != len(idx):
+                    raise OutOfRange(
+                        f"{tag}：indices 有 {len(idx)} 个，但 values 有 {len(vals)} 个 —— 对不上"
+                    )
+                # ★ 这里**先不**给 Opening 定 I：卡片里的 ``proof.I`` 是
+                #   **文件内局部块号**，而 ``indices`` 是**全局位置号**，
+                #   两者只有在 offset = 0 的那份文件上才恰好相等。
+                #   直接拿去 `as_index_set` 对比会在别的文件上误报（实测踩过）。
+                #   等下面算出 loc 映射之后再对齐着查。
+                return idx, vals, (
+                    _to_int(pf["S_I"], what=f"{tag} 的 S_I"),
+                    _to_int(pf["Lambda_I"], what=f"{tag} 的 Lambda_I"),
+                    [int(i) for i in (pf.get("I") or [])],
+                )
+
+            I, vals_I, (s_I, lam_I, piI_I) = _parse(a, "第一份证据")
+            J, vals_J, (s_J, lam_J, piJ_I) = _parse(b, "第二份证据")
+
+            if not I or not J:
+                raise OutOfRange("两份证据都必须覆盖至少一个分块")
+
+            dup = sorted(set(I) & set(J))
+            if dup:
+                raise OutOfRange(
+                    f"合并要求两份证据覆盖的分块**互不重叠**：{dup[:8]}"
+                    f"{'…' if len(dup) > 8 else ''} 两边都有。\n"
+                    "  先把其中一份分解掉重叠的部分（「分解」），再合并。"
+                )
+
+            # ★ 与 disagg 同一套口径：一次只支持一份文件的下标。跨文件的两份证据
+            #   各绑在自己的 C_f 上，直接 Agg 会算出一个"看起来正常"的东西。
+            union = sorted(set(I) | set(J))
+            try:
+                _refs = [store.describe(g) for g in union]
+            except KeyError as exc:
+                raise OutOfRange(exc.args[0] if exc.args else str(exc)) from exc
+            _fids = sorted({(r.owner, r.file_key) for r in _refs})
+            if len(_fids) != 1:
+                raise OutOfRange(
+                    f"合并要求两份证据属于**同一份文件**，实际覆盖了 {len(_fids)} 份：{_fids}"
+                )
+            _fd = store.delta_of(*_fids[0])
+            crs_n = store.session.crs_n_for(_fd)
+
+            # 全局位置号 → 文件内局部块号（``svc.agg`` 的指数走局部号）。
+            loc = {g: i for i, g in enumerate(_fd.positions)}
+            stray = sorted(set(union) - set(loc))
+            if stray:
+                raise OutOfRange(
+                    f"下标 {stray[:8]} 不属于这份文件 {_fids[0]}："
+                    f"它占的位置是 {list(_fd.positions)[:4]}…（共 {len(loc)} 块）。\n"
+                    "  传进来的 indices 必须是「全局位置号」（即 /api/query 响应里的 indices）。"
+                )
+
+            # 现在两个口径都能算了：把卡片的 indices 映射成局部号，再与它自带的
+            # ``proof.I`` 对齐 —— 对不上说明这张卡被拼过，不能拿来合并。
+            I_loc = [loc[g] for g in I]
+            J_loc = [loc[g] for g in J]
+            for tag, want, got in (("第一份", I_loc, piI_I), ("第二份", J_loc, piJ_I)):
+                if got and as_index_set(got) != as_index_set(want):
+                    raise OutOfRange(
+                        f"{tag}证据里的 proof.I 与 indices 对不上 —— "
+                        f"这两项应当来自同一次取得的证据，不能拼接。"
+                    )
+            pi_I = Opening(s_I, lam_I, as_index_set(I_loc))
+            pi_J = Opening(s_J, lam_J, as_index_set(J_loc))
+
+            with stage("合并两份证据"):
+                pi_K = svc_agg(
+                    crs_n,
+                    I_loc, vals_I, pi_I,
+                    J_loc, vals_J, pi_J,
+                )
+
+            val_of = dict(zip(I, vals_I))
+            val_of.update(zip(J, vals_J))
+            F_K = tuple(val_of[g] for g in union)
+            with stage("校验合并所得证据"):
+                report = ClientNode(store.session, _fd).ver_retrieve(
+                    [loc[g] for g in union], list(F_K), pi_K
+                )
+            if not report.ok:
+                raise OutOfRange(
+                    f"合并所得证据未通过验证：{report.message}\n"
+                    f"  最可能的原因是两份证据**不在同一个 δ 上**"
+                    f"（其中一份是在旧版本上取的）——\n"
+                    f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让此前的证据失效。\n"
+                    f"  请把两份都重新取一次（当前 n = {_fd.n}）。"
+                )
+
+            # 响应与 /api/query 同构（前端那张卡片直接复用）。
+            #   * holder / refs —— 协调者本来就知道谁持有哪一块，照填；
+            #   * cert_count = 0、nodes_used = [] —— 合并确实一份凭证都没收，
+            #     填个假数字才是骗人。
+            return {
+                "delta_n": store.n,
+                #: 同 disagg：带上这份文件的 δ 指纹，卡片才能自己判作废。
+                "delta_fp": self.delta_fingerprint(_fids[0]),
+                #: 同 disagg：界面靠它把内部坐标换成“哪份文件的第几块”。
+                "files": self._card_files_entry(
+                    _fids[0], _fd, union, loc, self.delta_fingerprint(_fids[0])
+                ),
+                "indices": list(union),
+                "values": [str(v) for v in F_K],
+                "proof": {
+                    "S_I": str(pi_K.S_I),
+                    "Lambda_I": str(pi_K.Lambda_I),
+                    "I": list(pi_K.I),
+                    "size_bytes": proof_bytes(pi_K.S_I, pi_K.Lambda_I),
+                },
+                "verify": {
+                    "ok": bool(report.ok),
+                    "code": int(report.code),
+                    "code_name": verify_code_name(report.code),
+                    "message": report.message,
+                },
+                "ok": bool(report.ok),
+                "holders": {str(i): store.holder_of(i) for i in union},
+                "refs": [
+                    {
+                        "global_index": store.registry.positions_of(
+                            ref.owner, ref.file_key
+                        )[ref.block_idx],
+                        "owner": ref.owner,
+                        "file_key": ref.file_key,
+                        "block_idx": ref.block_idx,
+                    }
+                    for ref in _refs
+                ],
+                "cert_count": 0,
+                "nodes_used": [],
+                # ↓ 合并特有的：界面用它们说清"这次是哪两份来的、并成了哪些"
+                "aggregated": True,
+                "source_indices": [list(I), list(J)],
+                "merged_into": list(union),
+            }
+
     def verify_batch(
         self, cards: Sequence[dict], *, locate: bool = True, compare: bool = True
     ) -> dict:
-        r"""**批量验证**：一次验池子里的多份证据 —— 判据是它们**共享同一个承诺**。
+        r"""**批量验证**：一次验聚合面板里的多份证据 —— 判据是它们**共享同一个承诺**。
 
         是不是“同一份文件”不是关键，**哪条向量**才是：
 
@@ -2469,7 +2716,7 @@ class StoreManager:
 
         .. important::
 
-           **不同宇宙的卡不能混**：方程右边的 ``U'``/``C'`` 是所有份共享的，
+           **来自不同合并向量的卡不能混**：方程右边的 ``U'``/``C'`` 是所有份共享的，
            学位论文 ``Def. 29`` 的聚合正确性原文就是「any commitment ``C`` …
            Ver(pp, ``C``, J, v_J, π_J) = 1」。
            所以这里按“卡自己涉及的文件集合”分组，发现多组时**明确报错**
@@ -2480,7 +2727,7 @@ class StoreManager:
         "**一次结论**"：挑随机系数把 m 条方程合成一条（:func:`svc.verify_batch`）。
 
         :param cards: 每张取 ``/api/query`` 响应里的
-            ``indices`` / ``values`` / ``proof`` —— 前端把池子里的卡片原样传回来。
+            ``indices`` / ``values`` / ``proof`` —— 前端把聚合面板里的卡片原样传回来。
         :param compare: 同时跑一遍**逐份验**，把两个耗时都报出去。
             这不是为了显得快，恰恰相反：实测批量更慢（规划 §13.6），
             把两个数一起摆出来才不会让人误会。同时它能当场发现"两套结论不一致"
@@ -2491,7 +2738,7 @@ class StoreManager:
 
            证据是 **n 的函数**，所以**必须都来自同一轮 δ** ——
            方程右边的 :math:`U_n` 与 :math:`C` 是所有份共享的。
-           返回体里带上 ``delta_fp``，前端可以拿它与池子里的指纹比对，
+           返回体里带上 ``delta_fp``，前端可以拿它与聚合面板里的指纹比对，
            避免把过时证据当"被篡改"。
         """
         with self._lock:
@@ -2503,7 +2750,7 @@ class StoreManager:
             #   * 涉及多份文件（「聚合选中」归约出来的）→ 合并向量。
             #   两者用的是同一段构造：core/store.py::universe_for。
             #
-            #   不同宇宙的卡**不能混** —— 方程右边的 U'/C' 是所有份共享的
+            #   不同合并向量的卡**不能混** —— 方程右边的 U'/C' 是所有份共享的
             #   （Def. 29 的前提就是同一个 C）。所以按“卡自己涉及的文件集合”
             #   分组，发现多组就明确报错，而不是硬算出一条没人验得了的方程。
             try:
@@ -2543,7 +2790,7 @@ class StoreManager:
                 #   proof.I 只用来跟它对账（对不上就是 BAD_SHAPE）。
                 raw_I = [int(i) for i in c["indices"]]
                 # ★ 卡片的 indices 是**全局位置号**，而凭证与 CRS 的指数用**局部块号**
-                #   （``proof.I`` 本来就是这个宇宙里的局部号）。不换算的话，
+                #   （``proof.I`` 本来就是这条合并向量里的局部号）。不换算的话，
                 #   除第一份文件外一律 ``BAD_SHAPE``。
                 stray2 = sorted({i for i in raw_I if i not in loc})
                 if stray2:
@@ -2634,32 +2881,38 @@ class StoreManager:
         done = store.files[(owner, file_key)]
         holders = {i: store.holder_of(i) for i in done.indices}
         with self.db.session() as db:
-            frow = FileRow(
-                owner=owner,
-                file_key=file_key,
-                segment_bytes=done.segment_bytes,
-                total_bytes=done.total_bytes,
-                content_digest=done.content_digest,
-                block_count=done.block_count,
-            )
-            db.add(frow)
-            db.flush()
-            for pos, gidx in enumerate(done.indices):
-                db.add(
-                    BlockRow(
-                        global_index=gidx,
-                        file_id=frow.id,
-                        owner=owner,
-                        file_key=file_key,
-                        block_idx=pos,
-                        element=str(store.values[gidx]),
-                        key_ct=json.dumps(key_cts[pos], ensure_ascii=False),
-                        iv=done.ivs[pos],
-                        plain_len=done.plain_lengths[pos],
-                        holder=holders[gidx],
-                        replicas=json.dumps(list(store.replicas_of(gidx))),
-                    )
+            # ★ 两段分开计时（界面上的第 8、9 步各对一段）：
+            #     文件登记 —— 用户侧那条记录（文件列表、版本、位置段）；
+            #     分块登记 —— 「哪一块落在哪台」的账。
+            #   顺序上文件登记在前：分块那些行要引用它的主键。
+            with stage("文件登记入库"):
+                frow = FileRow(
+                    owner=owner,
+                    file_key=file_key,
+                    segment_bytes=done.segment_bytes,
+                    total_bytes=done.total_bytes,
+                    content_digest=done.content_digest,
+                    block_count=done.block_count,
                 )
+                db.add(frow)
+                db.flush()
+            with stage("分块登记入库"):
+                for pos, gidx in enumerate(done.indices):
+                    db.add(
+                        BlockRow(
+                            global_index=gidx,
+                            file_id=frow.id,
+                            owner=owner,
+                            file_key=file_key,
+                            block_idx=pos,
+                            element=str(store.values[gidx]),
+                            key_ct=json.dumps(key_cts[pos], ensure_ascii=False),
+                            iv=done.ivs[pos],
+                            plain_len=done.plain_lengths[pos],
+                            holder=holders[gidx],
+                            replicas=json.dumps(list(store.replicas_of(gidx))),
+                        )
+                    )
             # ★★ 兜底：这个 (owner, file_key) 上的回滚演示记录一律清掉。
             #    正常路径上删文件时已经清了；但万一有窗口漏过来
             #    （库被手工改过、或旧版本删文件时没清），
@@ -2712,14 +2965,22 @@ class StoreManager:
         if (owner, file_key) not in store.files:
             raise NotFound(f"文件 {owner}/{file_key} 不存在")
         blocks = self._blocks_of(owner, file_key)
+        # ★ 解封要把同一个块身份（含这一块的**数据段 IV**）算回 AAD 里 ——
+        #   IV 取自协调者自己的账目（``FileRecord.ivs``），与 ``cipher_of``
+        #   交给客户端的是同一份，两侧才能算出同一个 AAD。
+        rec = store.files[(owner, file_key)]
 
         def key_of(pos: int) -> bytes:
             row = blocks.get(pos)
             if row is None:
                 raise NotFound(f"文件 {owner}/{file_key} 没有第 {pos} 块")
             try:
-                with stage("解封块密钥（ECIES）"):
-                    return unwrap_key(sk, json.loads(row["key_ct"]))
+                with stage("块密钥解封装"):
+                    return unwrap_key(
+                        sk,
+                        json.loads(row["key_ct"]),
+                        aad=block_aad(owner, file_key, pos, rec.ivs[pos]),
+                    )
             except KeyWrapIntegrityError as exc:
                 # ★ 这是**密码学那道门**的拒绝：这块的块密钥是用**所有者的
                 #   公钥**封的，你的私钥对它无效。注意它不是"查表发现你没
@@ -3055,6 +3316,35 @@ class StoreManager:
     # 视图 / 状态
     # -------------------------------------------------------------------
 
+    def perf_overview(self) -> dict:
+        """性能画像要的几项规模与公开参数 —— **全部从内存账目读，一次网络都不发**。
+
+        ★ 为什么不能在 ``/api/perf/summary`` 里调 :meth:`status`（实测踩到）：
+          那个方法会 ``store.node_report()`` 逐台探活，而且**每台都顺带做一次
+          密码学验证**（``verify=True``；单台探活超时 10 秒）。而性能面板默认
+          **每 5 秒轮询一次** —— 两者叠在一起，机器一忙就会把请求拖到超时，
+          界面上表现为“刷新快照失败”。
+
+          这份画像只需要三个规模数字与几个公开参数，它们就在内存账目里：
+          ``store.n``（各文件块数之和）、``len(store.files)``、
+          ``len(store.node_ids)``、``store.session.crs``。
+          “节点活着几台”属于「一致性如何」，由自检与存储节点页回答，不归这里。
+        """
+        store = self._require()
+        crs = store.session.crs
+        return {
+            "blocks": store.n,
+            "files": len(store.files),
+            #: ★ 台数用**登记台数**（而不是“答上话的台数”）：这一份是性能画像，
+            #:   不该跟着节点抖动；在线情况看自检结论与「存储节点」页。
+            "nodes": len(store.node_ids),
+            "crs": {
+                "n_bits": crs.N.bit_length(),
+                "l": store.session.l,
+                "n_max": store.session.n_max,
+            },
+        }
+
     def status(self) -> dict:
         store = self._require()
         # 探活只做一次，下面两处都复用它（理由见 ``nodes`` / ``nodes_down`` 那两行）
@@ -3143,7 +3433,6 @@ class StoreManager:
             "mode": "distributed" if self.settings.distributed else "single-process",
             "transport": type(store.transport).__name__,
             "keywrap": self.keywrap_status(),
-            "warning": "|N| 仅为演示档，无安全强度；真实部署论文配置是 16λ = 2048 位",
         }
 
     def node_report(self) -> list[dict]:
@@ -3283,6 +3572,10 @@ class StoreManager:
           还在，恢复就好）。
         * ``degraded_blocks``：主副本出事、但副本还在的块。这些**照常可用**，
           读/验证会自动退到副本 —— 多副本的价值正是在这里看得见。
+
+        ★ 以前这里还回一句 ``note``（把上面这些数字翻成一句话）。2026-10-16 把
+          句子移到前端（``frontend/src/data/copy.js::faultImpactNote``）：
+          这句话使用者改过好几轮，每次改都要重启后端。现在只回数据。
         """
         faulty = ft.faulty()
         if not faulty:
@@ -3291,7 +3584,6 @@ class StoreManager:
                 "lost_count": 0,
                 "degraded_blocks": 0,
                 "files_affected": [],
-                "note": "无故障：全部存储节点在线。",
             }
         lost: list[dict] = []
         degraded = 0
@@ -3310,24 +3602,6 @@ class StoreManager:
         for item in lost:
             key = (item["owner"], item["file_key"])
             by_file[key] = by_file.get(key, 0) + 1
-        if lost:
-            note = (
-                f"影响评估：{len(lost)} 个分块将永久丢失，其全部副本均位于故障节点，涉及 {len(by_file)} 份文件。"
-                f"成因是「副本数不足」与「不可逆故障」同时成立。"
-                f"（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
-            )
-        elif degraded:
-            note = (
-                f"{degraded} 个分块的主副本不可用，但其余副本仍然在线 —— "
-                f"读取与验证会自动改用其余副本，当前功能不受影响。"
-                f"这正是多副本的意义：单节点故障不导致服务中断。"
-                f"（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
-            )
-        else:
-            note = (
-                "故障节点上没有任何在用的分块（可能未分配到分块）。"
-                "业务功能不受影响。（本演练不删数据，一个字节都不动；点击「恢复」即可全部复原。）"
-            )
         return {
             "lost_blocks": lost,
             "lost_count": len(lost),
@@ -3336,7 +3610,6 @@ class StoreManager:
                 {"owner": o, "file_key": k, "lost_blocks": c}
                 for (o, k), c in sorted(by_file.items())
             ],
-            "note": note,
         }
 
     def _require(self) -> VectorStore:

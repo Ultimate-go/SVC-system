@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 完整性验证（验证不受限）。
+ * 可验证查询（验证不受限）。
  *
  * - **选文件 + 填第几块**验证（块号支持 0-3, 8 区间语法）+ 允许部分结果开关。
  *   ★ 全局下标是**内部坐标**，只留在"高级"里 —— 主路径上不让它出现。
@@ -20,7 +20,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
 import { useBasketStore } from '../../../stores/basket'
-import { usePoolStore } from '../../../stores/pool'
+import { useAggregateStore } from '../../../stores/aggregate'
 import { useThemeStore } from '../../../stores/theme'
 import { systemApi } from '../../../api/system'
 import { fmtBytes, span, humanList } from '../../../utils/format'
@@ -34,7 +34,7 @@ import BlockFingerprints from '../../../components/security/BlockFingerprints.vu
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 
-const pool = usePoolStore()
+const panel = useAggregateStore()
 const theme = useThemeStore()
 const basket = useBasketStore()
 /** 详细模式：把逐块分量铺出来（简略模式只给结论）。 */
@@ -177,7 +177,7 @@ async function loadFiles() {
     const live = new Set()
     for (const f of list) for (const i of f.indices || []) live.add(i)
     basket.syncLive([...live])
-    if (list.length) pool.syncDelta({ n })
+    if (list.length) panel.syncDelta({ n })
 
     // 刷新后可能少了几份文件：把已经不在的人从勾选里摘掉
     pickedIds.value = pickedIds.value.filter((id) => list.some((f) => f.id === id))
@@ -299,9 +299,9 @@ async function verifyBasket() {
     const { data } = await evidenceApi.query(basket.indices, basketAllowPartial.value)
     basketResult.value = data
     basket.syncN(data?.delta_n)
-    pool.addCard({
+    panel.addCard({
       label: `集合：${basket.size} 块 / ${basket.fileCount} 份文件`,
-      src: '完整性验证',
+      src: '可验证查询',
       result: data,
     })
   } catch (e) {
@@ -515,44 +515,44 @@ const basketHolderCount = computed(
 --------------------------------------------------------------------------- */
 const VERIFY_STEPS = [
   {
-    name: '定下标集',
+    name: '确定下标集合',
     en: 'SELECT',
-    desc: '仅验证指定的分块（按界面序号）。一份证据仅对其覆盖的下标有效：未被覆盖的分块，不能声称验证通过。',
+    desc: '只对指定的分块集合作结论。一份证据仅在其覆盖的下标上有定义，未被覆盖的分块不因这份证据而被判定为通过。',
   },
   {
-    key: '探测各节点（report）',
-    name: '探测节点',
+    key: '探测节点持有情况',
+    name: '探测节点持有情况',
     en: 'PROBE',
-    desc: '询问集群：这些分块当前分别由哪些节点持有。节点上报的持有情况仅作为线索，随后由验证加以核对。',
+    desc: '询问各存储节点：集合内的分块当前分别由谁持有。节点的申报只作为线索，它随后要由公开检验加以核对，本身不构成结论。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '取回这些分块的密文。协调者仅持有密文，不具备提供明文的能力。',
+    desc: '从持有者取回这些分块的密文。协调者只持有密文，不具备提供明文的能力。',
   },
   {
     key: '取回分量与凭证',
-    name: '重算分量',
+    name: '本地重算分量',
     en: 'DIGEST',
-    desc: '浏览器在本地依据密文重新计算每个分块的公开分量（SM3），不采用服务端上报的数值。',
+    desc: '浏览器在本地对取回的密文重算公开分量（SM3），不采用服务端申报的数值。公开分量由密文唯一确定，这是「不采信服务端」的具体落实：换掉密文就会算出对不上的分量。',
   },
   {
-    key: '聚合凭证',
-    name: '聚合成一份证据',
+    key: '证据合成',
+    name: '证据合成',
     en: 'AGGREGATE',
-    desc: '将这些分块的分量聚成一份证据 π_I：两个群元素、不超过 256 字节，与覆盖的分块数量无关。',
+    desc: '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素、不超过 256 字节，与本次覆盖的分块数无关。',
   },
   {
-    key: '承诺验证（VerRetrieve）',
-    name: '公开检验一次',
+    key: '承诺验证',
+    name: '公开检验',
     en: 'VERIFY',
-    desc: '以 δ 与 π_I 执行一次公开检验：无需明文、无需密钥，也无需信任任何一方，任何持有这些公开量的主体都能独立复算。',
+    desc: '以聚合承诺 δ 与所得证据执行一次配对检验。该检验只用到公开量：不需明文、不需任何密钥，也不需信任任何一方，任何持有同样输入的主体都能独立复算。',
   },
   {
-    name: '结论',
+    name: '判定',
     en: 'VERDICT',
-    desc: '通过表明这些分块存在且与上传版本一致；未通过表明存在被替换或删除的分块，或者返回的密文与当前基准不符。',
+    desc: '通过：这些分块存在，且内容与入库版本一致。不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符 —— 两种情况都需要重新取证核实。',
   },
 ]
 
@@ -621,13 +621,13 @@ async function runQuery() {
     processOpen.value = true
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
-    pool.syncDelta({ n: data?.delta_n })
-    // 收进证据池（标签用界面坐标写，池子里就不会冒出全局下标）
-    pool.addCard({
+    panel.syncDelta({ n: data?.delta_n })
+    // 入池（标签用界面坐标写，聚合面板里就不会冒出全局下标）
+    panel.addCard({
       label: advancedMode.value
         ? `查询：${indices.join(',')}`
         : `查询：${picked.file_key} 第 ${span(blocks)} 块`,
-      src: '完整性验证',
+      src: '可验证查询',
       result: data,
     })
   } catch (e) {
@@ -696,7 +696,7 @@ onMounted(loadFiles)
 
 <template>
   <div class="verify-page">
-    <PageHeader title="完整性验证" subtitle="验证公开；解密需所有权" />
+    <PageHeader title="可验证查询" subtitle="验证公开；解密需所有权" />
 
     <!-- ============================================================= -->
     <!-- ⓪ 拉取文件列表（单独一块，放最上面）                            -->
@@ -721,11 +721,29 @@ onMounted(loadFiles)
         <div class="pull-summary mono text-2" style="font-size: 13px">
           已拉取 {{ allFiles.length }} 份文件 · 共 {{ totalBlocks }} 块 · {{ owners.length }} 位所有者
         </div>
+        <!-- ★ 一行只留**文件标识**（带一个小方框）：文件多了也不会变成一堆
+             “owner/名字 · n 块”的长文本；其余信息悬浮看，纵列对齐、一眼扫完。 -->
         <div class="pull-files">
-          <span v-for="f in pullChips" :key="f.id" class="pull-chip mono">
-            {{ f.owner }}/{{ f.file_key }} · {{ f.block_count }} 块
-          </span>
-          <span v-if="pullRest" class="pull-chip mono text-3">还有 {{ pullRest }} 份…</span>
+          <el-tooltip
+            v-for="f in pullChips"
+            :key="f.id"
+            placement="top"
+            :show-after="120"
+            popper-class="vds-chip-tip"
+          >
+            <template #content>
+              <div class="tip-rows">
+                <div class="tip-row"><span>所有者</span><b>{{ f.owner }}</b></div>
+                <div class="tip-row"><span>文件标识</span><b>{{ f.file_key }}</b></div>
+                <div class="tip-row"><span>大小</span><b>{{ fmtBytes(f.total_bytes) }}</b></div>
+                <div class="tip-row"><span>分块</span><b>{{ f.block_count }} 块 · 每块 {{ f.segment_bytes }} B</b></div>
+                <div class="tip-row"><span>版本</span><b>v{{ f.version }}</b></div>
+                <div class="tip-row"><span>创建</span><b>{{ (f.created_at || '').replace('T', ' ') }}</b></div>
+              </div>
+            </template>
+            <span class="pull-chip mono">{{ f.file_key }}</span>
+          </el-tooltip>
+          <span v-if="pullRest" class="pull-chip is-more mono">还有 {{ pullRest }} 份…</span>
         </div>
      
       </template>
@@ -1067,8 +1085,8 @@ onMounted(loadFiles)
     <!-- 验证过程：逐步讲清“这个结论是怎么得到的”（耗时对齐真实阶段名）。 -->
     <ProcessDialog
       v-model="processOpen"
-      title="这次验证走了哪几步"
-      subtitle="各步检验均可在本地依据公开量独立复算。"
+      title="一次可验证查询的处理链路"
+      subtitle="各步判定均可在本地依据公开量独立复算；时长取自本次请求的实测埋点。"
       :steps="VERIFY_STEPS"
       :timings="lastVerify?.timings"
       :facts="verifyFacts"
@@ -1100,26 +1118,67 @@ onMounted(loadFiles)
   font-size: 13px;
   color: var(--danger);
 }
-/* 拉取框里的文件清单：芯片式铺开，一行放不下就换行；太长单个芯片自己截断。 */
+/* 拉取框里的文件清单：一个文件一个小方框，只写文件标识；行、列间距都放大一些
+   （原来 6px 的间距在多份文件时糊成一片）。其余信息看悬浮提示。 */
 .pull-summary {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .pull-files {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 14px 12px;
 }
 .pull-chip {
   display: inline-block;
-  max-width: 100%;
-  padding: 2px 9px;
-  border: 1px solid rgba(127, 127, 127, 0.28);
-  border-radius: 999px;
+  max-width: 260px;
+  padding: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-raised));
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: default;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.pull-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* 「还有 N 份…」不是文件，框子用虚线、不抢颜色。 */
+.pull-chip.is-more {
+  border-style: dashed;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--text-3);
+}
+/* ---------- 芯片的悬浮提示：纵向成列、左右两列对齐 ----------
+   ★ el-tooltip 的内容会被 teleport 到 body，scope 的 data-v 属性挂不上去，
+     所以这一块必须用 :global() 写，否则样式一条都不生效。 */
+:global(.vds-chip-tip) {
+  max-width: 360px;
+}
+:global(.vds-chip-tip .tip-rows) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+:global(.vds-chip-tip .tip-row) {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+:global(.vds-chip-tip .tip-row > span) {
+  color: var(--text-3);
+}
+:global(.vds-chip-tip .tip-row > b) {
+  color: var(--text-1);
+  font-weight: 400;
+  word-break: break-all;
 }
 .match-head {
   display: flex;

@@ -6,6 +6,13 @@
     python scripts/seed.py --reset        # 先删库重建（**会清掉所有文件**）
     python scripts/seed.py --demo         # 顺带传几个演示文件
 
+.. important::
+
+   ``--reset`` 只清**协调者**的库。各节点在 ``nodes/node-*/node.db`` 里还有自己的
+   位置账，本脚本**不动**它们 —— 要整套重来（库与节点目录一起清）用
+   ``python scripts/start_all.py --reset``。用 ``--reset`` 时若发现节点目录里
+   还留着上一代的账，本脚本会明确告警（否则下一次启动会被启动闸拒掉）。
+
 演示账号（口令统一写在 `DEMO_PASSWORD`）：
 
 ============  ==========
@@ -81,7 +88,28 @@ def main() -> int:
     db = Database(settings.database_url())
     if args.reset:
         db.drop_all()
-        print("[reset] 已删除全部表")
+        print("[reset] 已删除全部表（协调者侧）")
+        # ★ 只删协调者的表**不够**：各节点在 ``nodes/node-*/node.db`` 里也各有一份
+        #   “位置账”（``state``：offset -> delta_n）。两代混在一起，下一次启动就会被
+        #   启动闸拒掉 —— 它比的正是“每份文件的 offset -> n”
+        #   （``StoreManager._verify_nodes_at_startup``）。★ 2026-10-16 实测踩到过：
+        #   用 ``seed.py --reset`` 修不好，得整套重来。
+        #
+        #   这里**故意不去删**那些目录：本脚本可能正跑在“节点进程活着”的手动流程里
+        #   （见 docs/复现指南.md），替用户删节点数据不是它的职责。只在真存在
+        #   陈旧节点账目时把话说清楚，并给出唯一正确的补救命令。
+        stale = sorted(
+            d.name for d in (ROOT / "nodes").glob("node-*") if (d / "node.db").exists()
+        )
+        if stale and not args.db:
+            print(
+                f"[reset] ⚠ 节点目录 {', '.join(stale)} 里还有上一代的位置账（node.db）。\n"
+                "        直接拿这套库去起后端，启动闸会因为“节点与协调者不同步”\n"
+                "        而拒绝启动。整套重来（库与节点目录一起清）：\n"
+                "            python scripts/start_all.py --reset\n"
+                "        若确实只想重建协调者的库（例如跑调试），请同时停掉节点进程\n"
+                "        并删掉 nodes/node-*，再拿这套库去启动。"
+            )
     db.create_all()
 
     manager = StoreManager(settings, db)

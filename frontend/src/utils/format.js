@@ -178,7 +178,7 @@ export function fmtTime(iso) {
   )
 }
 
-/** 相对时间，给证据池卡片看新旧用（δ 会变，旧证据就不成立了）。 */
+/** 相对时间，给聚合面板的卡片看新旧用（δ 会变，旧证据就不成立了）。 */
 export function fmtAgo(ts) {
   const d = Date.now() - Number(ts || 0)
   if (!d || d < 0) return '—'

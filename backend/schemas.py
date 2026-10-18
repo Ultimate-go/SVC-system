@@ -248,10 +248,10 @@ class ProofIn(BaseModel):
 
 
 class EvidenceCardIn(BaseModel):
-    """证据池里的一张卡片 —— 与 ``/api/query`` 响应**同构**。
+    """增量聚合与分解里的一张卡片 —— 与 ``/api/query`` 响应**同构**。
 
     字段名刻意与那个响应一致（``indices`` / ``values`` / ``proof``），
-    这样前端把池子里的卡片**原样传回来**即可，不用另造一份数据结构。
+    这样前端把聚合面板里的卡片**原样传回来**即可，不用另造一份数据结构。
     """
 
     indices: list[int] = Field(min_length=1, max_length=MAX_INDICES)
@@ -260,7 +260,7 @@ class EvidenceCardIn(BaseModel):
 
 
 class BatchVerifyIn(BaseModel):
-    """**批量验证**：一次验池子里的多份证据（可跨文件、跨用户）。
+    """**批量验证**：一次验聚合面板里的多份证据（可跨文件、跨用户）。
 
     :param items: 要一起验的卡片
     :param locate: 失败时是否退回逐份验以**定位**坏的那几份。
@@ -272,7 +272,7 @@ class BatchVerifyIn(BaseModel):
     """
 
     #: 卡片**张数**上限。它与上面的下标上限是两回事：
-    #: 一张卡最多能覆盖 ``MAX_INDICES`` 块，而池子里同时验 128 张已经很够了。
+    #: 一张卡最多能覆盖 ``MAX_INDICES`` 块，而聚合面板里同时验 128 张已经很够了。
     items: list[EvidenceCardIn] = Field(min_length=1, max_length=128)
     locate: bool = True
     compare: bool = True
@@ -316,7 +316,7 @@ class DisaggIn(BaseModel):
     """**分解**一份已有证据：从 :math:`\\pi_I` 里拆出 :math:`\\pi_K`（要求 K ⊆ I）。
 
     前四个字段就是 ``/api/query`` 响应里的 ``indices`` / ``values`` / ``proof``
-    —— 前端把池子里那张卡片**原样传回来**即可，不用另造一份数据结构。
+    —— 前端把聚合面板里那张卡片**原样传回来**即可，不用另造一份数据结构。
 
     字段名用 ``I`` / ``K`` 而不是 snake_case，是刻意跟论文符号对齐：
     界面上也要显示它们（“从 {0,1,2} 拆出 {0,2}”），叫一样的名字少一层翻译。
@@ -358,6 +358,27 @@ class DisaggIn(BaseModel):
             raise ValueError(
                 f"I 有 {len(self.I)} 个下标，但 values 有 {len(self.values)} 个 —— 对不上"
             )
+        return self
+
+
+class AggIn(BaseModel):
+    r"""**合并**两份已有证据：:math:`\pi_I \otimes \pi_J \to \pi_{I \cup J}`（要求不相交）。
+
+    两个字段的形态与 :class:`DisaggIn` 一致（``indices`` / ``values`` / ``S_I`` /
+    ``Lambda_I``），只是要写两组 —— 前端把聚合面板里那两张卡片**原样传回来**即可。
+
+    ★ 与 ``POST /api/query`` 走的是**同一个** :func:`svc.agg`：那边是"现在去节点收
+      凭证、顺手聚起来"，这边是"凭证早就有了，只是把两份**已有**的证据并起来"。
+      后者**不向节点取任何数据** —— 这就是"增量"的全部含义。
+    """
+
+    a: EvidenceCardIn
+    b: EvidenceCardIn
+
+    @model_validator(mode="after")
+    def _not_same_object(self) -> "AggIn":
+        if self.a is self.b:
+            raise ValueError("两份证据不能是同一个对象")
         return self
 
 

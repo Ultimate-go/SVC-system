@@ -3,16 +3,18 @@
  * 过程弹框：展示一次操作的步骤序列、各步耗时与规模参数。
  *
  * 展示约束（不变式）：
- *   ① 不展示中间值。不输出 U/C 的十进制、不输出分量、不输出任何密钥材料；
- *      只输出步骤名、规模（块数 / 位置数 / 文件数）与耗时。
- *   ② 耗时只取自后端 `timings`，按 `key` 与步骤对齐。
- *      无对应 stage 的步骤留空；不估算、不补齐。
+ *   ① 只展示步骤名、该步的规模参数与**公开**中间量（分量 / 见证 / δ 的头几位）。
+ *      不输出任何密钥材料，也不输出 U / C 的十进制全值。
+ *      文案与中间量里的 `$...$` 走 utils/tex.js 的 LaTeX 子集渲染（v-html + rich）。
+ *   ② 每一步的停留时长取自 `estMs`（上一次的真实耗时，见 `dwellOf`）——
+ *      动画与请求同时开始，此刻实际值不可知。
+ *      ★ 2026-10-16：原来底部那行「端到端 / 后端埋点 / 各步合计」已去掉
+ *      （用户：太挤）。要恢复就按 `props.timings` 重新拼一行。
  *   ③ 动效仅用于指示当前步骤。所有动画以静止状态收尾；
  *      `prefers-reduced-motion` 生效时全部禁用。
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { buildPerf, formatMs } from '../../utils/timing'
-import Icon from '../icons/Icon.vue'
+import { rich } from '../../utils/tex'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -28,15 +30,19 @@ const props = defineProps({
    *  - facts  [{ k, v }] 该步的中间量；缺省时不显示
    */
   steps: { type: Array, default: () => [] },
-  /** 后端返回的 { total_ms, stages: [{ stage, ms, count }] }；尚未返回时为 null。 */
+  /**
+   * 后端返回的 { total_ms, stages: [{ stage, ms, count }] }；尚未返回时为 null。
+   *
+   * ★ 调用方仍在传（三个页面都传），弹框现在**不显示**它 —— 保留这个 prop
+   *   是为了调用处不用改，哪天要把耗时行接回来直接用。
+   */
   timings: { type: Object, default: null },
   /** 底部参数列表 [{ k, v }]；取值由调用方保证为真值。 */
   facts: { type: Array, default: () => [] },
   /**
    * 端到端耗时（毫秒，可选）：从点击到结果返回的墙钟时间。
    *
-   * ★ 传了就先报它：弹框和页面其它地方（阶段耗时条、上传按钮旁）必须是同一个数。
-   * ★ 不传则只报后端埋点值，并仍标注“后端埋点”，不与端到端混说。
+   * ★ 同上：调用方仍在传，弹框暂不显示（见上面 `timings` 那段）。
    */
   e2eMs: { type: Number, default: null },
   /**
@@ -52,20 +58,6 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const close = () => emit('update:modelValue', false)
-
-/** 后端阶段名到毫秒的映射（同名合并，按 count 求和）。 */
-const msByStage = computed(() => {
-  const perf = buildPerf(props.timings)
-  const out = {}
-  for (const s of perf.stages) out[s.stage] = s.ms
-  return out
-})
-
-const totalMs = computed(() => buildPerf(props.timings).total_ms)
-/** 各步可显示耗时之和。与 total_ms 的差额为埋点未覆盖的阶段。 */
-const stepMsSum = computed(() =>
-  props.steps.reduce((acc, s) => acc + (msByStage.value[s.key] || 0), 0),
-)
 
 const current = ref(0)
 const playing = ref(false)
@@ -184,6 +176,7 @@ onBeforeUnmount(stop)
     :model-value="modelValue"
     :title="title"
     width="min(820px, 94vw)"
+    top="6vh"
     class="process-dialog"
     @update:model-value="emit('update:modelValue', $event)"
     @closed="stop"
@@ -223,12 +216,13 @@ onBeforeUnmount(stop)
         <span v-if="cur.en" class="en mono">{{ cur.en }}</span>
         <span v-if="waiting && current === steps.length - 1" class="running mono">进行中</span>
       </div>
-      <p class="desc">{{ cur.desc }}</p>
+      <!-- 该步的说明。公式（`$...$`）由 utils/tex.js 渲染。 -->
+      <p class="desc" v-html="rich(cur.desc)" />
       <!-- 该步的中间量；无数据时不显示。 -->
       <ul v-if="cur.facts?.length" class="s-facts">
         <li v-for="f in cur.facts" :key="f.k">
-          <span class="fk text-3">{{ f.k }}</span>
-          <span class="fv mono">{{ f.v }}</span>
+          <span class="fk text-3" v-html="rich(f.k)" />
+          <span class="fv mono" v-html="rich(f.v)" />
         </li>
       </ul>
     </div>
@@ -239,23 +233,13 @@ onBeforeUnmount(stop)
       </span>
     </div>
 
-    <p v-if="timings" class="total mono text-3">
-      <template v-if="e2eMs">
-        端到端 {{ formatMs(e2eMs) }} · 后端埋点 {{ formatMs(totalMs) }}<template v-if="stepMsSum"> · 各步合计 {{ formatMs(stepMsSum) }}</template>
-      </template>
-      <template v-else>
-        总耗时 {{ formatMs(totalMs) }}<template v-if="stepMsSum"> · 各步合计 {{ formatMs(stepMsSum) }}</template>
-      </template>
-    </p>
-
     <template #footer>
       <div class="foot">
-        <!-- 首步不显示「上一步」，末步不显示「下一步」；中间步两者都有。 -->
+        <!-- 首步不显示「上一步」，末步不显示「下一步」；中间步两者都有。
+             ★ 2026-10-16：去掉「暂停 / 重新播放」（用户要求，只留上一步、下一步）。
+             自动推进仍在 —— 打开弹框即从头开始（见 watch(modelValue)），
+             想回看就在上面步骤轨里点任意一步。 -->
         <el-button v-if="current > 0" @click="go(current - 1)">上一步</el-button>
-        <el-button link @click="playing ? stop() : play()">
-          <Icon :name="playing ? 'x' : 'pulse'" :size="13" style="margin-right: 5px" />
-          {{ playing ? '暂停' : '重新播放' }}
-        </el-button>
         <span class="spacer" />
         <el-button @click="close">关闭</el-button>
         <el-button v-if="current < steps.length - 1" type="primary" @click="next">下一步</el-button>
@@ -269,23 +253,24 @@ onBeforeUnmount(stop)
 .sub { margin: 0 0 14px; font-size: 13px; }
 .en { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 .desc { margin: 5px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.7; }
-/* 中间量列表：每行一个 k/v，数值用等宽字体。 */
+/*
+ * 中间量列表：两列网格 —— 第一列宽度按**最宽的那个标签**定，
+ * 于是所有行的数值左边缘对齐（各行标签长短不一，用 flex 是摆不齐的）。
+ */
 .s-facts {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.s-facts li {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 14px;
+  row-gap: 5px;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.7;
 }
-.s-facts .fk { flex: none; min-width: 92px; }
+/* ``display: contents``：li 自己不参与布局，它的两个 span 直接落在上面那个网格上。 */
+.s-facts li { display: contents; }
+.s-facts .fk { min-width: 0; }
 .s-facts .fv { color: var(--text-1); word-break: break-all; }
 .running { color: var(--accent); font-size: 13px; letter-spacing: .08em; }
 /* ---------- 步骤轨 ---------- */
@@ -326,11 +311,11 @@ onBeforeUnmount(stop)
 /* ---------- 当前步说明 ---------- */
 .detail {
   margin-top: 10px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--bg-raised);
-  min-height: 104px;
+  min-height: 124px;
 }
 .detail-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
 .detail-idx { color: var(--text-3); font-size: 13px; }
@@ -390,7 +375,35 @@ onBeforeUnmount(stop)
 .facts { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .fact { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; }
 .fact .v { color: var(--text-1); }
-.total { margin: 10px 0 0; font-size: 13px; }
 .foot { display: flex; align-items: center; gap: 6px; }
 .spacer { flex: 1; }
+
+/* LaTeX 子集渲染出的记号（渲染器见 utils/tex.js）。
+   ★ 必须用 :deep()：公式是用 v-html 插进去的，那些节点上没有本组件的 scoped 属性。 */
+:deep(.tx-v) { font-style: italic; }
+:deep(.tx-rm),
+:deep(.tx-fn) { font-style: normal; }
+:deep(.tx-fn) { margin-right: 1px; }
+/* 行内公式整体不折行：一段公式被拆到两行会读不出结构。 */
+:deep(.tx-inline) { white-space: nowrap; }
+:deep(sup),
+:deep(sub) { font-size: .72em; }
+/* 分式竖排 */
+:deep(.tx-frac) {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: middle;
+  text-align: center;
+  font-size: .92em;
+  line-height: 1.15;
+  margin: 0 1px;
+}
+:deep(.tx-frac > b) {
+  border-top: 1px solid currentColor;
+  font-weight: inherit;
+}
+:deep(.tx-over) {
+  border-top: 1px solid currentColor;
+  padding: 0 2px;
+}
 </style>

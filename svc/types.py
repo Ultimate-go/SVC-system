@@ -254,7 +254,7 @@ class VerifyReport:
 
 @dataclass(frozen=True)
 class BatchReport:
-    """**多份证据**一次验的结果（跨文件 / 跨用户 / 跨证据池）。
+    """**多份证据**一次验的结果（跨文件 / 跨用户 / 跨多份证据）。
 
     与 :class:`VerifyReport` 的关键差别：随机系数把 m 条方程合成**一条**之后，
     失败了只知道"这 m 份里有坏的"，说不出是哪一份 —— 这是随机线性组合的

@@ -1,18 +1,22 @@
 <script setup>
 /**
- * 证据池。
+ * 增量聚合与分解。
  *
- * - 池子存 sessionStorage（关掉标签页就没了，刻意）。
+ * - 聚合面板存 sessionStorage（关掉标签页就没了，刻意）。
  * - 每张卡片记录 indices / values / proof / delta_fp / delta_n / 取回时间。
  * - 按 delta_fp 判断作废（不是 n）。
  * - 「一次验这 N 份」→ verify-batch，两个耗时都显示，agree 不一致报警。
  * - 分解再聚合 4 步演示。
+ * - **增量聚合演示**：同一份文件分两段各自聚合，再把两份**中间结果**合并，
+ *   并当场与「一次性取全」逐位对照 —— 说明“攢着建”与“推倒重来”得到的是
+ *   同一份证据，所以已经聚合过的部分不必重算。（合并走 ``/api/evidence/agg``，
+ *   那一步不向节点取任何数据。）
  * - **逐块指纹**：每张卡片可以展开看"这份证据覆盖的每个下标，它的分量指纹是多少"
  *   —— 跟着全局的「简略/详细」开关，也能在单张卡片上自己开合。
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { usePoolStore } from '../../../stores/pool'
+import { useAggregateStore } from '../../../stores/aggregate'
 import { useThemeStore } from '../../../stores/theme'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
@@ -29,7 +33,7 @@ import BlockFingerprints from '../../../components/security/BlockFingerprints.vu
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 
-const pool = usePoolStore()
+const panel = useAggregateStore()
 const theme = useThemeStore()
 
 /* 布局与按钮（★ 2026-10-12 用户要求）：
@@ -74,14 +78,14 @@ function onMove(ev) {
     if (Math.abs(ev.clientX - pending.x) < 4 && Math.abs(ev.clientY - pending.y) < 4) return
     sweeping.value = true
     sweepMoved = true
-    sweepOn = !pool.selectedIds.includes(pending.id)
-    pool.setSelected(pending.id, sweepOn)
+    sweepOn = !panel.selectedIds.includes(pending.id)
+    panel.setSelected(pending.id, sweepOn)
     pending = null
     return
   }
   const hit = document.elementFromPoint(ev.clientX, ev.clientY)
   const card = hit?.closest?.('.card[data-card-id]')
-  if (card) pool.setSelected(Number(card.dataset.cardId), sweepOn)
+  if (card) panel.setSelected(Number(card.dataset.cardId), sweepOn)
 }
 
 /**
@@ -100,7 +104,7 @@ function onCardClick(card, ev) {
     return
   }
   if (ev.target.closest('.card-fp, button, a')) return
-  pool.toggle(card.id)
+  panel.toggle(card.id)
 }
 
 function endSweep() {
@@ -181,7 +185,7 @@ const showAllIndices = ref(false)
 
 /** 对话框里那张卡（默认 = 勾选的第一张）。 */
 const disaggCard = computed(
-  () => pool.selectedCards.find((c) => c.id === disaggCardId.value) || pool.selectedCards[0] || null,
+  () => panel.selectedCards.find((c) => c.id === disaggCardId.value) || panel.selectedCards[0] || null,
 )
 /** 这张卡覆盖的下标（升序）—— 范围就在这个序列上选。 */
 const disaggIndices = computed(() =>
@@ -192,7 +196,9 @@ const disaggIndices = computed(() =>
 const disaggIdxMap = computed(() => indexToBlockMap(disaggCard.value))
 function idxLabel(i) {
   const b = disaggIdxMap.value.get(Number(i))
-  return b === undefined ? String(i) : `第 ${b} 块`
+  // ★ `block_idx` 是**块号**（0 起算的内部写法），而界面上给人看的一律从 1 起
+  //   —— 少了这个 +1，下拉里会出现「第 0 块」（实测撞到过）。
+  return b === undefined ? String(i) : `第 ${b + 1} 块`
 }
 const fromPos = computed(() => disaggIndices.value.indexOf(disaggFrom.value))
 const toPos = computed(() => {
@@ -210,7 +216,7 @@ const disaggDropped = computed(() =>
   disaggIndices.value.filter((i) => !disaggK.value.includes(i)),
 )
 
-const isStale = (card) => pool.staleIds.has(card.id)
+const isStale = (card) => panel.staleIds.has(card.id)
 
 /**
  * 卡片标题 —— 下标在**显示时**折起来，不把 1, 2, 3, 4… 平铺出来。
@@ -218,10 +224,10 @@ const isStale = (card) => pool.staleIds.has(card.id)
  * ★★ 压缩必须发生在显示这一层，而且拿 `card.indices` **现算** ——
  *   不看 label 里当初是怎么写的。
  *
- *   理由：池子存在 sessionStorage 里，**已经取回来的卡**的 label 是写死的
- *   字符串（「完整性验证」页当初用 indices.join(',') 拼的，长这样：
+ *   理由：聚合面板存在 sessionStorage 里，**已经取回来的卡**的 label 是写死的
+ *   字符串（「可验证查询」页当初用 indices.join(',') 拼的，长这样：
  *   「查询：0, 1, 2, …, 100」）。只把那边的写法改对救不了这些旧卡 ——
- *   只有显示时重算，同一批下标在池子里才永远长得一样。
+ *   只有显示时重算，同一批下标在聚合面板里才永远长得一样。
  *
  *   label 从此只承担「这张卡从哪来 / 是哪个文件」：冒号前那截当前缀，
  *   冒号后面那串历史下标直接丢掉。
@@ -321,7 +327,7 @@ function indexToBlockMap(card) {
 /**
  * 给 `<BlockFingerprints>` 用的 `refs`（下标 → 块号 + 归属）。
  *
- * ★ 为什么要补：组件靠 `refs` 才能把行头写成「第几块」。池子这边原来**没传**，
+ * ★ 为什么要补：组件靠 `refs` 才能把行头写成「第几块」。聚合面板这边原来**没传**，
  *   于是它退回了数字 —— 一屏的全局下标（用户反馈看到的正是这个：盘古石那份
  *   77 块，行头却是 12…88）。验证页两处都传了，这里漏了。
  *
@@ -409,7 +415,7 @@ function cardTitleLines(card) {
 function showFullTitle(card) {
   ElMessageBox.alert(cardTitleLines(card).join('\n'), '这张卡覆盖什么', {
     confirmButtonText: '关闭',
-    customClass: 'pool-title-dialog',
+    customClass: 'agg-title-dialog',
   })
 }
 
@@ -417,10 +423,10 @@ async function syncDelta() {
   try {
     const { data } = await systemApi.status()
     // ★★ 判“这张卡还有效吗”靠的是**每份文件**的 δ 指纹，不是长度：
-    //   更新 / 清零 / 追加 / 截断都只改 C，**不改全局位置总数 n** ——
-    //   只比 n 的话，改完块池子里的卡看起来一切正常，实际已经验不过了。
+    //   替换 / 置零 / 追加 / 删除都只改 C，**不改全局位置总数 n** ——
+    //   只比 n 的话，改完块聚合面板里的卡看起来一切正常，实际已经验不过了。
     //   （以前这里传的是 `fp: null`，于是那条按指纹的判据从来没生效过。）
-    pool.syncDelta({
+    panel.syncDelta({
       n: data.delta.n,
       fileFps: Object.fromEntries(
         (data?.delta?.files || []).map((f) => [`${f.owner}/${f.file_key}`, f.delta_fp]),
@@ -440,7 +446,7 @@ async function syncDelta() {
 }
 
 /**
- * 「聚合选中」—— 两条路的语义不同，**必须分开报**（详见 `stores/pool.js::aggregateSelected`）：
+ * 「聚合选中」—— 两条路的语义不同，**必须分开报**（详见 `stores/aggregate.js::aggregateSelected`）：
  * 同一份文件内是真聚合（VC.Agg，只收凭证）；跨文件是「归约」（取密文 + 重算）。
  * 报错时也不能只说“失败”—— 要告诉用户这一次到底发生了什么。
  */
@@ -455,161 +461,161 @@ const aggregating = ref(false)
 --------------------------------------------------------------------------- */
 const AGG_STEPS = [
   {
-    name: '并下标集',
+    name: '合并下标集合',
     en: 'UNION',
-    desc: '将所选卡片覆盖的分块编号合并为一个集合。每份证据仅对其覆盖的下标有定义，因此不能按同一语义叠加两份证据。',
+    desc: '把所选各张证据覆盖的分块集合取并集。一份证据只在其覆盖的下标上有定义，因此两份证据不能按同一语义直接叠加。',
   },
   {
     key: '取回分量与凭证',
-    name: '取得材料',
+    name: '取回分量与凭证',
     en: 'FETCH',
-    desc: '取得集合内每个块的分量（密文摘要）及其在向量中的位置。',
+    desc: '取得并集内每个分块的公开分量与它在向量中的位置。这是本流程中唯一向存储节点索取数据的一步。',
   },
   {
-    key: '合并位置集 P',
-    name: '合并位置集',
+    key: '合并位置集合',
+    name: '合并位置集合',
     en: 'MERGE-P',
-    desc: '涉及多份文件时，把所有相关块抬到同一条合并向量上：此时下标不再属于任何单份文件。',
+    desc: '涉及多份文件时，把相关分块抬到同一条合并向量上：此后下标归于这条合并向量，不再属于任何单份文件。',
   },
   {
-    key: '按主副本拆挑战',
-    name: '拆挑战',
+    key: '按主副本分派挑战',
+    name: '分派挑战',
     en: 'SPLIT-CH',
-    desc: '按主副本把挑战分配给各节点，每个节点只计算自己持有的部分。',
+    desc: '按主副本把挑战分派至各存储节点，每台只计算自己持有的那部分。',
   },
   {
-    key: '承诺验证（合并向量）',
-    name: '抬进合并向量',
+    key: '合并向量上的承诺验证',
+    name: '抬入合并向量',
     en: 'COMMIT',
-    desc: '把各文件的承诺抬进合并向量后重新计算 δ，新的 δ 覆盖并集内全部块。',
+    desc: '把各份文件的承诺抬入合并向量后重新计算聚合承诺，新的承诺覆盖并集内全部分块。',
   },
   {
-    key: '聚合份额',
-    name: '聚合成一份证据',
+    key: '证据合成',
+    name: '证据合成',
     en: 'AGGREGATE',
-    desc: '各节点的份额聚为一份证据：无论合并多少块、涉及多少文件，大小恒为两个群元素（≤ 256 字节）。',
+    desc: '把各份材料合成为一份证据。聚合是增量的：已经聚合过的部分不必重算，新并入的部分直接并上去即可；所得证据本身仍是合法证据，因此可以再参与合并，次数不限、顺序任意。',
   },
   {
-    name: '结论',
+    name: '判定',
     en: 'VERDICT',
-    desc: '新证据可独立验证、可再聚合、可分解，此后与单文件证据用法相同。',
+    desc: '所得证据可独立验证、可再聚合、可分解，此后与单份文件的证据用法相同。',
   },
 ]
 
 const DISAGG_STEPS = [
   {
-    name: '定出要拆的子集',
+    name: '确定目标子集',
     en: 'SUBSET',
-    desc: '从本卡片覆盖的分块中选出要单独取出的部分（按界面序号，从 1 起）。',
+    desc: '从本张证据覆盖的分块中选出要单独取出的部分（按界面序号，从 1 起）。子集可以跳着选，不必是连续区间。',
   },
   {
-    key: '拆出子集证据（svc.disagg）',
+    key: '拆出子集证据',
     name: '拆出子集证据',
     en: 'DISAGG',
-    desc: '由原证据推出只覆盖子集的新证据，无需重新向节点取得数据。',
+    desc: '由原证据推出只覆盖子集的新证据，不向节点索取数据。这一步对目标子集是一步直达：覆盖 6 块的证据可以直接拆出覆盖第 1、3、5 块的证据，无需逐层回退。',
   },
   {
-    key: '验证拆出来的证据（VerRetrieve）',
-    name: '当场执行检验',
+    key: '校验拆出的证据',
+    name: '当场公开检验',
     en: 'VERIFY',
-    desc: '对新证据当场执行一次公开检验：拆出的证据须能独立成立。',
+    desc: '对新证据当场执行一次公开检验，拆出的证据必须能独立成立。拆出的子集证据与当初聚合得到的那一份逐位相同 —— 这正是「退回上一次」与「一步拆到位」重合为一件事的原因。',
   },
   {
-    name: '结论',
+    name: '判定',
     en: 'VERDICT',
-    desc: '新卡入池，可单独验证、继续聚合或再次分解；分解不影响原卡。',
+    desc: '新证据入池，可单独验证、继续聚合或再次分解；分解不影响原证据。需要注意：拆出的只能是子集，含「原证据未覆盖的分块」的证据拆不出来，必须另取一份再合并。',
   },
 ]
 
 const CROSS_STEPS = [
   {
-    name: '选择文件',
+    name: '指定文件',
     en: 'PICK',
-    desc: '跨文件卡是在合并向量上取得的证据，其下标不属于任何单份文件；分解前必须先指定文件。',
+    desc: '跨文件证据是在合并向量上取得的，其下标不属于任何单份文件；分解前必须先指定要拆出的那一份。',
   },
   {
     key: '取回分量与凭证',
-    name: '取得该文件的材料',
+    name: '取回该文件的分量',
     en: 'FETCH',
-    desc: '只取该文件自己的块：取得的分量与位置属于该文件，而非合并向量。',
+    desc: '只取该文件自身的分块：取得的公开分量与位置属于该文件，而非合并向量。',
   },
   {
     key: '生成挑战',
     name: '生成挑战',
     en: 'CHALLENGE',
-    desc: '现场生成随机挑战：服务端无法预知挑战，因而不能预先准备应答。',
+    desc: '现场生成随机挑战。挑战由验证方临时抽取，服务端无法预知，因而无法预先准备应答。',
   },
   {
-    key: '各节点生成证明',
-    name: '各节点生成证明',
+    key: '各节点生成证明份额',
+    name: '各节点生成凭证份额',
     en: 'PROVE',
-    desc: '持有这些块的节点各计算一份份额，最终合并回同一条向量。',
+    desc: '持有所选分块的节点各自计算一份凭证份额，最终合并回同一条向量。',
   },
   {
-    key: '聚合份额',
-    name: '聚合成一份证据',
+    key: '份额合成证据',
+    name: '证据合成',
     en: 'AGGREGATE',
-    desc: '份额聚为一份证据，大小为两个群元素。',
+    desc: '各份份额合成为一份证据，规模仍为两个群元素。',
   },
   {
-    key: '验证证明',
-    name: '做一次双线性检验',
+    key: '配对检验',
+    name: '配对检验',
     en: 'BILINEAR',
-    desc: '当场执行一次配对（双线性）检验：所得证据须能独立成立。',
+    desc: '当场执行一次配对检验：所得证据必须能独立成立。',
   },
   {
-    name: '结论',
+    name: '判定',
     en: 'VERDICT',
-    desc: '所得证据属于该文件自己：可独立验证、可再聚合、可继续分解。',
+    desc: '所得证据归属该份文件自己，可独立验证、可再聚合、可继续分解。',
   },
 ]
 
 /**
- * 批量验证走的那几步 —— 与 -views/evidence/verify/index.vue 同一套。
+ * 批量验证走的那几步 —— 与 -views/evidence/query/index.vue 同一套。
  *
  * `key` 逐字对齐后端 `with stage("…")` 的名字：对得上才显示那一步耗时，
  * 对不上就不显示 —— 不编数字。
  */
 const VERIFY_STEPS = [
   {
-    name: '定下标集',
+    name: '确定下标集合',
     en: 'SELECT',
-    desc: '只验证所选块。一份证据仅对其覆盖的下标有效；未覆盖的块不因该证据而判定为通过。',
+    desc: '只对指定的分块集合作结论。一份证据仅在其覆盖的下标上有定义；未被覆盖的分块不因该证据而判定为通过。',
   },
   {
-    key: '探测各节点（report）',
-    name: '探测节点',
+    key: '探测节点持有情况',
+    name: '探测节点持有情况',
     en: 'PROBE',
-    desc: '查询集群：这些块当前由哪些节点持有。节点的声明随后由验证来核对。',
+    desc: '询问各存储节点：集合内的分块当前分别由谁持有。节点的申报只作为线索，随后由公开检验加以核对。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '取得这些块的密文。协调者不持有明文。',
+    desc: '从持有者取回这些分块的密文。协调者只持有密文，不具备提供明文的能力。',
   },
   {
     key: '取回分量与凭证',
-    name: '重算分量',
+    name: '本地重算分量',
     en: 'DIGEST',
-    desc: '浏览器依据密文自行重算每块的公开分量（SM3），不采用服务端提供的值。',
+    desc: '浏览器在本地依据密文重算公开分量（SM3），不采用服务端申报的数值。',
   },
   {
-    key: '聚合凭证',
-    name: '聚合成一份证据',
+    key: '证据合成',
+    name: '证据合成',
     en: 'AGGREGATE',
-    desc: '把这些块的分量聚为一份证据 π_I：大小为两个群元素（≤ 256 字节），与覆盖块数无关。',
+    desc: '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素（≤ 256 字节），与覆盖的分块数无关。',
   },
   {
-    key: '承诺验证（VerRetrieve）',
-    name: '公开检验一次',
+    key: '承诺验证',
+    name: '公开检验',
     en: 'VERIFY',
-    desc: '用 δ 与 π_I 执行一次公开检验。该检验不需要明文与密钥，也不依赖对任何一方的信任，任何持有这些输入的一方都可独立重算。',
+    desc: '以聚合承诺 δ 与所得证据执行一次公开检验。该检验不需明文与密钥，也不依赖对任何一方的信任，任何持有同样输入的主体都能独立复算。',
   },
   {
-    name: '结论',
+    name: '判定',
     en: 'VERDICT',
-    desc: '通过：这些块仍在，且与上传版本一致。不通过：存在块被替换或被删除，或返回的密文与当前基准不符。',
+    desc: '通过：这些分块存在，且内容与入库版本一致。不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符。',
   },
 ]
 
@@ -620,10 +626,10 @@ const STEPS_BY_KIND = {
   verify: VERIFY_STEPS,
 }
 const TITLE_BY_KIND = {
-  aggregate: '聚合过程',
-  disagg: '分解过程',
-  cross: '跨文件拆出过程',
-  verify: '验证过程',
+  aggregate: '一次聚合的处理链路',
+  disagg: '一次分解的处理链路',
+  cross: '跨文件拆出的处理链路',
+  verify: '一次批量验证的处理链路',
 }
 
 const processOpen = ref(false)
@@ -642,13 +648,13 @@ function showProcess(kind, timings, facts, e2eMs = null) {
   processOpen.value = true
 }
 async function aggregateCards() {
-  if (!pool.selectedCards.length) return
-  const files = pool.unionScope.files
+  if (!panel.selectedCards.length) return
+  const files = panel.unionScope.files
   // 先记下来：聚合成功后选中会被换掉，那时再读就不是这次的数字了。
-  const cardCount = pool.selectedCards.length
+  const cardCount = panel.selectedCards.length
   aggregating.value = true
   try {
-    const card = await pool.aggregateSelected()
+    const card = await panel.aggregateSelected()
     if (files.size > 1) {
       ElMessage.success(
         `已归约：${files.size} 份文件的证据归约为同一合并向量上的一份证据（两个群元素，≤ 256 字节，覆盖 ${card?.indices?.length ?? 0} 个位置），可继续聚合或分解`,
@@ -663,12 +669,12 @@ async function aggregateCards() {
       { k: '新证据大小', v: '2 个群元素（≤ 256 B）' },
     ])
     // ★ 把“这一次得到的卡”交回去（跨文件那条“先聚合再验证”要用它）。
-    //   注意它**不一定是新加进池子的卡**：同一集合已有卡时 store 会复用那张
-    //   并返回它（见 stores/pool.js 的 addCard：dup 分支 return dup）。
+    //   注意它**不一定是新加进聚合面板的卡**：同一集合已有卡时 store 会复用那张
+    //   并返回它（见 stores/aggregate.js 的 addCard：dup 分支 return dup）。
     //
-    // ★ 聚合完就不再保持选中：结果已经落在池子里（卡片自己看得见），
+    // ★ 聚合完就不再保持选中：结果已经落在聚合面板里（卡片自己看得见），
     //   继续选着会让「验证」「聚合」这些按钮一直亮着，也容易误点下一张。
-    pool.clearSelection()
+    panel.clearSelection()
     return card
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || e?.message || '聚合失败')
@@ -679,9 +685,9 @@ async function aggregateCards() {
 }
 
 /**
- * 跨文件被拒后的下一步：先把池子里的卡归约成一条合并向量上的证据。
+ * 跨文件被拒后的下一步：先把聚合面板里的卡归约成一条合并向量上的证据。
  *
- * ★ 归约完那张新卡就落在“一份文件”的世界里 —— 之后它自己可验、可批量、可分解
+ * ★ 归约完那张新卡就落回**单份文件**的向量上 —— 之后它自己可验、可批量、可分解
  *   （也就是论文 `StrgNode.CreateFrom` 之后“一切照旧”的顺序）。
  */
 async function mergeNow() {
@@ -702,16 +708,16 @@ async function mergeNow() {
  *   直接验证     → 真被拒了，结果区里那个「先归约」就是下一步。
  */
 async function verifySelected() {
-  if (!pool.selectedCards.length) {
+  if (!panel.selectedCards.length) {
     ElMessage.warning('请先选择卡片：点击卡片任意位置即可选中')
     return
   }
-  const files = pool.unionScope.files
-  if (pool.selectedCards.length > 1 && files.size > 1) {
+  const files = panel.unionScope.files
+  if (panel.selectedCards.length > 1 && files.size > 1) {
     let firstAggregate = false
     try {
       await ElMessageBox.confirm(
-        `已选 ${pool.selectedCards.length} 张卡片，涉及 ${files.size} 份文件。` +
+        `已选 ${panel.selectedCards.length} 张卡片，涉及 ${files.size} 份文件。` +
           '不同文件的证据分别绑定各自的承诺，单次结论要求所有证据位于同一承诺之下。' +
           '是否先聚合为同一合并向量上的一份证据，再执行验证？',
         '先归约再验证',
@@ -731,20 +737,20 @@ async function verifySelected() {
       const card = await aggregateCards()
       // ★ 聚合得到的就是「接下来要验的那张」。
       //   不能用“新出现的 id”去找：同一集合已有卡时 store 会**复用**那张卡，
-      //   池子里根本不会多出新的 id（返值里才有它）。
+      //   聚合面板里根本不会多出新的 id（返值里才有它）。
       if (!card?.id) {
         ElMessage.warning('未能归约出可验证的卡片，原因见上方提示')
         return
       }
-      pool.clearSelection()
-      pool.setSelected(card.id, true)
+      panel.clearSelection()
+      panel.setSelected(card.id, true)
     }
   }
   await batchVerify()
 }
 
 async function batchVerify() {
-  const cards = pool.selectedCards
+  const cards = panel.selectedCards
   if (!cards.length) {
     ElMessage.warning('请先选择卡片')
     return
@@ -774,7 +780,7 @@ async function batchVerify() {
     ], Math.round(performance.now() - t0))
   } catch (e) {
     const detail = e?.response?.data?.detail || '批量验证失败'
-    // ★ 只有“卡来自不同宇宙”时后端才拒绝 —— 这不是故障（Def. 29 要求同一个承诺 C），
+    // ★ 只有“卡来自不同合并向量”时后端才拒绝 —— 这不是故障（Def. 29 要求同一个承诺 C），
     //   所以不能只把错误原样弹出来，要给出可执行的下一步。
     //   注意：一张“归约出来的跨文件卡”本身是可以一次结论的（它已经落在一条向量上）。
     const needsMerge = /只支持「一份文件」|跨了\s*\d+\s*份文件|不同的合并向量/.test(detail)
@@ -784,7 +790,7 @@ async function batchVerify() {
     batchRunning.value = false
     // ★ 验完就取消选中（无论通过还是被拒）：结论已经在结果面板上，
     //   选中态继续留着只会让卡片一直高亮、下一个动作容易连着上一个。
-    pool.clearSelection()
+    panel.clearSelection()
   }
 }
 
@@ -846,7 +852,7 @@ const crossCardId = ref('')
 const crossFileIdx = ref(null)
 
 const crossCard = computed(
-  () => pool.selectedCards.find((c) => c.id === crossCardId.value) || null,
+  () => panel.selectedCards.find((c) => c.id === crossCardId.value) || null,
 )
 const crossFileList = computed(() => {
   const c = crossCard.value
@@ -879,7 +885,7 @@ const crossBlocks = computed(() => {
  *   （以前勾中跨文件的卡只能被“请先按单份文件取一份”赶走，而现在把它拆开就行。）
  */
 function openCrossDisagg() {
-  const many = pool.selectedCards.filter((c) => (c.indices?.length || 0) >= 2)
+  const many = panel.selectedCards.filter((c) => (c.indices?.length || 0) >= 2)
   const cross = many.find((c) => cardFiles(c).length > 1)
   if (!cross) {
     ElMessage.warning(
@@ -933,7 +939,7 @@ async function confirmCrossDisagg() {
     //      “顶部文件框里选中的那个” —— 拿 50KB+64KB 的卡去拆，结果取回了
     //      `test_20KB`。所以这里**只看 `f`**，不碰 `fetchFileIds`。
     const { data } = await evidenceApi.queryFiles([[f.owner, f.file_key]], blocks)
-    pool.addCard({
+    panel.addCard({
       label: `拆出（跨文件）：${f.file_key} 第 ${span(blocks)} 块`,
       src: '分解而来（跨文件，按文件取得）',
       result: data,
@@ -972,7 +978,7 @@ async function confirmCrossDisagg() {
 const orderedCards = computed(() => {
   const single = []
   const cross = []
-  for (const c of pool.cards) {
+  for (const c of panel.cards) {
     if (cardFiles(c).length > 1 || c.mergedUniverse) cross.push(c)
     else single.push(c)
   }
@@ -1026,11 +1032,11 @@ const disaggSingleFile = computed(() => disaggFiles.value.length <= 1)
  * 这张卡还在当前 δ 上吗（分解的另一个硬要求）。
  *
  * ★ 与卡片列表上那个「已作废，需重新取」标签用的是**同一个判据**
- *   （`pool.staleIds`，按 δ 指纹）—— 只是这里针对弹窗里选中的那一张。
+ *   （`panel.staleIds`，按 δ 指纹）—— 只是这里针对弹窗里选中的那一张。
  *   作废的卡拆出来 100% 验不过，所以按钮直接禁掉，并给一颗「重新取一次」。
  */
 const disaggCardFresh = computed(
-  () => !!disaggCard.value && !pool.staleIds.has(disaggCard.value.id),
+  () => !!disaggCard.value && !panel.staleIds.has(disaggCard.value.id),
 )
 
 /**
@@ -1055,7 +1061,7 @@ async function refetchCard(c) {
   refetching.value = true
   try {
     const { data } = await evidenceApi.query(c.indices)
-    pool.addCard({ label: `重新取得：${span(c.indices)}`, result: data, src: '重新取得' })
+    panel.addCard({ label: `重新取得：${span(c.indices)}`, result: data, src: '重新取得' })
     ElMessage.success(`已按当前 δ 重新取得 ${c.indices.length} 个分块`)
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || '重新取得失败')
@@ -1074,7 +1080,7 @@ async function refetchCard(c) {
  *      原来只查了 ①，所以勾中跨文件的卡一点「分解」必然报错。
  */
 function openDisagg() {
-  const cards = pool.selectedCards
+  const cards = panel.selectedCards
   if (!cards.length) {
     ElMessage.warning('请先选择一张覆盖至少 2 个分块的卡片')
     return
@@ -1127,12 +1133,14 @@ async function confirmDisagg() {
       K,
     })
     disaggResult.value = data
-    pool.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
+    panel.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
     disaggOpen.value = false
     ElMessage.success(`已拆出覆盖 ${K.length} 个分块的证据`)
     showProcess('disagg', data?.timings, [
       { k: '原证据覆盖', v: `${c.indices?.length ?? 0} 块` },
-      { k: '拆出', v: `${span(K)}（${K.length} 块）` },
+      // ★ 用 `blockText` 而不是 `span`：前者会先折算成「哪份文件的第几块」，
+      //   后者打的是**全局位置号**（内部的数，界面上不该出现）。
+      { k: '拆出', v: `${blockText(c, K)}（${K.length} 块）` },
       { k: '新证据大小', v: '2 个群元素（≤ 256 B）' },
     ])
   } catch (e) {
@@ -1142,6 +1150,176 @@ async function confirmDisagg() {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   增量聚合演示（★ 这一次用户要的）
+
+   要讲清的一件事：**"先聚合一部分、以后再把新来的并进来"是真的复用，不是重算。**
+
+   它成立的依据是 ``VC.Agg`` 的两条性质（``svc/scheme.py::agg``）：
+
+     * 两份**不相交**子集的证据能合成一份覆盖并集的证据：π_I ⊗ π_J = π_{I∪J}；
+     * 合并结果本身仍是合法证据 ⇒ 可以再参与合并，**次数不限、顺序任意**。
+
+   于是这里按最直白的划分演一遍：取一份文件的前 3 块聚一次、后 3 块聚一次，
+   再把两份**中间结果**并起来 —— 然后**当场对照**"一次性取全 6 块"的那份证据，
+   逐位比较 (S, Λ)。
+
+   ★ 为什么值得把对照做出来：光说"结果一样"没人信，也没法验；而"一样"这件事
+     恰好就是"增量"的**定义** —— 攒着建得到的东西与推倒重来得到的**完全相同**，
+     所以原先那部分不必重算。
+
+   ★ 全程用的都是真接口、真耗时：取两段走 ``/api/query/files``（会向节点收凭证），
+     合并走 ``/api/evidence/agg``（**不向节点取任何数据** —— 响应里
+     ``cert_count = 0``、``nodes_used = []`` 就是这件事的书面交代）。
+--------------------------------------------------------------------------- */
+const incrOpen = ref(false)
+const incrLoading = ref(false)
+const incrRunning = ref(false)
+const incrFiles = ref([])
+const incrFileIdx = ref(null)
+const incrSteps = ref([])
+const incrErr = ref('')
+
+/** 演示一次取几个块：够就取 6（前 3 / 后 3），不够就尽量对半。 */
+const INCR_TARGET = 6
+
+const incrFile = computed(() => incrFiles.value[incrFileIdx.value] || null)
+
+/**
+ * 这一次的两段怎么分。
+ *
+ * ★ 用**文件内块号**（0 起）而不是全局位置号：全局位置是内部坐标，
+ *   界面上不出现（见本文件开头那段规矩）。
+ */
+const incrPlan = computed(() => {
+  const f = incrFile.value
+  if (!f) return null
+  const total = Number(f.block_count) || 0
+  if (total < 2) return null
+  const half = Math.min(Math.floor(total / 2), Math.floor(INCR_TARGET / 2))
+  const first = Array.from({ length: half }, (_, i) => i)
+  const second = Array.from({ length: total - half }, (_, i) => half + i)
+  return { total, first, second, all: [...first, ...second] }
+})
+
+async function openIncr() {
+  incrOpen.value = true
+  incrSteps.value = []
+  incrErr.value = ''
+  if (incrFiles.value.length) return
+  incrLoading.value = true
+  try {
+    const { data } = await filesApi.list()
+    const rows = Array.isArray(data) ? data : data?.files || []
+    // 只留够两段的：一段一块是合并不了的最小规模。
+    incrFiles.value = rows.filter((r) => (Number(r.block_count) || 0) >= 2)
+    if (incrFiles.value.length) incrFileIdx.value = 0
+  } catch (e) {
+    incrErr.value = e?.response?.data?.detail || e?.message || '取文件列表失败'
+  } finally {
+    incrLoading.value = false
+  }
+}
+
+/** 只留合并接口要的那三项（卡片原样传）。 */
+function asCard(d) {
+  return { indices: d.indices, values: d.values, proof: d.proof }
+}
+
+async function runIncr() {
+  const f = incrFile.value
+  const plan = incrPlan.value
+  if (!f || !plan) return
+  incrRunning.value = true
+  incrErr.value = ''
+  incrSteps.value = []
+  const target = [f.owner, f.file_key]
+  const wall = (t0) => Math.round(performance.now() - t0)
+
+  try {
+    // ① 前一段
+    let t0 = performance.now()
+    const A = (await evidenceApi.queryFiles([target], plan.first)).data
+    incrSteps.value.push({
+      id: 'A', title: '分段聚合（前段）', blocks: plan.first, resp: A, ms: wall(t0),
+      how: '向持有该段分块的节点收取检索凭证，聚为一份证据',
+      takes: `覆盖 ${plan.first.length} 块`,
+    })
+
+    // ② 后一段
+    t0 = performance.now()
+    const B = (await evidenceApi.queryFiles([target], plan.second)).data
+    incrSteps.value.push({
+      id: 'B', title: '分段聚合（后段）', blocks: plan.second, resp: B, ms: wall(t0),
+      how: '同样收取凭证；两段互不相干，可以分别累积',
+      takes: `覆盖 ${plan.second.length} 块`,
+    })
+
+    // ③ 合并两份**已有**证据
+    t0 = performance.now()
+    const M = (await evidenceApi.agg(asCard(A), asCard(B))).data
+    incrSteps.value.push({
+      id: 'M', title: '合并两份证据', blocks: plan.all, resp: M, ms: wall(t0),
+      how: '把两份已经存在的证据合为一份：不取密文、不重算分量',
+      takes: `覆盖 ${plan.all.length} 块，仍是 2 个群元素`,
+    })
+
+    // ④ 对照：一次性取全
+    t0 = performance.now()
+    const F = (await evidenceApi.query(M.indices)).data
+    incrSteps.value.push({
+      id: 'F', title: '对照：一次性取全', blocks: plan.all, resp: F, ms: wall(t0),
+      how: '不作分段，直接向节点索取覆盖全部这些分块的证据，用于与上一步逐位比对',
+      takes: '同一批分块',
+    })
+
+    // 三张卡进聚合面板（合并那张也能当对照那张：下标集合相同，聚合面板会按集合去重）。
+    panel.addCard({ label: `第 ${plan.first[0] + 1}-${plan.first.at(-1) + 1} 块`, src: '增量聚合：前一段', result: A })
+    panel.addCard({ label: `第 ${plan.second[0] + 1}-${plan.second.at(-1) + 1} 块`, src: '增量聚合：后一段', result: B })
+    panel.addCard({ label: `第 ${plan.all[0] + 1}-${plan.all.at(-1) + 1} 块`, src: '增量聚合：两份中间结果合并而来', result: M })
+  } catch (e) {
+    incrErr.value = e?.response?.data?.detail || e?.message || '演示失败'
+  } finally {
+    incrRunning.value = false
+  }
+}
+
+/** 第三步的响应（合并）与第四步的响应（一次取全）。 */
+const incrMerged = computed(() => incrSteps.value.find((s) => s.id === 'M')?.resp || null)
+const incrFull = computed(() => incrSteps.value.find((s) => s.id === 'F')?.resp || null)
+
+/** 合并得到的 (S, Λ) 与一次取全的是不是**逐位相同**。 */
+const incrSame = computed(() => {
+  const m = incrMerged.value
+  const f = incrFull.value
+  if (!m || !f) return null
+  return m.proof.S_I === f.proof.S_I && m.proof.Lambda_I === f.proof.Lambda_I
+})
+
+/** 合并那一步真的没碰节点吗 —— 看后端自己报的账。 */
+const incrMergeFacts = computed(() => {
+  const m = incrMerged.value
+  if (!m) return null
+  const stages = (m.timings?.stages || []).map((s) => s.stage)
+  return {
+    nodes: (m.nodes_used || []).length,
+    certs: m.cert_count ?? 0,
+    fetched: stages.some((s) => s.includes('取回') || s.includes('探测')),
+    stages,
+  }
+})
+
+/** 块号串 → 「第 1-3 块」（连续时给区间，不连续就逐个列）。 */
+function blkRange(list) {
+  const a = (list || []).map(Number).sort((x, y) => x - y)
+  if (!a.length) return '—'
+  const contiguous = a.every((v, i) => i === 0 || v === a[i - 1] + 1)
+  if (!contiguous) return humanList(a).map((n) => `第 ${n} 块`).join('、')
+  const lo = a[0] + 1
+  const hi = a[a.length - 1] + 1
+  return lo === hi ? `第 ${lo} 块` : `第 ${lo}-${hi} 块`
+}
+
 onMounted(() => {
   syncDelta()
 })
@@ -1149,21 +1327,22 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="证据池" subtitle="取得证据，并可跨文件归约为一份" />
+    <PageHeader title="增量聚合与分解" subtitle="取得证据，并可跨文件归约为一份" />
 
-    <div class="pool-wrap">
-    <div class="pool-side">
+    <div class="agg-wrap">
+    <div class="agg-side">
     <div class="panel mb-3">
       <div class="toolbar">
-        <el-button :disabled="!pool.selectedCards.length" :loading="aggregating" @click="aggregateCards">聚合选中</el-button>
-        <el-button type="primary" :disabled="!pool.selectedCards.length" :loading="batchRunning" @click="verifySelected">
-          验证{{ pool.selectedCards.length > 1 ? `（已选 ${pool.selectedCards.length} 张）` : '' }}
+        <el-button :disabled="!panel.selectedCards.length" :loading="aggregating" @click="aggregateCards">聚合选中</el-button>
+        <el-button type="primary" :disabled="!panel.selectedCards.length" :loading="batchRunning" @click="verifySelected">
+          验证{{ panel.selectedCards.length > 1 ? `（已选 ${panel.selectedCards.length} 张）` : '' }}
         </el-button>
-        <el-button :disabled="!pool.selectedCards.length" @click="openDisagg" :loading="disaggRunning">分解（单文件）</el-button>
-        <el-button :disabled="!pool.selectedCards.length" @click="openCrossDisagg" :loading="crossRunning">分解（跨文件）</el-button>
-        <el-button v-if="pool.cards.length" link @click="pool.selectAll()" :disabled="pool.selectedIds.length === pool.cards.length">全选</el-button>
-        <el-button v-if="pool.selectedIds.length" link @click="pool.clearSelection()">取消选择</el-button>
-        <el-button v-if="pool.cards.length" link type="danger" @click="pool.clear()">清空</el-button>
+        <el-button :disabled="!panel.selectedCards.length" @click="openDisagg" :loading="disaggRunning">分解（单文件）</el-button>
+        <el-button :disabled="!panel.selectedCards.length" @click="openCrossDisagg" :loading="crossRunning">分解（跨文件）</el-button>
+        <el-button @click="openIncr">增量聚合演示</el-button>
+        <el-button v-if="panel.cards.length" link @click="panel.selectAll()" :disabled="panel.selectedIds.length === panel.cards.length">全选</el-button>
+        <el-button v-if="panel.selectedIds.length" link @click="panel.clearSelection()">取消选择</el-button>
+        <el-button v-if="panel.cards.length" link type="danger" @click="panel.clear()">清空</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
       <p class="sweep-hint text-3">
@@ -1179,8 +1358,8 @@ onMounted(() => {
       </details>
     </div>
 
-    <div v-if="!pool.cards.length">
-      <EmptyState title="证据池为空" description="可从取证结果加入，或在「完整性验证」页把结果入池" icon="list" />
+    <div v-if="!panel.cards.length">
+      <EmptyState title="聚合面板为空" description="可从取证结果加入，或在「可验证查询」页把结果入池" icon="list" />
     </div>
 
     <div v-else class="cards" :class="{ sweeping }">
@@ -1198,13 +1377,13 @@ onMounted(() => {
         <div
           class="card panel"
           :data-card-id="card.id"
-          :class="{ stale: isStale(card), 'is-picked': pool.selectedIds.includes(card.id) }"
+          :class="{ stale: isStale(card), 'is-picked': panel.selectedIds.includes(card.id) }"
           @mousedown="startSweep(card.id, $event)"
           @click="onCardClick(card, $event)"
         >
         <!-- 第 1 行：标题与「看完整标题」。勾选由整卡点击驱动，这个复选框只显示选中态。 -->
         <div class="card-row card-head">
-          <el-checkbox :model-value="pool.selectedIds.includes(card.id)" @click.prevent>
+          <el-checkbox :model-value="panel.selectedIds.includes(card.id)" @click.prevent>
             <!-- 挂 `title`：标题被省略号截断后，hover 仍能看到全称。 -->
             <span class="card-title mono" :title="cardTitle(card)">{{ cardTitle(card) }}</span>
           </el-checkbox>
@@ -1226,7 +1405,7 @@ onMounted(() => {
           <el-button v-if="card.indices?.length" link type="primary" size="small" @click="toggleCard(card)">
             {{ isOpen(card) ? '收起逐块指纹' : `展开逐块指纹（${card.indices.length} 块）` }}
           </el-button>
-          <el-button link type="danger" size="small" @click="pool.removeCard(card.id)">移除</el-button>
+          <el-button link type="danger" size="small" @click="panel.removeCard(card.id)">移除</el-button>
           <el-tag v-if="isStale(card)" type="danger" size="small">已作废，需重新取得</el-tag>
         </div>
         <!-- 展开区接在第 3 行之下：卡片不预设高度，展开后向下变高。 -->
@@ -1303,7 +1482,7 @@ onMounted(() => {
         </p>
       </details>
       <!--
-        ★ 只有“卡来自不同宇宙”时后端才拒绝。这必须给出可执行的下一步，因为它不是故障：
+        ★ 只有“卡来自不同合并向量”时后端才拒绝。这必须给出可执行的下一步，因为它不是故障：
           一次结论要求所有份共享同一个承诺 C（学位论文 Def. 29），而每张纯单文件的卡
           各绑在自己那份文件的 C_f 上。
           注意：一张“归约”出来的跨文件卡本身**可以**一次结论（它已经落在一条向量上）。
@@ -1345,7 +1524,7 @@ onMounted(() => {
     -->
     <el-dialog v-model="disaggOpen" title="分解证据：选择区间" width="720px">
       <template v-if="disaggCard">
-        <div v-if="pool.selectedCards.length > 1" class="dg-row">
+        <div v-if="panel.selectedCards.length > 1" class="dg-row">
           <span class="dg-lbl">哪张卡</span>
           <el-select
             v-model="disaggCardId"
@@ -1353,7 +1532,7 @@ onMounted(() => {
             @change="resetDisaggRange"
           >
             <el-option
-              v-for="c in pool.selectedCards"
+              v-for="c in panel.selectedCards"
               :key="c.id"
               :value="c.id"
               :label="cardTitle(c)"
@@ -1387,7 +1566,7 @@ onMounted(() => {
         <div v-if="!disaggCardFresh" class="dg-row">
           <span class="dg-lbl">这张卡</span>
           <span class="text-danger">
-            已作废：取得于 n = {{ disaggCard.n ?? '—' }}，当前 n = {{ pool.currentN ?? '—' }}
+            已作废：取得于 n = {{ disaggCard.n ?? '—' }}，当前 n = {{ panel.currentN ?? '—' }}
             —— 拆出的证据必然验证不通过
           </span>
           <el-button
@@ -1444,11 +1623,155 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <!--
+      增量聚合演示。
+      ★ 为什么单独开一个弹框：这件事（"攒着建"）只有把**两段 → 合并 → 对照**
+        连续走一遍才看得清，塞在卡片墙上讲不明白。
+      ★ 每一步都是真调用，耗时也是真耗时 —— 这一页到处是"数字都要有出处"的规矩，
+        演示里更不该出现编出来的数。
+    -->
+    <el-dialog v-model="incrOpen" title="增量聚合：分段聚合与合并" width="840px">
+      <p class="note" style="margin-top: 0">
+        同一份文件的前半段与后半段<strong>分别</strong>聚合，再把两份<strong>中间结果</strong>合并。
+        合并那一步用的是两份已经存在的证据 —— 它不再向任何存储节点要数据。
+        下面每一步都是真跑：真接口、真耗时、真结果；跑完三张证据会一起进聚合面板。
+      </p>
+
+      <div class="dg-row">
+        <span class="dg-lbl">演示哪份文件</span>
+        <el-select v-model="incrFileIdx" filterable style="flex: 1; min-width: 260px" :loading="incrLoading">
+          <el-option
+            v-for="(f, i) in incrFiles"
+            :key="i"
+            :value="i"
+            :label="`${f.file_key}（${f.owner}）：${f.block_count} 块`"
+          />
+        </el-select>
+        <el-button type="primary" :loading="incrRunning" :disabled="!incrPlan" @click="runIncr">
+          跑一遍
+        </el-button>
+      </div>
+
+      <el-alert
+        v-if="!incrLoading && !incrFiles.length"
+        type="info"
+        :closable="false"
+        class="mt-2"
+        title="眼下没有能演示的文件"
+        description="这个演示需要一份至少 2 块的文件。可以先到「上传文件」页上传一份并切成 6 块以上，再回来跑。"
+      />
+
+      <el-alert v-if="incrErr" type="error" :closable="false" class="mt-2" :title="incrErr" />
+
+      <template v-if="incrPlan">
+        <div class="incr-plan">
+          <span class="text-3">这次的划分：</span>
+          <span class="mono">前一段 {{ blkRange(incrPlan.first) }}</span>
+          <span class="sep">·</span>
+          <span class="mono">后一段 {{ blkRange(incrPlan.second) }}</span>
+          <span class="sep">·</span>
+          <span class="mono text-3">共 {{ incrPlan.total }} 块</span>
+        </div>
+
+        <div class="incr-graph" :class="{ done: incrSteps.length >= 3 }">
+          <div class="incr-col">
+            <div class="incr-node" :class="{ on: incrSteps.some((s) => s.key === 'A') }">
+              <span class="text-3">第一段</span>
+              <span class="mono">{{ blkRange(incrPlan.first) }}</span>
+            </div>
+            <div class="incr-node" :class="{ on: incrSteps.some((s) => s.key === 'B') }">
+              <span class="text-3">第二段</span>
+              <span class="mono">{{ blkRange(incrPlan.second) }}</span>
+            </div>
+          </div>
+          <div class="incr-op">
+            <span>合并</span>
+            <span class="text-3">两份已有证据</span>
+            <span class="text-3">不取数据</span>
+          </div>
+          <div class="incr-col">
+            <div class="incr-node is-wide" :class="{ on: incrSteps.some((s) => s.key === 'M') }">
+              <span class="text-3">并起来</span>
+              <span class="mono">{{ blkRange(incrPlan.all) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="incrSteps.length" class="incr-steps">
+          <div v-for="s in incrSteps" :key="s.id" class="incr-step">
+            <div class="incr-step-head">
+              <span class="incr-title">{{ s.title }}</span>
+              <span class="mono text-3">{{ blkRange(s.blocks) }} · {{ s.ms }} ms</span>
+            </div>
+            <div class="text-2" style="font-size: 13px">{{ s.how }}</div>
+            <div class="mono text-3" style="font-size: 12px">
+              证据 {{ s.resp.proof.size_bytes }} 字节（2 个群元素）
+              <template v-if="s.id === 'M'">
+                · 参与节点 {{ (s.resp.nodes_used || []).length }} 台
+                · 收到凭证 {{ s.resp.cert_count ?? 0 }} 份
+                · 取回密文 0 块
+              </template>
+              <template v-else>
+                · 参与节点 {{ (s.resp.nodes_used || []).length }} 台
+                · 收到凭证 {{ s.resp.cert_count ?? 0 }} 份
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <template v-if="incrSame !== null">
+          <el-alert
+            :type="incrSame ? 'success' : 'error'"
+            :closable="false"
+            class="mt-2"
+            :title="incrSame
+              ? '合并所得与一次性取全逐位相同（S 与 Λ 都一致）'
+              : '合并所得与一次性取全不一致（实现可能有问题）'"
+          >
+            <template #default>
+              <p style="font-size: 13px; margin: 0">
+                两段各自聚合、再合并，与把这批块一次性取全，得到的是<strong>同一份证据</strong>。
+                所以已经聚合过的部分不必重算 —— 这就是「增量」二字的实处：
+                合并的代价只与<strong>新并进来的那部分</strong>有关，与已经有过的部分无关。
+              </p>
+            </template>
+          </el-alert>
+
+          <details class="note-collapse">
+            <summary>说明</summary>
+            <p class="note">
+              合并那一步用的是<strong>两份已经存在的证据</strong>：没有向任何存储节点取数据
+              （本次参与节点 {{ incrMergeFacts?.nodes ?? 0 }} 台、收到凭证
+              {{ incrMergeFacts?.certs ?? 0 }} 份），也没有重新计算任何一块的分量。
+              本次这一步在后端只走了
+              {{ (incrMergeFacts?.stages || []).join('、') || '—' }}。
+              留下的三张证据都已入池，可以接着验证、继续合并或再做分解。
+            </p>
+          </details>
+        </template>
+
+        <details class="note-collapse">
+          <summary>说明</summary>
+          <p class="note">
+            <strong>分解那半句：一步到位，还是只能退回上一次的程度？</strong>
+            两者是同一件事。<br />
+            从一份覆盖 6 块的证据出发，可以<strong>一步</strong>拆出覆盖第 1、3、5 块的证据
+            —— 跳着拆、不必逐层往回退；也可以一步拆回「上一次那一段」。
+            而且拆出来的第 1-3 块，与当初聚合出来的第 1-3 块<strong>逐位相同</strong>：
+            这正是「退回上一次」与「一步拆到位」重合成一句话的原因。
+            代价与丢掉的那部分成正比，同样不向节点取数据。<br />
+            但拆出来的只能是<strong>子集</strong>：想得到含「原证据没覆盖的分块」的证据，
+            无论拆多少次都拆不出来，必须另外取一份再合并 —— 聚合面板存在的理由就在这里。
+          </p>
+        </details>
+      </template>
+    </el-dialog>
+
     <!-- 聚合 / 分解过程：这两件事在界面上最少见，也最值得讲。 -->
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"
-      subtitle="各步仅涉及公开数据；耗时为本次请求的实测值。"
+      subtitle="各步只涉及公开量；时长取自本次请求的实测埋点，未取到埋点的步骤不显示时长。"
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"
@@ -1534,7 +1857,7 @@ onMounted(() => {
   max-width: 90ch;
 }
 /* ---------- 布局（★ 用户 2026-10-12）：左上功能 / 左下验证结果 / 右侧卡片墙 ---------- */
-.pool-wrap {
+.agg-wrap {
   display: grid;
   grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
   grid-template-rows: auto 1fr;
@@ -1542,15 +1865,15 @@ onMounted(() => {
   align-items: start;
 }
 /* 所有“面板”默认落在左栏（功能那块在第 1 行，结果面板依次往下排） */
-.pool-wrap > .panel { grid-column: 1; min-width: 0; }
+.agg-wrap > .panel { grid-column: 1; min-width: 0; }
 /* 卡片墙占右栏、跨两行 */
-.pool-wrap > .cards,
-.pool-wrap > .pool-right { grid-column: 2; grid-row: 1 / span 2; min-width: 0; }
+.agg-wrap > .cards,
+.agg-wrap > .agg-right { grid-column: 2; grid-row: 1 / span 2; min-width: 0; }
 @media (max-width: 1100px) {
-  .pool-wrap { grid-template-columns: minmax(0, 1fr); }
-  .pool-wrap > .panel,
-  .pool-wrap > .cards,
-  .pool-wrap > .pool-right { grid-column: 1; grid-row: auto; }
+  .agg-wrap { grid-template-columns: minmax(0, 1fr); }
+  .agg-wrap > .panel,
+  .agg-wrap > .cards,
+  .agg-wrap > .agg-right { grid-column: 1; grid-row: auto; }
 }
 /* 卡片墙：矩形卡，一行一张。 */
 .cards {
@@ -1644,6 +1967,94 @@ onMounted(() => {
   font-size: 13px;
   color: var(--warn);
 }
+
+/* ---------- 增量聚合演示 ---------- */
+.incr-plan {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+}
+/* 计算图：左边两段、中间一步合并、右边一份。 */
+.incr-graph {
+  margin-top: 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken, var(--bg-raised));
+}
+.incr-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.incr-node {
+  min-width: 128px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  opacity: 0.55;
+  transition: opacity 0.2s ease, border-color 0.2s ease;
+}
+.incr-node.is-wide {
+  min-width: 160px;
+}
+/* 这一步真的跑过之后才亮起来 —— 亮的是"已经发生过的事"，不是预告。 */
+.incr-node.on {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.incr-op {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.incr-op > span:first-child {
+  font-weight: 600;
+  color: var(--accent);
+}
+.incr-graph.done .incr-op > span:first-child::after {
+  content: ' ✓';
+}
+.incr-steps {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.incr-step {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+.incr-step-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.incr-title {
+  font-size: 14px;
+  font-weight: 600;
+}
 /* ---------- 矩形卡：固定三行，展开区在第 3 行之下 ---------- */
 .cards > .card {
   display: flex;
@@ -1674,36 +2085,36 @@ onMounted(() => {
    左栏为证据列表（内部滚动），右栏为功能与验证结果（各面板内部滚动）。
    外层限高且 overflow: hidden，因此页面本身不会出现滚动条。
    包裹层用 display: contents 透明化，使卡片与面板直接参与外层网格。 */
-.pool-wrap {
+.agg-wrap {
   /* 左列只放一张卡，剩下的横向空间全部归右栏 */
-  --pool-card-w: 466px;
-  grid-template-columns: minmax(0, var(--pool-card-w)) minmax(320px, 1fr);
+  --agg-card-w: 466px;
+  grid-template-columns: minmax(0, var(--agg-card-w)) minmax(320px, 1fr);
   align-items: start;
   height: calc(100vh - 200px);
   overflow: hidden;
 }
-.pool-wrap > .pool-side { display: contents; }
+.agg-wrap > .agg-side { display: contents; }
 /* 左栏：证据列表，自身滚动 */
-.pool-wrap > .pool-side > .cards {
+.agg-wrap > .agg-side > .cards {
   grid-column: 1;
   grid-row: 1 / -1;
   align-content: start;
-  max-width: var(--pool-card-w);
+  max-width: var(--agg-card-w);
   max-height: 100%;
   overflow: auto;
   padding-right: 4px;
 }
 /* 右栏上：功能面板，按内容高，过高时自己内滚。 */
-.pool-wrap > .pool-side > .panel {
+.agg-wrap > .agg-side > .panel {
   grid-column: 2;
   min-width: 0;
   max-height: 34vh;
   overflow: auto;
 }
 /* 右栏下：验证结果占满剩余高度（第 2 行为 1fr），内容多时在面板内滚动。
-   注意结果面板是 pool-wrap 的直接子元素（pool-side 只包住了功能面板与卡片列表），
+   注意结果面板是 agg-wrap 的直接子元素（agg-side 只包住了功能面板与卡片列表），
    所以不能与上面合并成一条选择器；align-self 取 stretch 才能跳开外层的 align-items: start。 */
-.pool-wrap > .panel {
+.agg-wrap > .panel {
   grid-column: 2;
   min-width: 0;
   align-self: stretch;
@@ -1712,7 +2123,7 @@ onMounted(() => {
   overflow: auto;
 }
 /* 空态容器（非 .panel、非 .cards）占卡片那一列 */
-.pool-wrap > .pool-side > div:not(.panel):not(.cards) {
+.agg-wrap > .agg-side > div:not(.panel):not(.cards) {
   grid-column: 1;
   grid-row: 1 / -1;
   max-height: 100%;
@@ -1727,16 +2138,16 @@ onMounted(() => {
   padding: 4px 0 6px;
 }
 @media (max-width: 1100px) {
-  .pool-wrap { grid-template-columns: minmax(0, 1fr); }
-  .pool-wrap > .pool-side,
-  .pool-wrap > .cards {
+  .agg-wrap { grid-template-columns: minmax(0, 1fr); }
+  .agg-wrap > .agg-side,
+  .agg-wrap > .cards {
     grid-column: 1;
     grid-row: auto;
     max-height: none;
     max-width: none;
   }
   /* 单列时行高回归内容，结果面板不再撑满。 */
-  .pool-wrap > .panel {
+  .agg-wrap > .panel {
     grid-column: 1;
     grid-row: auto;
     align-self: auto;
@@ -1747,10 +2158,10 @@ onMounted(() => {
 
 <!-- 非 scoped：作用于挂到 body 的弹框（customClass 的元素不在本组件作用域内）。 -->
 <style>
-.pool-title-dialog {
+.agg-title-dialog {
   width: min(760px, 94vw);
 }
-.pool-title-dialog .el-message-box__message {
+.agg-title-dialog .el-message-box__message {
   font-size: 14px;
   line-height: 1.9;
   white-space: pre-line;

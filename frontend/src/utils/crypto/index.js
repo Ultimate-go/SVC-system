@@ -27,7 +27,7 @@
 
 import { crsFingerprint, getCrsAnchor } from '../anchor.js'
 import { bytesToBigInt, concat, hexToBytes } from './bytes.js'
-import { unwrapKey } from './keywrap.js'
+import { blockAad, unwrapKey } from './keywrap.js'
 import { checkModulus, checkPrimes } from './primes.js'
 import { G, scalarMul } from './sm2.js'
 import { sm3 } from './sm3.js'
@@ -41,9 +41,11 @@ export * from './sm2.js'
 export { hmacSm3, pbkdf2Sm3 } from './pbkdf2.js'
 export {
   KIND_BLOCK,
+  KIND_BLOCK_V1,
   KIND_USER_KEY,
   KeyWrapFormatError,
   KeyWrapIntegrityError,
+  blockAad,
   unwrapKey,
   unwrapPrivateKey,
 } from './keywrap.js'
@@ -199,9 +201,17 @@ export function openBlocks(pack, sk, opts = {}) {
   // ---- ② 逐块：分量 → 块密钥 → 明文 ----
   const blocks = pack.blocks.map((b) => {
     const ct = hexToBytes(b.ciphertext_hex)
+    const iv = hexToBytes(b.iv_hex)
     const element = elementOf(ct)
-    const key = unwrapKey(sk, b.key_ct) // 解不开会抛 KeyWrapIntegrityError
-    const plain = sm4Ctr(ct, key, hexToBytes(b.iv_hex))
+    // ★ 用**这一块的身份**去解：`blockAad` 把「哪个文件的第几块」与「数据段 IV」
+    //   一起编进认证标签。换过块号 / 文件名 / IV 都会在这里解不开 ——
+    //   而不是解出一把合法但不对的密钥，让人对着一堆乱码去猜。
+    const key = unwrapKey(
+      sk,
+      b.key_ct,
+      blockAad(pack.owner, pack.file_key, b.block_idx, iv),
+    )
+    const plain = sm4Ctr(ct, key, iv)
     return {
       blockIdx: b.block_idx,
       globalIndex: b.global_index,

@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings, default_settings
 from .db import Database
+from .errors import ApiError, api_error_response, install_error_handler
 from .manager import StoreManager
 from .routers import admin, auth, files, perf, system, verify
 
@@ -137,19 +138,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 declared = int(raw)
             except ValueError:
-                return JSONResponse(
-                    status_code=400,
-                    content={"detail": f"Content-Length 不是整数：{raw!r}"},
+                # ★ 中间件在 ExceptionMiddleware **外面**，抛 ApiError 不会被
+                #   自己的处理器接住（会变成 500）—— 所以这里直接返回响应体，
+                #   形状由 api_error_response 统一给出（含 code）。
+                return api_error_response(
+                    ApiError(
+                        400,
+                        "request.length_not_integer",
+                        f"Content-Length 不是整数：{raw!r}",
+                        raw=raw,
+                    )
                 )
             if declared > max_request_bytes:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "detail": (
-                            f"请求体 {declared} 字节超过上限 "
-                            f"{max_request_bytes // 1024 // 1024} MiB"
-                        )
-                    },
+                limit_mib = max_request_bytes // 1024 // 1024
+                return api_error_response(
+                    ApiError(
+                        413,
+                        "request.too_large",
+                        f"请求体 {declared} 字节超过上限 {limit_mib} MiB",
+                        declared=declared,
+                        limit_mib=limit_mib,
+                    )
                 )
         return await call_next(request)
 
@@ -164,7 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 不把内部细节泄给客户端；调试时靠 settings.debug 打开
         log.exception("未处理异常: %s %s", request.method, request.url.path)
         detail = f"{type(exc).__name__}: {exc}" if settings.debug else "服务器内部错误"
-        return JSONResponse(status_code=500, content={"detail": detail})
+        return api_error_response(ApiError(500, "server.internal", detail))
 
     # ★★ 注册它（安全审计 P1）：这个函数以前**只被定义、从未注册** ——
     #   FastAPI 会用自带的默认处理器，于是注释里承诺的“不把内部细节泄给客户端”
@@ -174,6 +183,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #   ``HTTPException`` / ``RequestValidationError`` 处理器优先级更高，
     #   不会受影响（那些是 4xx，不该变成 500）。
     app.add_exception_handler(Exception, _unhandled)
+
+    # ★ 我们的 ApiError 比 Exception 更具体 ⇒ 它的处理器优先，
+    #   响应体里会多一个 ``code``（前端按码出中文，见 backend/errors.py）。
+    install_error_handler(app)
 
     @app.get("/health", tags=["system"])
     def health():

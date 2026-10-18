@@ -141,7 +141,7 @@ def proof_of_storage(
     return {
         **out,
         "checked_by": user.username,
-        # ★ 阶段耗时：生成挑战 / 按主副本拆挑战 / 各节点生成证明 / 聚合份额 / 验证证明
+        # ★ 阶段耗时：生成挑战 / 按主副本分派挑战 / 各节点生成证明份额 / 份额合成证据 / 配对检验
         "timings": sw.payload(),
         # 把两个数字提前摆好，前端不必自己数
         "asked_total": sum(s["asked"] for s in out["shares"]),

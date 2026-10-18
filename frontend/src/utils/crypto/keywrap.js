@@ -8,9 +8,15 @@
  * ------------
  * 1. `unwrapPrivateKey(password, blob)` —— 用口令解出**用户私钥**（SM2 标量）。
  *    这一层的存在意义是：数据库被拿走也解不开，因为口令不落库。
- * 2. `unwrapKey(sk, ct)` —— 用私钥解出**某一块的块密钥**（16 字节 SM4 密钥）。
+ * 2. `unwrapKey(sk, ct, aad)` —— 用私钥解出**某一块的块密钥**（16 字节 SM4 密钥）。
  *    密文是拿**所有者公钥**封的，所以别人的私钥在这一步会因 tag 不匹配而失败
  *    —— "解密受限"那道门卡在这里，而不是卡在某个 if 判断上。
+ *
+ *    `aad` 由 `blockAad(owner, file_key, block_idx, iv)` 生成：它把「这一块是哪份
+ *    文件的第几块」与「这一块的数据段 IV」编进认证标签。少了它，把 B 块的密钥
+ *    密文配 A 块的密文交过来，标签照样对得上 —— 解出来是一把合法但不对的密钥，
+ *    表现为「明文是乱的」，而长度检查（CTR 保长）与承诺检查（分量由密文算）
+ *    都拦不住。
  *
  * 格式标识（KIND）必须先比对：老格式的密文喂进来应当立刻得到
  * "这不是本格式"，而不是一个看不懂的代数错误。
@@ -30,12 +36,20 @@ import { ecdhShared, kdf, pointFromBytes } from './sm2.js'
 import { sm4Ctr } from './sm4.js'
 
 /** 块密钥密文的格式标识（与 `core/keywrap.py::KIND_BLOCK` 一致）。 */
-export const KIND_BLOCK = 'sm2-ecies-v1'
+export const KIND_BLOCK = 'sm2-ecies-v2'
+/**
+ * 旧版块密钥密文的标识 —— **只用来给出可读的拒绝理由**，本实现不会解它。
+ *
+ * v1 的标签里没有块身份（把别块的密钥配到这一块上，标签照样对得上），
+ * 而那一部分是事后无法补齐的。
+ */
+export const KIND_BLOCK_V1 = 'sm2-ecies-v1'
 /** 用户私钥密文的格式标识（与 `core/keywrap.py::KIND_USER_KEY` 一致）。 */
 export const KIND_USER_KEY = 'userkey-pbkdf2sm3-v1'
 
-const INFO_ENC = utf8('vds/ecies/v1/enc')
-const INFO_TAG = utf8('vds/ecies/v1/tag')
+const INFO_ENC = utf8('vds/ecies/v2/enc')
+const INFO_TAG = utf8('vds/ecies/v2/tag')
+const INFO_AAD = utf8('vds/ecies/v2/aad')
 const INFO_UK_ENC = utf8('vds/userkey/v1/enc')
 const INFO_UK_TAG = utf8('vds/userkey/v1/tag')
 
@@ -54,6 +68,12 @@ export class KeyWrapFormatError extends Error {}
 function expectObj(ct, what, kind) {
   if (ct === null || typeof ct !== 'object') {
     throw new KeyWrapFormatError(`${what}必须是对象`)
+  }
+  if (ct.kind === KIND_BLOCK_V1 && kind === KIND_BLOCK) {
+    throw new KeyWrapFormatError(
+      `${what}是旧格式 ${KIND_BLOCK_V1}：它的认证标签里没有块身份，无法事后补齐` +
+        `（把别块的密钥配到这一块上，标签照样对得上）。本实现只认 ${kind} —— 请重新上传这份文件。`,
+    )
   }
   if (ct.kind !== kind) {
     throw new KeyWrapFormatError(
@@ -74,15 +94,69 @@ function field(obj, name, size) {
 }
 
 /**
+ * 块身份的**规范字节串** —— 编进块密钥认证标签的那串 AAD。
+ *
+ * 与 `core/keywrap.py::block_aad` **逐字节一致**：
+ *
+ * ```
+ * "vds/ecies/v2/aad" ‖ u32(len(owner)) ‖ owner ‖ u32(len(file_key)) ‖ file_key
+ *                     ‖ u64(block_idx) ‖ iv(16 字节)
+ * ```
+ *
+ * 两处 `u32` 长度前缀是必须的：少掉它们，`("a", "bc")` 与 `("ab", "c")`
+ * 会拼成同一串，两个不同文件的块就能互换密钥 —— 那正是这个参数要堵的洞。
+ *
+ * `iv` 是**数据段的 IV**（应答里的 `b.iv_hex`），不是 ECIES 自己的 iv。
+ * 它也必须绑进来：向量分量是 `SM3(密文)`，承诺**盖不住 IV**。
+ *
+ * @param {string} owner 文件所有者
+ * @param {string} fileKey 文件名
+ * @param {number} blockIdx 文件内块号（0 基）
+ * @param {Uint8Array} iv 该块的数据段 IV（16 字节）
+ * @returns {Uint8Array}
+ * @throws {KeyWrapFormatError} 任一字段缺失或形状不对
+ */
+export function blockAad(owner, fileKey, blockIdx, iv) {
+  const o = utf8(String(owner))
+  const f = utf8(String(fileKey))
+  if (o.length === 0 || f.length === 0) {
+    throw new KeyWrapFormatError('owner / file_key 都不能为空')
+  }
+  const idx = Number(blockIdx)
+  if (!Number.isInteger(idx) || idx < 0) {
+    throw new KeyWrapFormatError(`块号必须是非负整数，收到 ${blockIdx}`)
+  }
+  const raw = iv instanceof Uint8Array ? iv : new Uint8Array(iv)
+  if (raw.length !== SM4_IV_BYTES) {
+    throw new KeyWrapFormatError(`数据段的 IV 必须是 ${SM4_IV_BYTES} 字节，收到 ${raw.length}`)
+  }
+  return concat(
+    INFO_AAD,
+    bigIntToBytes(BigInt(o.length), 4),
+    o,
+    bigIntToBytes(BigInt(f.length), 4),
+    f,
+    bigIntToBytes(BigInt(idx), 8),
+    raw,
+  )
+}
+
+/**
  * 用所有者的私钥解出一把**块密钥**。
  *
  * @param {bigint} sk 所有者私钥标量
  * @param {object} ct 块密钥密文（`{kind, R, iv, body, tag}`）
+ * @param {Uint8Array} aad 块身份（`blockAad(...)` 的返回值）。**必传** ——
+ *   给它一个默认值就等于允许调用方「忘了绑」，而那正好会让格式退回 v1。
  * @returns {Uint8Array} 16 字节块密钥
- * @throws {KeyWrapIntegrityError} tag 对不上（密文被改，或这不是你的私钥）
+ * @throws {KeyWrapIntegrityError} tag 对不上：密文被改过、这不是你的私钥、
+ *   或者这块的块身份对不上（换过块号 / 文件名 / 数据段 IV）
  */
-export function unwrapKey(sk, ct) {
+export function unwrapKey(sk, ct, aad) {
   expectObj(ct, '块密钥密文', KIND_BLOCK)
+  if (!aad || aad.length === 0) {
+    throw new KeyWrapFormatError('块身份（aad）不能为空 —— 用 blockAad(...) 生成')
+  }
   const rBytes = field(ct, 'R', 65)
   const iv = field(ct, 'iv', SM4_IV_BYTES)
   const body = field(ct, 'body')
@@ -96,11 +170,12 @@ export function unwrapKey(sk, ct) {
   }
 
   const z = ecdhShared(sk, rPoint)
-  const expectTag = kdf(z, concat(INFO_TAG, rBytes, iv, body), TAG_BYTES)
+  const expectTag = kdf(z, concat(INFO_TAG, rBytes, iv, body, aad), TAG_BYTES)
   if (!bytesEq(expectTag, tag)) {
     // ★ 这是**密码学那道门**：不是"查表发现你没权限"，而是**算不出来**。
     throw new KeyWrapIntegrityError(
-      '块密钥密文的认证标签对不上 —— 密文被改过，或者这不是你的私钥',
+      '块密钥密文的认证标签对不上 —— 密文被改过、这不是你的私钥，' +
+        '或者这块的块身份对不上（换过块号 / 文件名 / 数据段 IV）',
     )
   }
   const sm4Key = kdf(z, INFO_ENC, SM4_KEY_BYTES)

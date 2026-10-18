@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     #     听的端口"显式交给它（见 ``start_all.my_tree_ports``）—— 那几个一律不 /T。
     #     （这条不做的话，「改端口 → 立刻重启」会在停在旧后端那一刻把自己杀掉：
     #      旧的那套停了，新的那套再也起不来。）
-    say("\n[1/3] 停掉现有的节点 / 后端 / 前端")
+    say("\n[1/3] 停机：存储节点 / 后端 / 前端")
     starter.stop_everything(
         quiet=False, backend_tree=False, self_ports=starter.my_tree_ports()
     )
@@ -212,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     # 交接完毕：把标记撤掉。新的一套起来之后就不该再有“正在重启”这回事了。
     marker.unlink(missing_ok=True)
 
-    say("\n[2/3] 按部署配置的台数重新启动")
+    say("\n[2/3] 按部署配置重新启动存储节点与后端")
     cmd = [PY, str(ROOT / "scripts" / "start_all.py")]
     if args.nodes is not None:
         cmd += ["--nodes", str(args.nodes)]
@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         env.pop(var, None)
     say(f"  {' '.join(cmd[1:])}")
 
-    say("\n[3/3] 交棒给一键启动（这个窗口从此就是它的控制台）")
+    say("\n[3/3] 移交控制台给一键启动（本窗口此后就是它的控制台）")
     say("     要停就按 Ctrl+C，或者跑一次 停止.cmd。\n")
     # 前台跑（阻塞）：本脚本活着的这段时间就是这个演示环境的控制台。
     # 用 run 而不是 Popen + 退出，是因为"启动器需要一个活着的终端"——

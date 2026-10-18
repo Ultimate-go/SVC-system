@@ -14,6 +14,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { usersApi } from '../../../api/users'
 import { useAuthStore } from '../../../stores/auth'
 import { fmtTime } from '../../../utils/format'
+// ★ 删号那段说明现在是**前端文案**（后端只回件数，见 `copy.js`）。
+import { userDeletedWarning } from '../../../data/copy'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import FilterBar from '../../../components/common/FilterBar.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
@@ -100,8 +102,9 @@ async function removeUser(u) {
   }
   try {
     const { data } = await usersApi.remove(u.id)
-    // ★ 后端返回的 warning 原样展示，不自己再编。
-    ElMessageBox.alert(data.warning || '已删除', '删除结果', { type: 'info' })
+    // ★ 那段说明是前端拼的（`data/copy.js::userDeletedWarning`），依据是响应里的
+    //   件数 —— 改措辞不必重启后端。
+    ElMessageBox.alert(userDeletedWarning(data) || '已删除', '删除结果', { type: 'info' })
     await load()
   } catch {
     // 错误已由拦截器弹出

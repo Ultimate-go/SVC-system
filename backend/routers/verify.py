@@ -18,7 +18,7 @@ from .. import metrics
 from ..deps import audit, current_user, get_db, get_manager
 from ..manager import NotFound, OutOfRange, StoreManager
 from ..models import UserRow
-from ..schemas import BatchVerifyIn, DisaggIn, FileQueryIn, QueryIn
+from ..schemas import AggIn, BatchVerifyIn, DisaggIn, FileQueryIn, QueryIn
 from core.timing import collect
 from core.transport import TransportError
 
@@ -57,7 +57,7 @@ def query_by_indices(
         ok=out["ok"],
         detail=(out["verify"]["message"] if not out["ok"] else ""),
     )
-    # ★ 阶段耗时：探测各节点 / 取回分量与凭证 / 聚合凭证 / 承诺验证
+    # ★ 阶段耗时：探测各节点 / 取回分量与凭证 / 证据合成 / 承诺验证
     out["timings"] = sw.payload()
     metrics.record("query", sw.total_ms(), sw.rows())
     return out
@@ -102,10 +102,10 @@ def verify_batch_route(
     mgr: StoreManager = Depends(get_manager),
     db: Session = Depends(get_db),
 ):
-    """**批量验证**：一次验池子里的多份证据（可跨文件、跨用户）。
+    """**批量验证**：一次验聚合面板里的多份证据（可跨文件、跨用户）。
 
     与 ``/api/query`` 一样**不做任何权限判断** —— "验证不受限"这条同样适用：
-    谁都能拿自己池子里的证据来验，验得动验不动与能不能解密无关。
+    谁都能拿自己聚合面板里的证据来验，验得动验不动与能不能解密无关。
 
     ⚠ **它比逐份验慢**（实测，见规划 §13.6），响应里会把"批量 vs 逐份"
     两个耗时一起返回 —— 界面上**两个都显示**，不藏着。
@@ -151,11 +151,11 @@ def evidence_disagg(
         想要 :math:`\pi_{1,3,5}`（``5 ∉ {1,3,7}``）光靠这一份永远拆不出来，
         必须另外取一份**含 5** 的，再聚合。
 
-    所以界面上那条流程是 **4 步**：池子里有 :math:`\pi_{1,3,7}`
+    所以界面上那条流程是 **4 步**：聚合面板里有 :math:`\pi_{1,3,7}`
     → 拆出 :math:`\pi_{1,3}` → 补一份 :math:`\pi_5` →
-    聚成 :math:`\pi_{1,3,5}`。**第三步不能省**，这正是证据池存在的理由。
+    聚成 :math:`\pi_{1,3,5}`。**第三步不能省**，这正是聚合面板存在的理由。
 
-    返回体与 ``/api/query`` **同构**，前端可以把结果当成一张新卡片直接收进池子。
+    返回体与 ``/api/query`` **同构**，前端可以把结果当成一张新卡片直接收进聚合面板。
     """
     try:
         with collect() as sw:
@@ -180,5 +180,64 @@ def evidence_disagg(
     )
     out["timings"] = sw.payload()
     metrics.record("disagg", sw.total_ms(), sw.rows())
+    return out
+
+
+@router.post("/evidence/agg")
+def evidence_agg(
+    body: AggIn,
+    user: UserRow = Depends(current_user),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    r"""**合并**：把两份**已有**证据并成一份（**不向节点取数据**）。
+
+    ``/evidence/disagg`` 的反方向，也是需求 5「分解再聚合」的后半段：
+    分解把大集合拆成子集，合并把两个（不相交的）子集并回去。
+
+    .. important::
+
+       **这是「增量聚合」里"增量"那一步的接口。** 两份证据都必须是**已经存在**的
+       —— 聚合面板里取的、或上一次合并出来的。合并只用到它们自己的
+       :math:`(I, v_I, \pi_I)` 与 :math:`(J, v_J, \pi_J)`：不取密文、不重算分量、
+       不新增任何网络往返。
+
+       所以"先聚合前一半、再聚合后一半、然后把两份并起来"与"一次性取全"
+       得到的是**同一份证据**（实测逐位相同，见 ``scripts/verify_incremental_agg.py``）。
+       这正是"可以攒着建、不必推倒重来"的依据。
+
+    前提与 :meth:`~backend.manager.StoreManager.disagg` 一致：两份证据必须落在
+    **同一条向量**上（本方案里每份文件各一条），且 **·I ∩ J = ∅**。
+    想要的那份如果含**两边都没有**的下标，只能另外去取（``/api/query``），
+    再合到这里来 —— 这一步无论如何省不掉。
+
+    返回体与 ``/api/query`` **同构**，前端可以把结果当成一张新卡片直接收进聚合面板。
+    """
+    try:
+        with collect() as sw:
+            out = mgr.agg(
+                {
+                    "indices": body.a.indices,
+                    "values": body.a.values,
+                    "proof": body.a.proof.model_dump(),
+                },
+                {
+                    "indices": body.b.indices,
+                    "values": body.b.values,
+                    "proof": body.b.proof.model_dump(),
+                },
+            )
+    except OutOfRange as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    audit(
+        db,
+        user.username,
+        "agg",
+        f"{len(body.a.indices)} 块 + {len(body.b.indices)} 块 → {len(out['indices'])} 块",
+        ok=out["ok"],
+        detail="" if out["ok"] else out["verify"]["message"],
+    )
+    out["timings"] = sw.payload()
+    metrics.record("agg", sw.total_ms(), sw.rows())
     return out
 

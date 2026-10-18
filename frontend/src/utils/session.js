@@ -18,6 +18,47 @@
 
 const LAST_KEY = 'vds_last_active'
 
+/* ---------------------------------------------------------------------------
+   「这次登录」的标记 —— 给**每次登录只演一遍**用的
+   ---------------------------------------------------------------------------
+   系统初始化页那条流水线是个开场演示：登录管理员后看一遍就够，重复看是噪声。
+   所以登录成功时盖一个时间戳，演完再盖另一个；两个相等就说明"这一次登录
+   已经演过了"。退出重登会刷新前者，于是又能演一遍。
+
+   ★ 为什么不用 sessionStorage：同一浏览器的**新标签页**是新的会话存储，
+     换个标签重新进初始化页会又演一遍；而这个标记要的是"这一次登录"。
+--------------------------------------------------------------------------- */
+export const LOGIN_MARK_KEY = 'vds_login_mark'
+export const INIT_PLAYED_KEY = 'vds_init_played_v1'
+
+/** 登录成功时调一次（见 stores/auth.js 的 login）。 */
+export function markLogin() {
+  try {
+    localStorage.setItem(LOGIN_MARK_KEY, String(Date.now()))
+  } catch {
+    /* 隐私模式：标记写不进去 ⇒ 当作每次都该演一遍（不影响别的东西） */
+  }
+}
+
+/** 这一次登录是否已经演过初始化流水线。 */
+export function initFlowPlayed() {
+  try {
+    const mark = localStorage.getItem(LOGIN_MARK_KEY)
+    return !!mark && localStorage.getItem(INIT_PLAYED_KEY) === mark
+  } catch {
+    return false
+  }
+}
+
+/** 演完盖戳（下一次登录会被重置）。 */
+export function markInitFlowPlayed() {
+  try {
+    localStorage.setItem(INIT_PLAYED_KEY, localStorage.getItem(LOGIN_MARK_KEY) || '')
+  } catch {
+    /* 同上 */
+  }
+}
+
 /** 闲置上限（毫秒）。改这一个数就能改掉全站的会话时效。 */
 export const IDLE_MS = 5 * 60 * 1000
 

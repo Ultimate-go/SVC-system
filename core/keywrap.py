@@ -5,14 +5,17 @@
 之前有一个 ``ABEProvider`` Protocol + 方案 A / 方案 B 两个实现。现在只有一种
 做法，再抽一层接口就只是让人多绕一步，所以按需求**不保留接口**。
 
-第 1 层 · 块密钥 ── 用**所有者的 SM2 公钥**封装
-------------------------------------------------
-``wrap_key(pk_owner, block_key)`` / ``unwrap_key(sk_owner, ct)``
+第 1 层 · 块密钥 ── 用**所有者的 SM2 公钥**封装，并绑定块身份
+----------------------------------------------------------------
+``wrap_key(pk_owner, block_key, aad=…)`` / ``unwrap_key(sk_owner, ct, aad=…)``
 
 * 每次封装抽一把**临时私钥** ``d``，密文里带上 ``R = d·G``；
 * 双方各算 ``z = d·pk_owner`` / ``sk_owner·R``，值相同（都是 ``d·sk_owner·G`` 的 x 坐标）；
 * ``SM4 密钥 = KDF(z, 加密标签)``，密文体用 SM4-CTR 加密；
-* ``tag = KDF(z, 认证标签 ‖ R ‖ iv ‖ 密文体)``。
+* ``tag = KDF(z, 认证标签 ‖ R ‖ iv ‖ 密文体 ‖ aad)``。
+
+``aad`` 由 :func:`block_aad` 生成，内容是**块的身份**（``owner``、``file_key``、
+``block_idx``）与**数据段的 IV**。它不是可选装饰 —— 理由见下面那一节。
 
 **为什么 tag 用 KDF 算、而不另引一个 MAC**
 早先那版（`core/fabeo.py`，**已删除**）里已经是这个形状（``tag = _kdf(z, _LABEL_TAG + body)``）。
@@ -26,6 +29,35 @@
 解出来的块密钥就变成另一个值 —— 那个坏密钥会一路带到 SM4 解密，表现为
 "文件内容是乱的"，而不是"这里被篡改了"。有了 tag，**篡改在解封这一步
 就现形**，并且能明确报出来。
+
+**为什么必须绑定块身份**（``sm2-ecies-v2`` 相对 ``v1`` 的唯一改动）
+--------------------------------------------------------------------
+v1 的标签只覆盖 ``R ‖ iv ‖ 密文体``，于是把 **B 块**的块密钥密文配 **A 块**
+的密文交出去，标签照样对得上：解出来是一把「合法但不对」的密钥，表现为
+「明文是乱的」。而两条最自然的检查都拦不住它 ——
+
+* **长度检查**：CTR 保长，用错密钥解出来的明文**长度一模一样**；
+* **承诺检查**：向量分量由 :func:`~core.crypto.vector_element` 对着**密文**
+  算，密文没被换 ⇒ 分量没变 ⇒ 承诺验证照样通过。
+
+同一处还有一个入口：**数据段的 IV 不受任何结构保护**。承诺只盖住密文
+（``v_i = SM3(c_i)``），``iv`` 是账目里的另一个字段；单独换掉 IV，得到的
+同样是「验证通过 + 明文是乱的」。
+
+所以 v2 把「块身份 + 数据段 IV」编进认证标签：
+
+    块身份 = (owner, file_key, block_idx)，按 :func:`block_aad` 的定长分帧拼起来
+
+任何一项对不上（换块密钥、换块号、换文件、换 IV），失败都发生在**解封这一步**
+—— 报「认证标签对不上」，而不是让人对着一堆乱码去猜是哪一环坏了。
+
+.. important::
+
+   **v1 的密文不再支持。** 它的标签里没有块身份，无法事后补齐；
+   :func:`_expect` 会把 ``sm2-ecies-v1`` 单独认出来并说明原因，
+   而不是笼统地报「格式不认识」。两版的 KDF 域分隔串也不同
+   （``vds/ecies/v1/*`` → ``vds/ecies/v2/*``），所以同一个块在两版下
+   算出来的块密钥根本不是一个值。
 
 第 2 层 · 用户私钥 ── 用**用户口令**封装
 ----------------------------------------
@@ -73,7 +105,9 @@ from .sm2 import (
 
 __all__ = [
     "KIND_BLOCK",
+    "KIND_BLOCK_V1",
     "KIND_USER_KEY",
+    "block_aad",
     "PBKDF2_ITERATIONS",
     "PBKDF2_ITERATIONS_MAX",
     "PRIVATE_KEY_BYTES",
@@ -101,14 +135,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: 块密钥密文的格式标识。
-KIND_BLOCK = "sm2-ecies-v1"
+#:
+#: ★ v2 相对 v1 的唯一改动：认证标签里多了**块身份**（见 :func:`block_aad`）。
+KIND_BLOCK = "sm2-ecies-v2"
+
+#: v1 的标识 —— **只用来给出可读的拒绝理由**，本实现不会解它。
+KIND_BLOCK_V1 = "sm2-ecies-v1"
 
 #: 用户私钥密文的格式标识。
 KIND_USER_KEY = "userkey-pbkdf2sm3-v1"
 
-#: ECIES 包装里的两处域分隔（KDF 的 info）。
-_INFO_ENC = b"vds/ecies/v1/enc"
-_INFO_TAG = b"vds/ecies/v1/tag"
+#: ECIES 包装里的三处域分隔（KDF 的 info 与 AAD 的域前缀）。
+_INFO_ENC = b"vds/ecies/v2/enc"
+_INFO_TAG = b"vds/ecies/v2/tag"
+_INFO_AAD = b"vds/ecies/v2/aad"
 
 #: 用户私钥封装里的两处域分隔。
 _INFO_UK_ENC = b"vds/userkey/v1/enc"
@@ -192,6 +232,12 @@ def _expect(counter: object, *, what: str, kind: str) -> dict:
     if not isinstance(counter, dict):
         raise KeyWrapFormatError(f"{what}必须是对象，收到 {type(counter).__name__}")
     got = counter.get("kind")
+    if got == KIND_BLOCK_V1 and kind == KIND_BLOCK:
+        raise KeyWrapFormatError(
+            f"{what}是旧格式 {KIND_BLOCK_V1!r}：它的认证标签里没有块身份，"
+            f"无法事后补齐（把别块的密钥配到这一块上，标签照样对得上）。"
+            f"本实现只认 {KIND_BLOCK!r} —— 请重新上传这份文件。"
+        )
     if got != kind:
         raise KeyWrapFormatError(
             f"{what}的格式是 {got!r}，本实现只认 {kind!r}"
@@ -213,11 +259,54 @@ def _hex_field(obj: dict, name: str, *, size: int | None = None) -> bytes:
     return out
 
 
-def wrap_key(pk_owner: Point, block_key: bytes) -> dict:
-    """用所有者的公钥把一把**块密钥**包起来。
+def block_aad(owner: str, file_key: str, block_idx: int, iv: bytes) -> bytes:
+    r"""块身份的**规范字节串** —— 编进块密钥认证标签的那串 AAD。
+
+    内容 = ``"vds/ecies/v2/aad"`` ‖ ``u32(len(owner))`` ‖ ``owner``
+    ‖ ``u32(len(file_key))`` ‖ ``file_key`` ‖ ``u64(block_idx)`` ‖ ``iv``。
+
+    两处 ``u32`` 长度前缀是**必须的**：少掉它们，``("a", "bc")`` 与
+    ``("ab", "c")`` 会拼成同一串，两个不同文件的块就能互换密钥 ——
+    那正是这个参数要堵的洞。
+
+    ``iv`` 是**数据段的 IV**（:func:`~core.crypto.new_iv` 生成、跟着密文一起
+    存在账目里的那个），不是 ECIES 自己的 ``iv``。它也必须绑进来：向量分量
+    是 ``SM3(密文)``，承诺**盖不住 IV** —— 单独换掉 IV 得到的同样是
+    「验证通过 + 明文是乱的」。
+
+    ★ 这是块身份的**唯一定义**。封装与解封两侧都必须走这一个函数，
+      否则同一块会算出两个不同的 AAD，表现成「密钥明明是对的却解不开」。
+    """
+    o = str(owner).encode("utf-8")
+    f = str(file_key).encode("utf-8")
+    if not o or not f:
+        raise KeyWrapError("owner / file_key 都不能为空")
+    idx = int(block_idx)
+    if idx < 0:
+        raise KeyWrapError(f"块号不能为负，收到 {block_idx}")
+    raw_iv = bytes(iv)
+    if len(raw_iv) != SM4_IV_BYTES:
+        raise KeyWrapError(
+            f"数据段的 IV 必须是 {SM4_IV_BYTES} 字节，收到 {len(raw_iv)}"
+        )
+    return (
+        _INFO_AAD
+        + len(o).to_bytes(4, "big")
+        + o
+        + len(f).to_bytes(4, "big")
+        + f
+        + idx.to_bytes(8, "big")
+        + raw_iv
+    )
+
+
+def wrap_key(pk_owner: Point, block_key: bytes, *, aad: bytes) -> dict:
+    """用所有者的公钥把一把**块密钥**包起来，并绑住它的块身份。
 
     :param pk_owner: 文件所有者的 SM2 公钥点。
     :param block_key: 明文块密钥（SM4 密钥，16 字节）。
+    :param aad: 块身份 —— **必传、没有默认值**（用 :func:`block_aad` 生成）。
+        给它一个默认值就等于允许有人「忘了绑」，而那正好会让这个格式退回 v1。
     :returns: 可直接 JSON 序列化的密文字典。
 
     ★ 本函数**不留** ``block_key`` 的任何副本（局部变量随栈消失），
@@ -228,6 +317,8 @@ def wrap_key(pk_owner: Point, block_key: bytes) -> dict:
         raise KeyWrapError(f"块密钥必须是 {SM4_KEY_BYTES} 字节，收到 {len(block_key)}")
     if pk_owner is None or not is_on_curve(pk_owner):
         raise KeyWrapError("所有者的公钥不在 SM2 曲线上")
+    if not aad:
+        raise KeyWrapError("aad（块身份）不能为空 —— 它必须由 block_aad 生成")
 
     d_eph = gen_private_key()
     r_bytes = point_bytes(public_key_of(d_eph))
@@ -236,7 +327,7 @@ def wrap_key(pk_owner: Point, block_key: bytes) -> dict:
     sm4_key = kdf(z, _INFO_ENC, SM4_KEY_BYTES)
     iv = os.urandom(SM4_IV_BYTES)
     body = encrypt_segment(block_key, sm4_key, iv)
-    tag = kdf(z, _INFO_TAG + r_bytes + iv + body, _TAG_BYTES)
+    tag = kdf(z, _INFO_TAG + r_bytes + iv + body + bytes(aad), _TAG_BYTES)
 
     return {
         "kind": KIND_BLOCK,
@@ -247,13 +338,19 @@ def wrap_key(pk_owner: Point, block_key: bytes) -> dict:
     }
 
 
-def unwrap_key(sk_owner: int, ct: dict) -> bytes:
+def unwrap_key(sk_owner: int, ct: dict, *, aad: bytes) -> bytes:
     """用所有者的私钥解出一把块密钥。
 
-    :raises KeyWrapIntegrityError: 标签对不上（密文被改过，或这不是你的密文）。
-    :raises KeyWrapFormatError: 形状不对（含"这是旧 ABE 密文"）。
+    :param aad: 与封装时**同一个**块身份（:func:`block_aad`）。对不上就报
+        :class:`KeyWrapIntegrityError` —— 它就是「这把钥匙不属于这一块」的判据。
+
+    :raises KeyWrapIntegrityError: 标签对不上。成因有三类，共用一句话：密文被改过、
+        这不是你的私钥、或者这块的块身份不是你说的那一个。
+    :raises KeyWrapFormatError: 形状不对（含「这是旧格式的块密钥密文」）。
     """
     _expect(ct, what="块密钥密文", kind=KIND_BLOCK)
+    if not aad:
+        raise KeyWrapError("aad（块身份）不能为空 —— 它必须由 block_aad 生成")
     r_bytes = _hex_field(ct, "R", size=65)
     iv = _hex_field(ct, "iv", size=SM4_IV_BYTES)
     body = _hex_field(ct, "body")
@@ -265,10 +362,11 @@ def unwrap_key(sk_owner: int, ct: dict) -> bytes:
         raise KeyWrapFormatError(f"密文里的临时公钥非法：{exc}") from exc
 
     z = ecdh_shared(sk_owner, r_point)
-    expect_tag = kdf(z, _INFO_TAG + r_bytes + iv + body, _TAG_BYTES)
+    expect_tag = kdf(z, _INFO_TAG + r_bytes + iv + body + bytes(aad), _TAG_BYTES)
     if not hmac.compare_digest(expect_tag, tag):
         raise KeyWrapIntegrityError(
-            "块密钥密文的认证标签对不上 —— 密文被改过，或者这不是你的私钥"
+            "块密钥密文的认证标签对不上 —— 密文被改过、这不是你的私钥，"
+            "或者这块的块身份对不上（换过块号 / 文件名 / 数据段 IV）"
         )
 
     sm4_key = kdf(z, _INFO_ENC, SM4_KEY_BYTES)
@@ -404,45 +502,81 @@ def self_check() -> list[tuple[str, bool]]:
 
     sk, pk = new_keypair()
     key = bytes(range(SM4_KEY_BYTES))
+    #: 一组固定的块身份（所有者 / 文件名 / 块号 + 数据段 IV），后面各条断言共用
+    iv_a = bytes(range(0x20, 0x30))
+    aad_a = block_aad("ann", "report", 3, iv_a)
 
     def roundtrip() -> bool:
-        return unwrap_key(sk, wrap_key(pk, key)) == key
+        return unwrap_key(sk, wrap_key(pk, key, aad=aad_a), aad=aad_a) == key
 
     def wrong_key() -> bool:
         other_sk, _ = new_keypair()
         try:
-            unwrap_key(other_sk, wrap_key(pk, key))
+            unwrap_key(other_sk, wrap_key(pk, key, aad=aad_a), aad=aad_a)
         except KeyWrapIntegrityError:
             return True
         return False
 
     def tamper_body() -> bool:
-        ct = wrap_key(pk, key)
+        ct = wrap_key(pk, key, aad=aad_a)
         raw = bytearray(bytes.fromhex(ct["body"]))
         raw[0] ^= 0x01
         ct["body"] = bytes(raw).hex()
         try:
-            unwrap_key(sk, ct)
+            unwrap_key(sk, ct, aad=aad_a)
         except KeyWrapIntegrityError:
             return True
         return False
 
     def tamper_r() -> bool:
         # 换掉临时公钥：z 会变，标签必然对不上
-        ct = wrap_key(pk, key)
+        ct = wrap_key(pk, key, aad=aad_a)
         other_sk, _ = new_keypair()
         ct["R"] = point_bytes(public_key_of(other_sk)).hex()
         try:
-            unwrap_key(sk, ct)
+            unwrap_key(sk, ct, aad=aad_a)
         except (KeyWrapIntegrityError, KeyWrapFormatError):
             return True
         return False
 
+    def mismatched_block() -> bool:
+        """★ 块身份对不上就必须拒绝 —— 换块号 / 换文件 / 换所有者 / 换 IV。"""
+        ct = wrap_key(pk, key, aad=aad_a)
+        others = (
+            block_aad("ann", "report", 4, iv_a),        # 换块号
+            block_aad("ann", "other", 3, iv_a),         # 换文件名
+            block_aad("bob", "report", 3, iv_a),        # 换所有者
+            block_aad("ann", "report", 3, bytes(16)),   # 换数据段 IV
+        )
+        for other in others:
+            try:
+                unwrap_key(sk, ct, aad=other)
+            except KeyWrapIntegrityError:
+                continue
+            return False
+        return True
+
+    def aad_framing() -> bool:
+        """定长分帧生效：两种拼法不同的身份串必须得到不同的 AAD。"""
+        return block_aad("a", "bc", 1, iv_a) != block_aad("ab", "c", 1, iv_a)
+
     def rejects_old_kind() -> bool:
         try:
-            unwrap_key(sk, {"kind": "scheme-a", "anything": "x"})
+            unwrap_key(sk, {"kind": "scheme-a", "anything": "x"}, aad=aad_a)
         except KeyWrapFormatError:
             return True
+        return False
+
+    def rejects_v1_kind() -> bool:
+        """旧 v1 格式必须**指名**拒绝，而不是笼统说「格式不认识」。"""
+        try:
+            unwrap_key(
+                sk,
+                {"kind": KIND_BLOCK_V1, "R": "", "iv": "", "body": "", "tag": ""},
+                aad=aad_a,
+            )
+        except KeyWrapFormatError as exc:
+            return "块身份" in str(exc)
         return False
 
     def user_key_roundtrip() -> bool:
@@ -472,7 +606,10 @@ def self_check() -> list[tuple[str, bool]]:
     check("块密钥：别人的私钥解不开", wrong_key)
     check("块密钥：密文体被改一位就报错", tamper_body)
     check("块密钥：临时公钥被换就报错", tamper_r)
+    check("块密钥：块身份对不上就解不开（换块号 / 换文件 / 换 IV）", mismatched_block)
+    check("块身份：定长分帧能区分 ('a','bc') 与 ('ab','c')", aad_framing)
     check("块密钥：旧 ABE 密文被明确拒绝", rejects_old_kind)
+    check("块密钥：v1 密文被指名拒绝（说清缺块身份）", rejects_v1_kind)
     check("私钥：口令封了能解回来", user_key_roundtrip)
     check("私钥：口令错就报错", user_key_wrong_password)
     check("私钥：密文被改一位就报错", user_key_tamper)

@@ -25,6 +25,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { deployApi } from '../../api/deploy'
 import { useAuthStore } from '../../stores/auth'
 import { onDeployChanged } from '../../utils/deployBus'
+// ★ 端口那几句（提示、替你改过哪几个、被占用的名单、冲突正文）现在是**前端文案**：
+//   后端只回数据（``running`` / ``auto_fixed`` / ``occupied`` / ``conflicts``）。
+import {
+  portConflictDetail,
+  portsAutoFixed,
+  portsNotice,
+  portsOccupiedWarning,
+  portsSavedMessage,
+} from '../../data/copy'
 import Icon from '../icons/Icon.vue'
 
 const info = ref(null)
@@ -60,20 +69,36 @@ const dirty = computed(() => {
   return nodeIds.value.some((id) => form.value.nodes[id] !== info.value.nodes[id])
 })
 
-/** 填重了的那种（本地就能判，不必等后端；后端也会拦一次）。 */
+/**
+ * 填重了的那种（本地就能判，不必等后端；后端也会拦一次）。
+ *
+ * ★ 回的是**结构化**的一条条冲突（与后端 ``conflicts`` 同形状），句子交给
+ *   ``data/copy.js::portConflictDetail`` —— 本地拦、后端拦两处说一样的话。
+ */
 const localConflicts = computed(() => {
   const seen = new Map()
   const out = []
-  const push = (label, port) => {
+  const push = (kind, who, port) => {
     if (!port) return
-    if (seen.has(port)) out.push(`${label} 与「${seen.get(port)}」填了同一个端口 ${port}`)
-    else seen.set(port, label)
+    if (seen.has(port)) out.push({ kind, who, with: seen.get(port), port })
+    else seen.set(port, who)
   }
-  push('后端', form.value.backend)
-  push('前端', form.value.frontend)
-  nodeIds.value.forEach((id) => push(id, form.value.nodes[id]))
+  push('backend', '后端', form.value.backend)
+  push('frontend', '前端', form.value.frontend)
+  nodeIds.value.forEach((id) => push('node', id, form.value.nodes[id]))
   return out
 })
+
+/** 本地冲突那一条 alert 的正文。 */
+const localConflictText = computed(() => portConflictDetail(localConflicts.value))
+
+/** 「改了端口还没重启」那条 alert 的正文（没到重启时就是空串）。 */
+const portsNoticeText = computed(() =>
+  info.value?.restart_required ? portsNotice(info.value) : '',
+)
+
+/** 读配置时替你改过的那几个端口（空串 = 没改过）。 */
+const autoFixedText = computed(() => portsAutoFixed(info.value?.auto_fixed))
 
 const occupied = computed(() => (probe.value || []).filter((x) => x.status === 'occupied'))
 
@@ -137,11 +162,9 @@ async function load() {
 
 async function checkPorts() {
   if (localConflicts.value.length) {
-    await ElMessageBox.alert(
-      localConflicts.value.join('\n') + '\n\n同一个端口只能给一样东西用 —— 先改掉其中一方。',
-      '这几个端口填重了',
-      { type: 'warning' },
-    )
+    await ElMessageBox.alert(localConflictText.value, '这几个端口填重了', {
+      type: 'warning',
+    })
     return
   }
   probing.value = true
@@ -149,7 +172,7 @@ async function checkPorts() {
     const { data } = await deployApi.portsPlan(collect())
     probe.value = data.probe || []
     checked.value = true
-    if ((data.warnings || []).length) ElMessage.warning('有端口被别的程序占着，见下面的结果')
+    if ((data.occupied || []).length) ElMessage.warning('有端口被别的程序占着，见下面的结果')
     else ElMessage.success('这些端口都能用')
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '探测失败'
@@ -172,26 +195,29 @@ async function save() {
   // ★ 保存前先探一次：被占用的端口要**在保存之前**说清楚。
   //   探测本身失败（比如网络抖了）**不挡保存** —— 占用只是提示，
   //   没理由因为探不到就让使用者存不下配置。
-  let warnings = []
+  let occupiedItems = []
   try {
     const { data } = await deployApi.portsPlan(collect())
     probe.value = data.probe || []
     checked.value = true
-    warnings = data.warnings || []
+    occupiedItems = data.occupied || []
     if ((data.conflicts || []).length) {
-      await ElMessageBox.alert(data.detail || data.conflicts.join('\n'), '这几个端口填重了', {
-        type: 'warning',
-      })
+      await ElMessageBox.alert(
+        portConflictDetail(data.conflicts) || data.detail,
+        '这几个端口填重了',
+        { type: 'warning' },
+      )
       return
     }
   } catch {
     /* 探不到就算了，下面照样保存 */
   }
 
-  if (warnings.length) {
+  if (occupiedItems.length) {
     try {
       await ElMessageBox.confirm(
-        warnings.join('\n') + '\n\n配置还是可以存下来：换好端口之后重启一次就生效。',
+        portsOccupiedWarning(occupiedItems) +
+          '\n\n配置还是可以存下来：换好端口之后重启一次就生效。',
         '有端口被别的程序占着',
         { type: 'warning', confirmButtonText: '仍然保存', cancelButtonText: '先改一改' },
       )
@@ -203,7 +229,7 @@ async function save() {
   saving.value = true
   try {
     const { data } = await deployApi.portsSave(collect())
-    ElMessage.success((data.message || '已保存').split('\n')[0])
+    ElMessage.success((portsSavedMessage(data) || '已保存').split('\n')[0])
     const frontendChanged = data.frontend !== running.value.frontend
     await load()
     await askRestart(frontendChanged ? data.frontend : null)
@@ -437,7 +463,7 @@ defineExpose({ refresh: load })
       :closable="false"
       class="mt-3"
       title="这几处填重了，保存会被拦下"
-      :description="localConflicts.join('；')"
+      :description="localConflictText"
     />
 
     <el-alert
@@ -446,16 +472,16 @@ defineExpose({ refresh: load })
       :closable="false"
       class="mt-3"
       title="改了端口，还没重启"
-      :description="info.notice"
+      :description="portsNoticeText"
     />
 
     <el-alert
-      v-if="(info?.notes || []).length"
+      v-if="autoFixedText"
       type="info"
       :closable="false"
       class="mt-3"
       title="配置里有几个端口用不了，已经改用别的（保存后就会写进配置）"
-      :description="(info.notes || []).join('；')"
+      :description="autoFixedText"
     />
 
     <el-alert
@@ -464,10 +490,7 @@ defineExpose({ refresh: load })
       :closable="false"
       class="mt-3"
       title="有端口被别的程序占着"
-      :description="
-        occupied.map((x) => `${x.id} ${x.port}`).join('、') +
-        ' 现在有别的程序在占用 —— 重启时这几样会起不来。可以换一个端口，或者先把占用它的程序停掉。'
-      "
+      :description="portsOccupiedWarning(occupied)"
     />
 
     <p v-if="checked && !occupied.length" class="note mt-3" style="margin-bottom: 0">

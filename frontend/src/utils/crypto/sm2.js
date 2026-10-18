@@ -8,10 +8,14 @@
  *
  * ```
  * z    = ECDH_x(临时私钥, 所有者公钥)          // 32 字节（x 坐标）
- * kenc = KDF(z, "vds/ecies/v1/enc", 16)
+ * kenc = KDF(z, "vds/ecies/v2/enc", 16)
  * body = SM4-CTR(块密钥, kenc, iv)
- * tag  = KDF(z, "vds/ecies/v1/tag" ‖ R ‖ iv ‖ body, 32)
+ * tag  = KDF(z, "vds/ecies/v2/tag" ‖ R ‖ iv ‖ body ‖ aad, 32)
  * ```
+ *
+ * 其中 `aad` 是**块身份**（`blockAad(owner, file_key, block_idx, iv)`）——
+ * 它让「哪份文件的第几块 + 那一块的数据段 IV」成为认证标签的一部分，
+ * 于是把别块的密钥密文配到这一块上会当场解不开。
  *
  * 标准 SM2 解密库（含 `sm-crypto`）解不开它 —— 所以这里把曲线运算、
  * ECDH、以及那个**非标准 KDF** 都按 Python 侧原样实现。

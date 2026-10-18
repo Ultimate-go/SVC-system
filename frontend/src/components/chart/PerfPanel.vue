@@ -1,10 +1,25 @@
 <script setup>
+/**
+ * 运行性能面板 —— 原「性能」页的整体内容，现在嵌在总览页里。
+ *
+ * 为什么改成一个组件而不是留一页：底部那张「操作明细」与上方几张图看的是
+ * 同一批运行样本（后端内存里的延迟分位数与吞吐），分成两页时用户得来回切。
+ * 合并之后【总览】一页子里就能把「系统在做什么」（处理链路）、
+ * 「一致性如何」（系统自检）与「跑得怎么样」（本面板）一次看完。
+ *
+ * 组件自带取数与定时刷新（默认 5 秒一次），父组件只管放位置，
+ * 不需要传任何 props。
+ *
+ * 数值全部来自 ``GET /api/system/perf`` 的**运行采样**；「参数实验」那两块
+ * 是按当前样本做的预估，界面上已如实标为预估模型。
+ */
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { systemApi } from '../../../api/system'
-import PageHeader from '../../../components/common/PageHeader.vue'
+import { systemApi } from '../../api/system'
 
 const summary = ref(null)
 const error = ref('')
+/** 连续失败次数：用来把「偶尔抽一下」与「一直取不到」分开说。 */
+const failStreak = ref(0)
 const loading = ref(false)
 const lastAt = ref('')
 const now = ref(Date.now())
@@ -28,16 +43,31 @@ const intervals = [
 const PRIMARY = ['upload', 'query', 'verify_batch', 'append', 'modify']
 const colors = { upload: '#22d3ee', query: '#818cf8', verify_batch: '#f59e0b', append: '#22c55e', modify: '#f472b6' }
 
+/** 正在飞的那一次请求 —— 自动轮询与手动刷新很容易撞在一起。 */
+let inFlight = false
+
 async function fetchSummary() {
+  // ★ 防重入：上一次还没回来就不要再发一次（否则两个响应先后覆盖，
+  //   而且按钮的 loading 会被后一个请求提前抹掉）。
+  if (inFlight) return
+  inFlight = true
   loading.value = true
   try {
     const { data } = await systemApi.perfSummary()
     summary.value = data
+    failStreak.value = 0
     error.value = ''
     lastAt.value = new Date(data.snapshot_at * 1000).toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e) {
-    error.value = e?.response?.data?.detail || e?.message || '获取性能快照失败'
+    // ★ 取不到就**保留上一份快照**，只把情况说清楚 + 告诉用户会自动重试。
+    //   清空它只会把页面变成一片空白，而下一次轮询（≤5 秒）多半就好了。
+    failStreak.value += 1
+    const why = e?.response?.data?.detail || e?.message || '未知原因'
+    error.value = failStreak.value === 1
+      ? `这一次快照没取到（${why}）—— 已保留上一份，稍后自动重试。`
+      : `连续 ${failStreak.value} 次没取到快照（${why}）—— 已保留上一份，仍在重试。`
   } finally {
+    inFlight = false
     loading.value = false
   }
 }
@@ -105,22 +135,28 @@ const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: 
 </script>
 
 <template>
-  <div class="perf-page">
-    <PageHeader title="性能实验台" />
-
+  <div class="perf-panel">
     <div class="toolbar">
       <div class="live-status" :class="{ paused: !isLive }"><i /> {{ isLive ? '实时采样中' : '已暂停' }}</div>
       <span class="fresh">{{ lastAt ? `最新快照 ${lastAt} · ${age}s 前` : '等待首个快照' }}</span>
       <el-select v-model="refreshMs" size="small" style="width: 142px"><el-option v-for="o in intervals" :key="o.value" :label="o.label" :value="o.value" /></el-select>
       <el-button size="small" :loading="loading" @click="fetchSummary">刷新快照</el-button>
     </div>
-    <el-alert v-if="error" type="error" :closable="false" class="mb-3" :title="error" />
+    <!-- ★ 取不到快照：一份都还没拿到的时候才值得标红，否则就是黄字提醒一句
+         —— 面板不会清空，自动重试也在跑。 -->
+    <el-alert
+      v-if="error"
+      :type="summary ? 'warning' : 'error'"
+      :closable="false"
+      class="mb-3"
+      :title="error"
+    />
 
     <section class="hero-grid">
       <div class="hero-panel">
         <div class="eyebrow">LIVE PERFORMANCE / {{ lastAt || '--:--:--' }}</div>
         <div class="hero-row"><div><div class="hero-value">{{ fmt(totalOpsPerMin) }}<span> ops/min</span></div><div class="hero-label">系统实时吞吐 <b>· 最近 60 秒</b></div></div><div class="health" :class="health === false ? 'bad' : ''"><span>{{ health === null ? '待采样' : health ? 'SLA 达标' : '尾延迟超标' }}</span><small>{{ latencyPercentile.toUpperCase() }} ≤ {{ slaMs }} ms</small></div></div>
-        <div class="hero-meta"><span>采样数 <b>{{ fmt(samples) }}</b></span><span>在线节点 <b>{{ scale.nodes ?? '—' }}</b></span><span>当前文件 <b>{{ fmt(scale.files) }}</b></span><span>向量块 <b>{{ fmt(scale.blocks) }}</b></span></div>
+<div class="hero-meta"><span>采样数 <b>{{ fmt(samples) }}</b></span><span title="登记台数；节点在线情况见「存储节点」页与自检结论">节点台数 <b>{{ scale.nodes ?? '—' }}</b></span><span>当前文件 <b>{{ fmt(scale.files) }}</b></span><span>向量块 <b>{{ fmt(scale.blocks) }}</b></span></div>
       </div>
       <div class="scheme-panel"><div class="section-kicker">SCHEME CONTEXT</div><h3>可验证分布式存储</h3><div class="scheme-grid"><span>CRS 位数<strong>{{ crs.n_bits || '—' }}</strong></span><span>向量维度<strong>{{ crs.l || '—' }}</strong></span><span>素数表容量<strong>{{ crs.n_max || '—' }}</strong></span><span>数据来源<strong>运行时内存</strong></span></div></div>
     </section>
@@ -145,7 +181,7 @@ const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: 
 </template>
 
 <style scoped>
-.perf-page { max-width: 1480px; margin: 0 auto; padding-bottom: 24px; }
+.perf-panel { padding-bottom: 24px; }
 .toolbar { display:flex; align-items:center; gap:10px; margin:-8px 0 16px; }.fresh,.muted,.footnote { color:var(--text-3); font-size:13px; }.fresh { margin-right:auto; }.live-status { display:flex; align-items:center; gap:7px; color:var(--ok); font-size:13px; font-weight:600; }.live-status i { width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 4px color-mix(in srgb,var(--ok),transparent 82%); animation:pulse 1.8s infinite; }.live-status.paused { color:var(--text-3); }.live-status.paused i { background:var(--text-3); animation:none; }
 .hero-grid,.main-grid,.experiment-grid { display:grid; gap:14px; margin-bottom:14px; }.hero-grid { grid-template-columns: minmax(0,1.55fr) minmax(300px,1fr); }.main-grid { grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr); }.experiment-grid { grid-template-columns: minmax(300px,.85fr) minmax(0,1.15fr); }.hero-panel,.scheme-panel,.panel,.kpi { background:var(--bg-panel); border:1px solid var(--line); border-radius:var(--radius); }.hero-panel { padding:24px; background:linear-gradient(135deg,var(--bg-panel),color-mix(in srgb,var(--accent-2),var(--bg-panel) 92%)); }.scheme-panel,.panel { padding:18px; }.eyebrow,.section-kicker { color:var(--accent); font:600 13px var(--font-mono); letter-spacing:.12em; }.hero-row { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin:20px 0 24px; }.hero-value { font:600 clamp(34px,4vw,58px) var(--font-mono); color:var(--text-1); letter-spacing:0; }.hero-value span { font:500 14px var(--font-sans); color:var(--text-2); }.hero-label { color:var(--text-2); font-size:13px; }.hero-label b { color:var(--text-3); font-weight:400; }.health { min-width:106px; border-left:1px solid var(--line); padding-left:16px; color:var(--ok); }.health.bad { color:var(--danger); }.health span { display:block; font-size:13px; font-weight:600; }.health small { display:block; color:var(--text-3); margin-top:5px; }.hero-meta,.scheme-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }.hero-meta span,.scheme-grid span { color:var(--text-3); font-size:13px; }.hero-meta b,.scheme-grid strong { display:block; color:var(--text-1); font:500 15px var(--font-mono); margin-top:5px; }.scheme-panel h3 { margin:12px 0 6px; font-size:18px; }.scheme-panel p { margin:0 0 22px; color:var(--text-2); font-size:13px; }.scheme-grid { grid-template-columns:repeat(2,1fr); }.scheme-grid strong { font-size:13px; }
 .kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:14px; }.kpi { padding:16px 18px; }.kpi-label { color:var(--text-2); font-size:13px; }.kpi strong { display:block; margin:8px 0 4px; font:600 28px var(--font-mono); }.kpi em,.estimate-row em { color:var(--text-3); font:400 13px var(--font-sans); }.kpi small { color:var(--text-3); font-size:13px; }.panel-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }.panel h2 { margin:6px 0 18px; font-size:17px; font-weight:600; color:var(--text-1); }.segmented,.percentile-tabs { display:flex; gap:4px; }.segmented button,.percentile-tabs button { border:1px solid var(--line); background:transparent; color:var(--text-2); cursor:pointer; }.segmented button { padding:6px 12px; border-radius:5px; font-size:13px; }.segmented button.active,.percentile-tabs button.active { background:color-mix(in srgb,var(--accent),transparent 86%); border-color:var(--accent); color:var(--accent); }.chart-box { min-height:250px; }.chart { width:100%; height:auto; min-height:230px; overflow:visible; }.grid { stroke:var(--line); stroke-width:1; }.axis { fill:var(--text-3); font-size:13px; }.chart-line { fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; filter:drop-shadow(0 0 5px color-mix(in srgb,var(--accent),transparent 55%)); }.chart-area { fill:color-mix(in srgb,var(--accent),transparent 90%); }.point { fill:var(--bg-panel); stroke:var(--accent); stroke-width:2; }.sla-line { stroke:var(--warn); stroke-dasharray:5 5; }.chart-foot { display:flex; justify-content:space-between; color:var(--text-3); font:13px var(--font-mono); }.chart-now { color:var(--accent); }.percentile-tabs { margin-bottom:24px; }.percentile-tabs button { flex:1; text-align:left; padding:10px; border-radius:5px; }.percentile-tabs b,.percentile-tabs span { display:block; }.percentile-tabs b { font:600 20px var(--font-mono); }.percentile-tabs span { margin-top:4px; font-size:13px; }.sla-control { padding:12px 0 14px; border-top:1px solid var(--line); }.sla-control div { display:flex; justify-content:space-between; color:var(--text-2); font-size:13px; }.sla-control b { color:var(--warn); font:500 13px var(--font-mono); }.bar-row { display:grid; grid-template-columns:64px 1fr 58px; gap:10px; align-items:center; margin:13px 0; font-size:13px; color:var(--text-2); }.bar-row div { height:5px; background:var(--bg-raised); border-radius:4px; overflow:hidden; }.bar-row i { display:block; height:100%; border-radius:4px; transition:width .45s ease; }.bar-row b { text-align:right; font:500 13px var(--font-mono); color:var(--text-1); }.empty { padding:40px 8px; text-align:center; color:var(--text-3); font-size:13px; }
