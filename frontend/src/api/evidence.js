@@ -9,8 +9,11 @@ export const evidenceApi = {
    *   后端 schema 为 ``list[tuple[str, str]]``；传 ``{owner, file_key}`` 会返回 422
    *   （422 只提示字段不合法，不易定位为形状问题）。
    * :param blockIndices: 块序号（0 起算）。不传则每个文件整份取。
+   * :param config: 额外的 axios 配置（如 ``{ silent: true }`` —— 调用方自己
+   *   会在弹框里把那段中文错误完整呈现，拦截器就别再弹一条 toast）。
    */
-  queryFiles: (targets, blockIndices = null) => api.post('/api/query/files', { targets, block_indices: blockIndices }),
+  queryFiles: (targets, blockIndices = null, config = {}) =>
+    api.post('/api/query/files', { targets, block_indices: blockIndices }, config),
   verifyBatch: (items, locate = true, compare = true) =>
     api.post('/api/query/verify-batch', { items, locate, compare }),
   disagg: (body) => api.post('/api/evidence/disagg', body),

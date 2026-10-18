@@ -26,6 +26,14 @@ const props = defineProps({
   totalMs: { type: Number, default: null },
   /** 结论态：''（中性）/ 'ok' / 'fail'；只影响填充条颜色。 */
   state: { type: String, default: '' },
+  /**
+   * 初始是否展开。默认 true（上传页一传完就想看到各步多久）。
+   *
+   * ★ 可验证查询页传 false：那里重点是“验过/没过”，耗时明细想看再点。
+   * ★ 不绑成响应式开关：`<details>` 是用户自己能开的，父组件重渲染不应该
+   *   把人家刚打开的那一块又关上 —— 这个值只在**首帧**生效。
+   */
+  defaultOpen: { type: Boolean, default: true },
 })
 
 const perf = computed(() => buildPerf(props.timings))
@@ -68,7 +76,7 @@ const toneCss = {
 
 <template>
   <!-- 默认展开；点标题行可收起，左侧小三角随之旋转。 -->
-  <details v-if="perf.stages.length" class="stage-fill" open>
+  <details v-if="perf.stages.length" class="stage-fill" :open="defaultOpen">
     <summary class="fill-summary">
       <span class="fill-tri" aria-hidden="true">▶</span>
       <span class="fill-label">步骤耗时</span>

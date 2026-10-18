@@ -24,6 +24,15 @@ const props = defineProps({
   limit: { type: Number, default: 256 },
   //: 指纹显示多少位十六进制。
   len: { type: Number, default: 24 },
+  /**
+   * 是否在每行右侧再列一遍“这份块属于谁”。
+   *
+   * ★ 默认 true（聚合面板的卡片只有这一处能看出归属）。可验证查询页把
+   *   指纹与「逐块归属」合进同一个折叠后，下面已经有完整的
+   *   ``第 N 块 → owner/file_key + holder``，这里再列一遍就是纯重复 ——
+   *   那边传 ``false``。
+   */
+  showSource: { type: Boolean, default: true },
 })
 
 const shown = computed(() => props.indices.slice(0, props.limit))
@@ -65,12 +74,12 @@ function missing(gi, i) {
 </script>
 
 <template>
-  <div class="fp-list">
+  <div class="fp-list" :class="{ 'no-src': !showSource }">
     <div v-for="(gi, i) in shown" :key="gi" class="fp-row">
       <span class="mono idx">{{ labelOf(gi) }}</span>
       <HashText v-if="!missing(gi, i)" :value="values[i]" :len="len" />
       <span v-else class="text-3" style="font-size: 13px">（这次没取到）</span>
-      <span v-if="srcOf(gi)" class="src text-3">{{ srcOf(gi) }}</span>
+      <span v-if="showSource && srcOf(gi)" class="src text-3">{{ srcOf(gi) }}</span>
     </div>
     <details v-if="truncated" class="note-collapse">
       <summary>说明</summary>
@@ -100,6 +109,10 @@ function missing(gi, i) {
 }
 .fp-row:last-child {
   border-bottom: none;
+}
+/* 不列来源列时只留两列：指纹那一列吃满剩下的宽度（否则右边空一半）。 */
+.fp-list.no-src .fp-row {
+  grid-template-columns: 64px minmax(0, 1fr);
 }
 .idx {
   font-size: 13px;

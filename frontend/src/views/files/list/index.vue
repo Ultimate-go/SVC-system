@@ -770,29 +770,30 @@ async function tryDecrypt(file) {
       trustedDelta: getDeltaAnchorFor(file.id, file.content_digest),
     })
     const len = opened.plain.length
-    const head = new TextDecoder('utf-8', { fatal: false }).decode(opened.plain.slice(0, 48))
-    const verdict =
-      { 'no-anchor': '本地还没钉过（本次用的是服务端给的 δ）', match: '与本地钉住的一致', mismatch: '与本地钉住的不一致（已用本地 δ 定性）' }[
-        opened.deltaVerdict
-      ] ?? opened.deltaVerdict
+    // ★ 结论只摆两行，**不再**展开钉扎、也不再弹“开头 48 字节”的第二条提示：
+    //   要看内容与细节，去「详情」页（那里有解密预览、本地验证与回滚锚）。
+    // ★ 消息框的 `.el-message-box__message` 没有 white-space 规则（实测 EP 2.x
+    //   只有 `min-width:0;margin:0`），`\n` 会被折成空格 ⇒ 靠 customClass 挂上
+    //   `white-space: pre-line`（见 <style> 里的 :global 那一段）。
+    const verifyLine = opened.verify.ok
+      ? '本地验证：解密通过，文件内容查看[详情]'
+      : `本地验证：未通过 —— ${opened.verify.message}`
     await ElMessageBox.alert(
-      `文件：${file.owner} / ${file.file_key}\n` +
-        `解密：${len} 字节（本地浏览器解封，服务端未参与）\n` +
-        `本地验证：${opened.verify.ok ? '通过' : `未通过 —— ${opened.verify.message}`}\n` +
-        `δ 钉扎：${verdict}`,
-      '试解密结果（浏览器本地）',
-      { confirmButtonText: '关闭' },
+      // \u3000 是全角空格：pre-line 会把连续半角空格折成一个，分不开“文件”与“解密”。
+      `文件：${file.file_key}\u3000解密：${len} 字节\n${verifyLine}`,
+      '解密结果',
+      { confirmButtonText: '关闭', customClass: 'vds-decrypt-box' },
     )
-    if (head) {
-      // 单独弹一个“看得到内容”的提示：这是“真的解出来了”的最直观证据
-      ElMessage({
-        message: `开头 48 字节：${head.replace(/\s+/g, ' ').trim() || '（不可打印）'}`,
-        duration: 8000,
-        showClose: true,
-      })
-    }
+    // 解出来了就把之前记下的失败状态抹掉（节点恢复后重试成功，这一行就该恢复正常）。
+    clearBroken(file)
   } catch (e) {
-    ElMessage.error(e?.message || '本地解密失败')
+    // ★ 拦截器已经弹过后端那句中文（节点联系不上 / 400 / 503…），这里**只补**
+    //   它没覆盖的纯前端异常（块密钥解封失败、SM4 解不开…）。以前这里无条件弹
+    //   `e.message`，于是同一个失败会多出一条 “Request failed with status code 400”。
+    if (!e?.shown) ElMessage.error(e?.message || '本地解密失败')
+    // 解密失败（典型：某块所在节点被模拟损坏 / 掉线）= 这份文件此刻取不全，
+    // 那一行不能再显示“可解密 / 可验证”。
+    markBroken(file, '上一次试解密失败')
   } finally {
     tip.close()
   }
@@ -815,6 +816,34 @@ const verifyResult = ref(null)
 const verifyError = ref('')
 const verifyMs = ref(0)
 
+/**
+ * 本次会话里「试解密 / 可验证查询」**失败过**的文件：``owner/file_key`` → 一句原因。
+ *
+ * ★ 为何要本地记：后端只知道所有权（``can_decrypt``），**不知道**"这台浏览器刚才
+ *   连不上那个节点"。节点掉线 / 被模拟损坏时，``can_decrypt`` 依旧是 true、
+ *   列表也照旧列着 —— 于是这一行继续宣称"可解密、可验证"，与刚发生的事矛盾。
+ * ★ 键用 ``owner/file_key`` 而不是 ``row.id``：库会复用 id（见删除处关于锚的注释），
+ *   用 id 会把一份旧文件的失败状态贴到新文件上。
+ */
+const brokenFiles = ref(new Map())
+
+const rowKey = (row) => `${row.owner} / ${row.file_key}`
+const isBroken = (row) => brokenFiles.value.has(rowKey(row))
+const brokenReason = (row) => brokenFiles.value.get(rowKey(row)) || ''
+
+function markBroken(row, reason) {
+  const next = new Map(brokenFiles.value)
+  next.set(rowKey(row), reason)
+  brokenFiles.value = next
+}
+
+function clearBroken(row) {
+  if (!brokenFiles.value.has(rowKey(row))) return
+  const next = new Map(brokenFiles.value)
+  next.delete(rowKey(row))
+  brokenFiles.value = next
+}
+
 async function runVerify(row) {
   if (!row) return
   verifyTarget.value = row
@@ -824,10 +853,18 @@ async function runVerify(row) {
   verifyOpen.value = true
   const t0 = performance.now()
   try {
-    const { data } = await evidenceApi.queryFiles([[row.owner, row.file_key]], null)
+    // ★ silent：失败原因由**弹框**完整呈现，拦截器别再弹一条同样的 toast
+    //   （否则屏幕上会出现两条一样的提示）。
+    const { data } = await evidenceApi.queryFiles([[row.owner, row.file_key]], null, {
+      silent: true,
+    })
     verifyResult.value = data
+    // 结论没通过 = 这份文件的密文与承诺对不上，同样不能继续宣称“可验证”。
+    if (data?.ok === false) markBroken(row, '上一次验证未通过')
+    else clearBroken(row)
   } catch (e) {
     verifyError.value = e?.response?.data?.detail || e?.message || '查询失败'
+    markBroken(row, '可验证查询失败')
   } finally {
     verifyMs.value = Math.round(performance.now() - t0)
     verifyBusy.value = false
@@ -1210,9 +1247,13 @@ onMounted(load)
           </el-table-column>
           <el-table-column label="验证" width="86" align="center">
             <template #default="{ row }">
+              <!-- ★ 失败过的行不再显示「可验证」：那会让人以为这份文件还好好的。
+                   原因挂在 title 上（节点联系不上 / 验证没通过）。 -->
+              <span v-if="isBroken(row)" class="broken" :title="brokenReason(row)">不可用</span>
               <!-- ★ 做成按钮而不是一段静态文字：点下去真的去取凭证、用公开的 δ
                    当场验一次，弹窗给结论 —— “可验证”这句话才有分量。 -->
               <el-button
+                v-else
                 link
                 type="primary"
                 size="small"
@@ -1223,7 +1264,9 @@ onMounted(load)
           </el-table-column>
           <el-table-column label="解密" width="90" align="center">
             <template #default="{ row }">
-              <LockTag :can-decrypt="row.can_decrypt" />
+              <!-- 同一个理由：取不全的文件不谈“可解密”。 -->
+              <span v-if="isBroken(row)" class="broken" :title="brokenReason(row)">不可用</span>
+              <LockTag v-else :can-decrypt="row.can_decrypt" />
             </template>
           </el-table-column>
           <el-table-column label="操作" width="250" align="center">
@@ -1273,7 +1316,7 @@ onMounted(load)
       width="540px"
       top="12vh"
       append-to-body
-      title="可验证查询 · 当场自证"
+      title="可验证查询"
     >
       <div v-loading="verifyBusy" class="vq-body">
         <template v-if="verifyResult">
@@ -1283,8 +1326,8 @@ onMounted(load)
           </div>
           <div class="vq-rows">
             <div class="vq-row">
-              <span>文件</span>
-              <b class="mono">{{ verifyTarget?.owner }} / {{ verifyTarget?.file_key }}</b>
+              <span>文件标识</span>
+              <b class="mono">{{ verifyTarget?.file_key }}</b>
             </div>
             <div class="vq-row">
               <span>覆盖分块</span>
@@ -1294,9 +1337,12 @@ onMounted(load)
               <span>文件指纹</span>
               <b class="mono">{{ verifyResult.files?.[0]?.delta_fp || '—' }}</b>
             </div>
+            <!-- ★ 这一行说的是**结论**，不是内部环节名：通过就是“通过”；
+                 没通过时才把失败环节（BAD_S_I / BAD_LAMBDA / BAD_SHAPE）摆出来 ——
+                 那时它是归因线索，不是给人看的结论。 -->
             <div class="vq-row">
-              <span>验证环节</span>
-              <b class="mono">{{ verifyResult.verify?.code_name || '—' }}</b>
+              <span>验证结果</span>
+              <b class="mono">{{ verifyResult.ok ? '通过' : (verifyResult.verify?.code_name || '未通过') }}</b>
             </div>
             <div class="vq-row">
               <span>本次耗时</span>
@@ -1307,7 +1353,7 @@ onMounted(load)
             {{ verifyResult.verify.message }}
           </p>
           <p class="vq-note">
-            本次只用了公开量：承诺 δ、凭证 π<sub>I</sub> 与分块编号；没有取明文，也没有用私钥。
+            本次验证仅使用公开参数：承诺 δ、凭证 π<sub>I</sub> 与分块编号；未使用明文或用户私钥。
           </p>
         </template>
         <el-alert v-else-if="verifyError" type="error" :closable="false" :title="verifyError" />
@@ -1434,11 +1480,27 @@ onMounted(load)
   margin-top: 10px;
 }
 
+/* 失败状态标记：红色、带悬浮原因（同一行两个列共用）。 */
+.broken {
+  color: var(--danger);
+  font-size: 13px;
+  cursor: help;
+}
+
+/* ---------- 试解密结果消息框：让 \n 真的换行 ----------
+   Element Plus 的 `.el-message-box__message` 只有 min-width:0;margin:0，
+   没有 white-space 规则 ⇒ 默认 normal 会把 `\n` 折成一个空格（实测）：
+   “文件：… 解密：… 本地验证：…” 就挤成一行。这里补 pre-line。
+   消息框是 teleport 到 body 的，所以必须用 :global()，否则样式挂不上去。 */
+:global(.vds-decrypt-box .el-message-box__message) {
+  white-space: pre-line;
+  line-height: 1.7;
+}
+
 /* ---------- 行级「可验证」弹窗：一句结论 + 几行公开量 ---------- */
 .vq-body {
   min-height: 92px;
-}
-.vq-headline {
+}.vq-headline {
   display: flex;
   align-items: center;
   gap: 8px;

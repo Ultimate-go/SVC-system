@@ -132,6 +132,11 @@ api.interceptors.response.use(
     } else {
       ElMessage.error('请求失败：' + (err.message || '未知错误'))
     }
+    // ★ 给调用方一个标记：这条错误**已经有人弹过了**。
+    //   否则视图层的 `catch` 再弹一次 `e.message`，同一个失败就会多出一条
+    //   “Request failed with status code 400”（实践反馈：模拟节点损坏后解密/验证失败）。
+    //   视图层写法：`if (!e?.shown) ElMessage.error(...)`。
+    err.shown = true
     return Promise.reject(err)
   },
 )

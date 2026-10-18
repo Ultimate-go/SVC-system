@@ -5,7 +5,7 @@
  * - **选文件 + 填第几块**验证（块号支持 0-3, 8 区间语法）+ 允许部分结果开关。
  *   ★ 全局下标是**内部坐标**，只留在"高级"里 —— 主路径上不让它出现。
  * - 展示结论（承诺验证的 code_name）、proof.size_bytes、holders、refs、missing。
- * - 「按指标筛选文件」：所有者、文件标识（包含 / 精确）、块数区间、大小区间，
+ * - 「按指标筛选文件」：文件持有者、文件标识（包含 / 精确）、块数区间、大小区间，
  *   筛出来的是一份**文件清单**（只 ``GET /api/files``，不取数据、不验证）。
  * - 「集合」：勾中的文件（的每一块）收进一份**清单**，清单存在 localStorage 里，
  *   关掉浏览器再回来还在。集合里每一块都记着"它是谁的第几块"（详情里看）。
@@ -15,7 +15,7 @@
  * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
  *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { evidenceApi } from '../../../api/evidence'
 import { filesApi } from '../../../api/files'
@@ -41,8 +41,6 @@ const basket = useBasketStore()
 const detailed = computed(() => theme.detailMode === 'detail')
 
 const indicesInput = ref('0-3, 8')
-/** 逐块归属列表默认展开的最大条数：条数超过它就默认收起（点标题展开）。 */
-const REF_OPEN_MAX = 8
 const allowPartial = ref(false)
 const running = ref(false)
 const result = ref(null)
@@ -236,6 +234,22 @@ const basketResult = ref(null)
 const basketError = ref('')
 /** 端到端耗时（毫秒）：集合验证从点击到结果返回。 */
 const basketTotalMs = ref(0)
+
+/**
+ * 集合一改，上一次的结论就不再是“对这个集合的结论”了 —— 直接把它收起来。
+ *
+ * ★ 以前留着它、再在上面贴一句“这次的结论没覆盖集合里的 N 块”，结果就是
+ *   一份旧报告配一条自己解释自己的警告，反而要多看两眼才能明白“已经作废了”。
+ * ★ 信号用 ``basket.indices.join(',')``（一个字符串）：集合增减/替换都会
+ *   改变它，而它又不会因为无关的渲染而变化。
+ */
+watch(
+  () => basket.indices.join(','),
+  () => {
+    basketResult.value = null
+    basketError.value = ''
+  },
+)
 
 /** 主界面**极简**：只给"多少块、几份文件"和几个下标芯片；详情要展开才铺。 */
 // ★ 主界面给的是**界面坐标**（哪份文件的第几块），不再铺内部坐标（全局位置）——
@@ -481,12 +495,6 @@ function basketText(list) {
   return parts.join('；')
 }
 
-/** 报 告里"集合中没被这次结论覆盖"的下标（响应缺的 + 已经被删掉的）。 */
-const basketMissed = computed(() => {
-  const got = new Set(basketResult.value?.indices || [])
-  return basket.indices.filter((i) => !got.has(i))
-})
-
 /** 报告里逐块的那张表：下标 → 谁的第几块 → 存在哪台（数据源是响应的 refs）。 */
 const basketRefs = computed(() => {
   const holders = basketResult.value?.holders || {}
@@ -517,29 +525,31 @@ const VERIFY_STEPS = [
   {
     name: '确定下标集合',
     en: 'SELECT',
-    desc: '只对指定的分块集合作结论。一份证据仅在其覆盖的下标上有定义，未被覆盖的分块不因这份证据而被判定为通过。',
+    desc: '仅对指定分块作结论。一份证据在其覆盖的下标上有定义，未被覆盖的分块不因这份证据而被判定为通过。',
   },
   {
     key: '探测节点持有情况',
-    name: '探测节点持有情况',
+    // ★ 只改给人的名字，``key`` 不动 —— 它与后端 ``with stage("…")`` 的名字对齐
+    //   （scripts/check_stage_names.py 钉的就是 key），改了名字就没耗时了。
+    name: '查询节点持有情况',
     en: 'PROBE',
-    desc: '询问各存储节点：集合内的分块当前分别由谁持有。节点的申报只作为线索，它随后要由公开检验加以核对，本身不构成结论。',
+    desc: '查询各存储节点，集合内的分块当前分别由谁持有。节点的申报只作为参考，随后要由公开检验加以核对，本身不构成结论。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '从持有者取回这些分块的密文。协调者只持有密文，不具备提供明文的能力。',
+    desc: '从存储节点取回选定分块的密文。',
   },
   {
     key: '取回分量与凭证',
-    name: '本地重算分量',
+    name: '重新计算分量',
     en: 'DIGEST',
-    desc: '浏览器在本地对取回的密文重算公开分量（SM3），不采用服务端申报的数值。公开分量由密文唯一确定，这是「不采信服务端」的具体落实：换掉密文就会算出对不上的分量。',
+    desc: '浏览器在本地对取回的密文重新计算公开分量（即密文的 SM3 摘要），不采用服务端提供的数值。公开分量由密文唯一确定。',
   },
   {
     key: '证据合成',
-    name: '证据合成',
+    name: '证据聚合',
     en: 'AGGREGATE',
     desc: '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素、不超过 256 字节，与本次覆盖的分块数无关。',
   },
@@ -547,28 +557,45 @@ const VERIFY_STEPS = [
     key: '承诺验证',
     name: '公开检验',
     en: 'VERIFY',
-    desc: '以聚合承诺 δ 与所得证据执行一次配对检验。该检验只用到公开量：不需明文、不需任何密钥，也不需信任任何一方，任何持有同样输入的主体都能独立复算。',
+    desc: '将聚合承诺 δ = (U, C) 与所得证据执行一次配对检验。该检验只用到公开量：不需明文、不需任何密钥，也不需要信任任何一方，任何持有同样输入的主体都能独立复算。',
   },
   {
-    name: '判定',
+    name: '结果判定',
     en: 'VERDICT',
-    desc: '通过：这些分块存在，且内容与入库版本一致。不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符 —— 两种情况都需要重新取证核实。',
+    // 实际文案由 verifySteps 按「这次到底通没通」填一行（见下）。
+    desc: '',
   },
 ]
 
+/** 结果判定那一步的两句话：只显示**一句**，取决于本次结论。 */
+const PASS_LINE = '可验证查询结果通过：分块存在，且内容与入库版本一致。'
+const FAIL_LINE =
+  '可验证查询结果不通过：存在被替换或被删除的分块，或返回的密文与当前承诺不符 —— 两种情况都需要重新取证核实。'
+
 const processOpen = ref(false)
 const lastVerify = ref(null)
-const lastVerifyLabel = ref('')
 
-const verifyFacts = computed(() => {
-  const d = lastVerify.value
-  if (!d) return []
-  const out = []
-  if (lastVerifyLabel.value) out.push({ k: '范围', v: lastVerifyLabel.value })
-  if (d.delta_n !== undefined && d.delta_n !== null) out.push({ k: 'δ_n', v: String(d.delta_n) })
-  if (d.delta_fp) out.push({ k: 'δ 指纹', v: String(d.delta_fp) })
-  return out
+/**
+ * 本次验证的范围：「哪一份文件、哪些块」。
+ *
+ * ★ 它只出现在「确定下标集合」那一步的正文里（用户要求把原来右上角那排
+ *   中间量「范围 / δ_n / δ 指纹」整个去掉，范围信息并入正文）。
+ */
+const lastVerifyScope = ref({ file: '', blocks: '' })
+
+const verifySteps = computed(() => {
+  const sc = lastVerifyScope.value
+  const passed = lastVerify.value?.ok !== false
+  return VERIFY_STEPS.map((s) => {
+    if (s.en === 'SELECT') {
+      // 换行靠 ProcessDialog 里 `.desc` 的 `white-space: pre-line`（见那边注释）。
+      return { ...s, desc: `${s.desc}\n当前选择文件 ${sc.file}\n选定位置 ${sc.blocks}` }
+    }
+    if (s.en === 'VERDICT') return { ...s, desc: passed ? PASS_LINE : FAIL_LINE }
+    return s
+  })
 })
+
 async function runQuery() {
   // 「高级」里填的是全局下标；主路径上填的是"第几块"。
   let indices = null
@@ -615,9 +642,9 @@ async function runQuery() {
     result.value = data
     // ★ 验证刚跑完时把过程弹出来：结论谁都会给，"凭什么说这个结论"才是这套系统的东西。
     lastVerify.value = data
-    lastVerifyLabel.value = advancedMode.value
-      ? `全局下标 ${span(indices)}`
-      : `${picked.file_key} 第 ${span(blocks)} 块`
+    lastVerifyScope.value = advancedMode.value
+      ? { file: '（高级：按全局下标，不针对某一份文件）', blocks: `全局下标 ${span(indices)}` }
+      : { file: picked.file_key, blocks: `第 ${span(blocks)} 块` }
     processOpen.value = true
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
@@ -660,12 +687,16 @@ const resultFiles = computed(() => {
   if (refs.length) {
     const byFile = new Map()
     for (const r of refs) {
-      const name = `${r.owner} / ${r.file_key}`
-      const e = byFile.get(name) || { name, blocks: [] }
+      const id = `${r.owner} / ${r.file_key}`
+      const e = byFile.get(id) || { id, name: r.file_key, blocks: [] }
       e.blocks.push(Number(r.block_idx))
-      byFile.set(name, e)
+      byFile.set(id, e)
     }
     return [...byFile.values()].map((e) => ({
+      // ★ 界面只显示**文件标识**（用户口径：不把“谁的文件”拼在前面）。
+      //   键单独留一份 `owner / file_key`：不同拥有者可能有同名标识，
+      //   直接拿标识当 key 会撞。
+      id: e.id,
       name: e.name,
       blocks: e.blocks.length,
       scope: `本次覆盖第 ${span(e.blocks)} 块`,
@@ -682,7 +713,8 @@ const resultFiles = computed(() => {
     const off = Number(f.offset) || 0
     const hit = asked.filter((i) => i >= off && i < off + Number(f.n)).map((i) => i - off)
     return {
-      name: `${f.owner} / ${f.file_key}`,
+      id: `${f.owner} / ${f.file_key}`,
+      name: f.file_key,
       blocks: hit.length,
       scope: hit.length ? `本次覆盖第 ${span(hit)} 块` : '本次覆盖 0 块',
     }
@@ -762,12 +794,14 @@ onMounted(loadFiles)
       </div>
       <div class="query-form">
         <template v-if="!advancedMode">
-          <el-select v-model="verifyFileId" placeholder="选一份文件" style="width: 240px" filterable>
+          <!-- ★ 下拉里只显示**文件标识**（与上面拉取列表的芯片同一口径）：
+               “名字（所有者，N 块）”在窄下拉里偺被截断，反而更看不清。 -->
+          <el-select v-model="verifyFileId" placeholder="选择文件标识" style="width: 240px" filterable>
             <el-option
               v-for="f in allFiles"
               :key="f.id"
               :value="f.id"
-              :label="`${f.file_key}（${f.owner}，${f.block_count} 块）`"
+              :label="f.file_key"
             />
           </el-select>
           <el-input
@@ -795,12 +829,15 @@ onMounted(loadFiles)
       </div>
 
       <div v-if="result" class="mt-3">
-        <VerifyResult :result="result" />
+        <!-- ★ 只留一句标题结论（“验证通过” / “验证失败 · 环节”）。
+             下面那行 detail 在后端成功时就是又一句“验证通过”，与标题完全重复 ——
+             用户要求去掉；失败时那句才是有用的（“哪一步没过”），仍然显示。 -->
+        <VerifyResult :result="result" :show-detail="result.verify?.ok === false" />
         <!-- 当前文件与块数：一份证据可以横跨多个文件（跨文件时重算），所以逐文件列 -->
         <div class="cur-file">
           <span class="cur-lbl">当前文件与块数</span>
           <template v-if="resultFiles.length">
-            <span v-for="f in resultFiles" :key="f.name" class="cur-item mono">
+            <span v-for="f in resultFiles" :key="f.id" class="cur-item mono">
               {{ f.name }}<span class="text-3"> · {{ f.scope }}</span>
             </span>
           </template>
@@ -812,15 +849,20 @@ onMounted(loadFiles)
         <div v-if="result.missing?.length" class="missing">
           <el-alert type="warning" :closable="false" :title="`这份结论没覆盖：${humanList(result.missing).join(', ')}`" />
         </div>
-        <div v-if="result.proof" class="mono text-2 mt-2" style="font-size: 13px">
-          证据 {{ result.proof.size_bytes }} 字节（与打开多少块无关）
-        </div>
-        <!-- 逐块分量：详细模式铺出来，简略模式只说"点详细可看"。 -->
-        <div v-if="result.values?.length" class="fp-block">
-          <div class="fp-head">
-            <span class="text-2" style="font-size: 13px">
-              这一份覆盖 {{ result.indices?.length || 0 }} 块
-            </span>
+        <!-- 逐块明细：分量指纹 + 归属**合在同一个折叠里**。
+             块数一多，两块各自铺开就会把页面撑得很长；合成一个折叠后“想收就都收”。
+             ★ 默认**收起**（用户口径）：查询页的重点是结论，明细想看看再点开。 -->
+        <details
+          v-if="result.values?.length || result.refs?.length"
+          class="refs-collapse"
+        >
+          <summary>
+            <span class="tri" aria-hidden="true">▶</span>
+            逐块明细（{{ result.indices?.length || 0 }} 块）
+            <span class="sum-note">分量指纹与当前持有节点</span>
+          </summary>
+          <div class="fp-head mt-2">
+            <span class="text-2" style="font-size: 13px">每块的公开分量</span>
             <DetailToggle />
           </div>
           <BlockFingerprints
@@ -828,16 +870,10 @@ onMounted(loadFiles)
             :indices="result.indices || []"
             :values="result.values || []"
             :refs="result.refs || []"
+            :show-source="false"
           />
           <p v-else class="note">点「详细」逐块看分量指纹（悬浮任意指纹显示完整十六进制）。</p>
-        </div>
-        <!-- 逐块归属：块数多时默认收起，展开后限高滚动。 -->
-        <details v-if="result.refs?.length" class="refs-collapse" :open="result.refs.length <= REF_OPEN_MAX">
-          <summary>
-            <span class="tri" aria-hidden="true">▶</span>
-            逐块归属（{{ result.refs.length }} 块）
-          </summary>
-          <div class="refs mt-2">
+          <div v-if="result.refs?.length" class="refs mt-3">
             <div v-for="r in result.refs" :key="r.global_index" class="ref-row">
               <span class="mono">第 {{ r.block_idx }} 块</span>
               <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
@@ -850,6 +886,7 @@ onMounted(loadFiles)
           :timings="result.timings"
           :total-ms="verifyTotalMs"
           :state="result.verify?.ok === false ? 'fail' : 'ok'"
+          :default-open="false"
           class="mt-2"
         />
       </div>
@@ -877,7 +914,7 @@ onMounted(loadFiles)
            用网格排（见 <style> 里的 `.filters`），所以所有标签与控件都对到同一条竖线。 -->
       <div class="filters">
         <div class="flt">
-          <span class="flt-lbl">所有者</span>
+          <span class="flt-lbl">文件持有者</span>
           <el-select v-model="filters.owner" placeholder="不限" clearable style="width: 100%">
             <el-option v-for="o in owners" :key="o" :label="o" :value="o" />
           </el-select>
@@ -922,6 +959,8 @@ onMounted(loadFiles)
             共 {{ allFiles.length }} 份，筛出 {{ filtered.length }} 份（{{ filteredBlocks }} 块），
             已勾选 {{ pickedIds.length }} 份（{{ pickedBlocks }} 块）
           </span>
+          <!-- ★ 这个按钮只作用于**筛出来的那些**（pickAll 用的是 filtered），
+               所以叫“全选筛出的”而不是笼统的“全选”。 -->
           <el-button link type="primary" size="small" @click="pickAll">全选筛出的</el-button>
           <el-button v-if="pickedIds.length" link type="danger" size="small" @click="clearPicks">清空勾选</el-button>
         </div>
@@ -942,10 +981,7 @@ onMounted(loadFiles)
 
         <div class="mt-2">
           <el-button type="primary" :disabled="!pickedIds.length" @click="addPickedToBasket">
-            把勾选的 {{ pickedIds.length }} 份收进集合（{{ pickedBlocks }} 块）
-          </el-button>
-          <el-button :disabled="!filtered.length" @click="addFilteredToBasket">
-            把筛出的全部收进集合（{{ filteredBlocks }} 块）
+            把勾选的文件收进集合
           </el-button>
         </div>
       </template>
@@ -1040,12 +1076,12 @@ onMounted(loadFiles)
         <span class="step-tag">一次结论</span>
       </div>
         <VerifyResult :result="basketResult" />
+        <!-- 一句总述代替原来那排“报告 / 覆盖 / 证据字节 / 参与节点 / 份数”：
+             用户要的是“这次验了多少东西”，不是内部统计项。 -->
         <div class="cur-file">
-          <span class="cur-lbl">报告</span>
-          <span class="cur-item mono">覆盖 {{ basketResult.indices?.length || 0 }} 块</span>
-          <span class="cur-item mono">证据 {{ basketResult.proof?.size_bytes }} 字节</span>
-          <span class="cur-item mono">{{ basketHolderCount }} 台节点参与</span>
-          <span class="cur-total mono">{{ basket.fileCount }} 份文件</span>
+          <span class="cur-lbl">本次验证覆盖</span>
+          <span class="cur-item mono">{{ basketFiles.length || basket.fileCount }} 个文件共 {{ basketResult.indices?.length || 0 }} 块</span>
+          <span class="cur-item mono">{{ basketHolderCount }} 台存储节点</span>
         </div>
         <div v-if="basketFiles.length > 1" class="cur-file">
           <span class="cur-lbl">这份证据覆盖</span>
@@ -1053,19 +1089,22 @@ onMounted(loadFiles)
             {{ f.name }}<span class="text-3"> · {{ f.scope }}</span>
           </span>
         </div>
-        <div v-if="basketMissed.length" class="missing">
-          <el-alert
-            type="warning"
-            :closable="false"
-            :title="`这次的结论没覆盖集合里的 ${basketMissed.length} 块：${basketText(basketMissed)}`"
-          />
-        </div>
-        <details v-if="basketRefs.length" class="refs-collapse" :open="basketRefs.length <= REF_OPEN_MAX">
+        <details v-if="basketRefs.length" class="refs-collapse">
           <summary>
             <span class="tri" aria-hidden="true">▶</span>
-            逐块归属（{{ basketRefs.length }} 块）
+            逐块明细（{{ basketRefs.length }} 块）
+            <span class="sum-note">分量指纹与当前持有节点</span>
           </summary>
-          <div class="refs mt-2">
+          <div v-if="detailed" class="mt-2">
+            <BlockFingerprints
+              :indices="basketResult.indices || []"
+              :values="basketResult.values || []"
+              :refs="basketResult.refs || []"
+              :show-source="false"
+            />
+          </div>
+          <p v-else class="note">点「详细」逐块看分量指纹（悬浮任意指纹显示完整十六进制）。</p>
+          <div class="refs mt-3">
             <div v-for="r in basketRefs" :key="r.global_index" class="ref-row">
               <span class="mono">第 {{ r.block_idx }} 块</span>
               <span class="text-2">→ {{ r.owner }} / {{ r.file_key }}</span>
@@ -1073,23 +1112,22 @@ onMounted(loadFiles)
             </div>
           </div>
         </details>
-        <BlockFingerprints
-          v-if="detailed"
-          :indices="basketResult.indices || []"
-          :values="basketResult.values || []"
-          :refs="basketResult.refs || []"
+        <StageTimeline
+          v-if="basketResult.timings"
+          :timings="basketResult.timings"
+          :total-ms="basketTotalMs"
+          :default-open="false"
+          class="mt-2"
         />
-        <StageTimeline v-if="basketResult.timings" :timings="basketResult.timings" :total-ms="basketTotalMs" class="mt-2" />
     </div>
 
     <!-- 验证过程：逐步讲清“这个结论是怎么得到的”（耗时对齐真实阶段名）。 -->
     <ProcessDialog
       v-model="processOpen"
       title="一次可验证查询的处理链路"
-      subtitle="各步判定均可在本地依据公开量独立复算；时长取自本次请求的实测埋点。"
-      :steps="VERIFY_STEPS"
+
+      :steps="verifySteps"
       :timings="lastVerify?.timings"
-      :facts="verifyFacts"
       :e2e-ms="verifyTotalMs"
     />
   </div>
@@ -1156,28 +1194,47 @@ onMounted(loadFiles)
 }
 /* ---------- 芯片的悬浮提示：纵向成列、左右两列对齐 ----------
    ★ el-tooltip 的内容会被 teleport 到 body，scope 的 data-v 属性挂不上去，
-     所以这一块必须用 :global() 写，否则样式一条都不生效。 */
-:global(.vds-chip-tip) {
-  max-width: 360px;
+     所以这一块必须用 :global() 写，否则样式一条都不生效。
+   ★★ 底色 / 描边 / 文字色全部**写死**，不用主题变量：冒泡层自带一套
+     颜色（实测：白底 + 浅色字，结果字根本看不见）。这里固定成深色面板，
+     明暗主题下都能看清。
+   ★ 选择器带上 `.is-dark`：Element Plus 自己的 `.el-popper.is-dark` 权重
+     更高，不写这半会盖不过去。 */
+:global(.vds-chip-tip.el-popper),
+:global(.vds-chip-tip.el-popper.is-dark) {
+  max-width: 380px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 190, 255, 0.35);
+  background: #0d1621;
+  color: #e8f1fb;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  line-height: 1.5;
+}
+:global(.vds-chip-tip .el-popper__arrow::before),
+:global(.vds-chip-tip.is-dark .el-popper__arrow::before) {
+  background: #0d1621;
+  border-color: rgba(120, 190, 255, 0.35);
 }
 :global(.vds-chip-tip .tip-rows) {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
+  gap: 5px;
 }
 :global(.vds-chip-tip .tip-row) {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 12px;
   align-items: baseline;
 }
+/* 标签列：灰蓝，和值拉开层次，但保证在深底上看得见。 */
 :global(.vds-chip-tip .tip-row > span) {
-  color: var(--text-3);
+  color: #8fa6bf;
 }
+/* 值列：接近白，加粗一点。 */
 :global(.vds-chip-tip .tip-row > b) {
-  color: var(--text-1);
-  font-weight: 400;
+  color: #eaf3ff;
+  font-weight: 500;
   word-break: break-all;
 }
 .match-head {
@@ -1330,6 +1387,8 @@ onMounted(loadFiles)
 }
 .refs-collapse > summary::-webkit-details-marker { display: none; }
 .refs-collapse .tri { font-size: 10px; color: var(--text-3); transition: transform 0.18s ease; }
+/* 折叠标题右侧那半句说明：比标题再淡一档，不抢“逐块明细（N 块）”这个主信息。 */
+.refs-collapse .sum-note { color: var(--text-3); font-size: 12px; margin-left: 4px; }
 .refs-collapse[open] > summary .tri { transform: rotate(90deg); }
 .refs-collapse .refs { max-height: 300px; overflow: auto; }
 /* 每行留白随内容自适应：行高固定，但上下留白给足，不挤在一起。 */

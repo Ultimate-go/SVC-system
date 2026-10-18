@@ -13,6 +13,13 @@ import Icon from '../icons/Icon.vue'
 
 const props = defineProps({
   result: { type: Object, default: null },
+  /**
+   * 是否在结论下面再列一行 detail。
+   *
+   * ★ 成功时后端那句 message 就是“验证通过”，与上面的标题完全重复 —— 调用方
+   *   可以传 false 省掉；失败时那句是“哪一步没过”，有用，调用方仍传 true。
+   */
+  showDetail: { type: Boolean, default: true },
 })
 
 const title = computed(() => verifyFailTitle(props.result))
@@ -37,7 +44,7 @@ const codeName = computed(() => props.result?.verify?.code_name || '')
       </div>
     </div>
 
-    <div class="detail" v-if="detail">{{ detail }}</div>
+    <div class="detail" v-if="showDetail && detail">{{ detail }}</div>
   </div>
 </template>
 

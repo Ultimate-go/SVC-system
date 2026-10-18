@@ -306,7 +306,9 @@ async function copyDelta(which) {
       // 旧内容直接填进“新内容”框（就地改最顺手）；二进制内容不填，免得写坏。
       if (!binary) modifyForm.text = text
     } catch (e) {
-      ElMessage.error(e?.message || e?.response?.data?.detail || '取回失败')
+      // ★ 拦截器已经弹过后端那句中文（节点联系不上 / 400…），别再多弹一条
+      //   “Request failed with status code 400”；这里只补纯前端异常。
+      if (!e?.shown) ElMessage.error(e?.message || e?.response?.data?.detail || '取回失败')
     } finally {
       oldLoading.value = false
     }
@@ -643,7 +645,9 @@ async function doDecrypt() {
       ElMessage.success(`浏览器本地解密 + 证据验证通过（${opened.ms} ms）`)
     }
   } catch (e) {
-    ElMessage.error(e?.message || '客户端解密失败')
+    // ★ 同上：取密文失败时后端那句中文已经由拦截器弹过了，这里只处理
+    //   纯前端异常（块密钥解封失败、SM4 解不开）。
+    if (!e?.shown) ElMessage.error(e?.message || '客户端解密失败')
   } finally {
     decrypting.value = false
   }
@@ -849,6 +853,15 @@ onMounted(load)
           <p class="note">
             本表按分块序号列出各分块的长度与副本所在节点。点击右上角「详细」可展开分量列，
             将指针悬停在分量上可查看完整值。
+          </p>
+          <p class="note">
+            <b>分量</b>：<b>分量</b>是该分块<b>密文</b>的 SM3 摘要 —— 取 32 字节
+            摘要按<b>大端</b>读成一个大整数（所以恒小于 2<sup>256</sup>）；它是这一块在向量
+            这个位置上的坐标值，也是承诺 C 里唯一随内容变化的量。
+            表中「<b>分量指纹</b>」只是它的十六进制写法（不足 64 位左补 0）截取前
+            <b>24 位</b>；
+            分量由密文唯一确定、任意方使用相同密文都能重新计算，所以它既能被验证方独立复算，
+            也不会泄露明文。
           </p>
         </details>
         </div>

@@ -1771,7 +1771,7 @@ onMounted(() => {
     <ProcessDialog
       v-model="processOpen"
       :title="processTitle"
-      subtitle="各步只涉及公开量；时长取自本次请求的实测埋点，未取到埋点的步骤不显示时长。"
+
       :steps="processSteps"
       :timings="processTimings"
       :facts="processFacts"

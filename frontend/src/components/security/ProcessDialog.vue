@@ -252,7 +252,10 @@ onBeforeUnmount(stop)
 <style scoped>
 .sub { margin: 0 0 14px; font-size: 13px; }
 .en { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
-.desc { margin: 5px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+/* 正文：`pre-line` 让后端/页面传来的 `\n` 真的换行（例如「确定下标集合」
+   那一步要把“当前选择文件 … / 选定位置 …”分两行摆）。content 是 v-html 插进来的，
+   作用域样式带 data-v 也照样命中这层 p。 */
+.desc { margin: 5px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.7; white-space: pre-line; }
 /*
  * 中间量列表：两列网格 —— 第一列宽度按**最宽的那个标签**定，
  * 于是所有行的数值左边缘对齐（各行标签长短不一，用 flex 是摆不齐的）。
