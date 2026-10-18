@@ -1412,10 +1412,11 @@ class StoreManager:
             if rec is None:
                 raise NotFound(f"文件 {owner}/{file_key} 不存在")
             # 块序号先校：越界是"请求不对"（400），不是"找不到"（404）
+            # ★ 提示里的块号一律 **1 起**（界面口径，用户 2026-10-18 明确要求）。
             if not 0 <= block_idx < len(rec.indices):
                 raise OutOfRange(
-                    f"块号 {block_idx} 越界：{owner}/{file_key} 只有 "
-                    f"{len(rec.indices)} 块（块序号从 0 开始）"
+                    f"第 {block_idx + 1} 块越界：{owner}/{file_key} 只有 "
+                    f"{len(rec.indices)} 块"
                 )
 
             # ① 先读库：拿到这块的全局下标与所属文件
@@ -1428,7 +1429,7 @@ class StoreManager:
                     )
                 ).scalar_one_or_none()
                 if brow is None:  # pragma: no cover - 与上面的块数校重复，兼底
-                    raise NotFound(f"文件 {owner}/{file_key} 没有第 {block_idx} 块的账目")
+                    raise NotFound(f"文件 {owner}/{file_key} 没有第 {block_idx + 1} 块的账目")
                 gidx = brow.global_index
                 file_id = brow.file_id
 
@@ -2787,9 +2788,14 @@ class StoreManager:
             store = self._require()
             if (owner, file_key) not in store.files:
                 raise NotFound(f"文件 {owner}/{file_key} 不存在")
-            got = store.file_indices(owner, file_key)
-            if not got or not (0 <= block_idx < len(got)):
-                raise NotFound(f"这份文件没有第 {block_idx} 块")
+            # ★ 只有**开启**时才校验这一块还在（2026-10-18）：
+            #   演示期间完全可能做过删除，那块已经不在了；而“关闭开关”
+            #   必须永远能成功 —— 否则界面会卡在“开着、关不掉、也解不了”。
+            got: list[int] = []
+            if on:
+                got = store.file_indices(owner, file_key)
+                if not got or not (0 <= block_idx < len(got)):
+                    raise NotFound(f"这份文件没有第 {block_idx + 1} 块")
 
             row = db.execute(
                 select(ReplayRow).where(

@@ -11,11 +11,15 @@
  *   · 「更新文件」= 更新它：选中一份文件后直接进它的操作详情。
  *
  * 所以本页只做一件事：**把文件选出来**。列表比「上传文件」那页更轻 ——
- * 不放上传、不放删除，只留“这份文件现在什么样”与一个「进入更新」。
+ * 不放上传，只留“这份文件现在什么样”、一个「进入更新」与一个「删除」。
+ * （删除是 2026-10-18 加的：它也是“更新”的一部分，而且放在这里比让人
+ *   先点进详情再删少一步。）
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
+import { forgetAnchorsOf } from '../../../utils/anchor'
 import { span, fmtBytes } from '../../../utils/format'
 import PageHeader from '../../../components/common/PageHeader.vue'
 
@@ -47,6 +51,36 @@ function enter(row) {
   router.push({ name: 'files-update-detail', params: { id: row.id } })
 }
 
+/**
+ * 删除整份文件（与「进入更新」并列，用户 2026-10-18）。
+ *
+ * ★ 只有所有者看得到这个按钮（后端也是这么判的），且必须二次确认 ——
+ *   删的是密文 + 封装过的块密钥 + 账目，不可撤销。
+ * ★ 顺手清掉**本浏览器给这份文件留的锚**：库会复用 id，不清的话下一份
+ *   拿到同一个 id 的文件会被这份旧基线冤枉（见 utils/anchor.js）。
+ */
+async function removeFile(row) {
+  try {
+    await ElMessageBox.confirm(
+      `将删除 ${row.owner}/${row.file_key}（${row.block_count} 块）。\n\n` +
+        '删除不可撤销：密文、封装过的块密钥与账目都会从库里、从节点上删掉。\n' +
+        '别的文件不受影响 —— 每份文件各占独立的位置段。',
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const { data } = await filesApi.remove(row.id)
+    forgetAnchorsOf(row.id)
+    ElMessage.success(`已删除 ${data.dropped_blocks} 块`)
+    await load()
+  } catch {
+    // 失败原因已由拦截器弹出（只有所有者可删 / 文件不存在…）
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -59,9 +93,9 @@ onMounted(load)
     <div class="panel mb-3">
       <div class="head">
         <div>
-          <p class="lead">选择一份文件进入更新视图：内容替换、置零、追加、删除，以及浏览器本地的解密与验证。</p>
+          <p class="lead">选择一份文件进入更新视图：替换、追加、删除，以及浏览器本地的解密与验证。</p>
           <p class="sub">
-            上述四类写操作均会改写密文，并使版本号递增 1；写权限仅限文件所有者，非所有者文件不可进入。
+            上述三类操作均会改写密文，并使版本号递增 1；写权限仅限文件持有者，非持有者不可操作。
           </p>
         </div>
         <el-switch v-model="onlyMine" active-text="只看我的" />
@@ -105,9 +139,19 @@ onMounted(load)
         <el-table-column label="位置段（全局编号）" min-width="170">
           <template #default="{ row }"><span class="mono">{{ span(row.indices) }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="130" align="center">
+        <el-table-column label="操作" width="210" align="center">
           <template #default="{ row }">
             <el-button size="small" type="primary" :disabled="!row.is_mine" @click="enter(row)">进入更新</el-button>
+            <!-- ★ 与「进入更新」并列（用户 2026-10-18）：删整份文件也属于“更新”的一部分。
+                 非所有者不显示 —— 后端同样只允许所有者删。 -->
+            <el-button
+              v-if="row.is_mine"
+              size="small"
+              type="danger"
+              plain
+              style="margin-left: 8px"
+              @click="removeFile(row)"
+            >删除</el-button>
           </template>
         </el-table-column>
         <template #empty>

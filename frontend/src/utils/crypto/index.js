@@ -192,9 +192,10 @@ export function openBlocks(pack, sk, opts = {}) {
   for (const b of pack.blocks) {
     const bi = b.block_idx
     if (!Number.isInteger(bi) || bi < 0 || (pack.n != null && bi >= pack.n)) {
-      throw new Error(`交付的块号 ${bi} 越界（这份文件的向量只有 ${pack.n} 个位置）`)
+      // ★ 界面口径：块号一律 **1 起**（用户 2026-10-18 明确要求）。
+      throw new Error(`交付的块号 ${bi + 1} 越界（这份文件的向量只有 ${pack.n} 个位置）`)
     }
-    if (seenIdx.has(bi)) throw new Error(`交付的块号 ${bi} 重复出现 —— 应答被拼过`)
+    if (seenIdx.has(bi)) throw new Error(`交付的块号 ${bi + 1} 重复出现 —— 应答被拼过`)
     seenIdx.add(bi)
   }
 
@@ -221,14 +222,23 @@ export function openBlocks(pack, sk, opts = {}) {
       elementServer: b.element == null ? null : BigInt(b.element),
       elementAgrees: b.element != null && element === BigInt(b.element),
       lenOk: plain.length === b.plain_len,
+      /**
+       * 服务端交回的是不是**旧版本**（回滚演示）。
+       *
+       * ★ 这一块的长度当然可能和**当前账目**对不上 —— 旧版本与当前版本的
+       *   明文长度可以不同。那不是“密文或密钥被换过”那种故障，而是演示
+       *   本来就该发生的一幕，所以下面的长度校验对这类块要放宽（交给验证去判）。
+       */
+      replayed: b.replayed === true,
       holder: b.holder,
     }
   })
 
-  const badLen = blocks.filter((b) => !b.lenOk)
+  // ★ 只对**非回滚演示**的块卡长度：演示块交回的是旧版本，长度不同是正常的。
+  const badLen = blocks.filter((b) => !b.lenOk && !b.replayed)
   if (badLen.length) {
     throw new Error(
-      `解密后的长度与账目不符（第 ${badLen.map((b) => b.blockIdx).join('、')} 块）—— ` +
+      `解密后的长度与账目不符（第 ${badLen.map((b) => b.blockIdx + 1).join('、')} 块）—— ` +
         '密文或密钥被换过',
     )
   }

@@ -23,7 +23,9 @@ const props = defineProps({
 const crypt = useCryptoStore()
 
 const hasKey = computed(() => !!props.user?.has_key)
-const unlocked = computed(() => crypt.unlocked)
+// ★ 判据用 `crypt.key`（私钥本体）而不是 `crypt.unlocked` 标记：
+//   状态栏说“已解锁”、解密却说“没有私钥”是自相矛盾（2026-10-18 实际出现过）。
+const unlocked = computed(() => crypt.key !== null)
 const serverHoldsKey = computed(() => props.user?.session_key === true)
 </script>
 

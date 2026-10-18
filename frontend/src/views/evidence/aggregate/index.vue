@@ -553,42 +553,34 @@ const QUERY_LAST_STEP = {
  */
 const AGG_SAME_STEPS = [
   {
-    name: '合并下标集合',
+    name: '合并集合',
     en: 'UNION',
-    desc: '把所选各张证据覆盖的分块集合取并集。一份证据只在其覆盖的下标上有定义，因此两张证据不能按同一语义直接叠加。',
+    desc: '把所选各集合覆盖的分块集合取并集。单份证据只在其覆盖的下标上有定义，因此两份证据不能按同一语义直接叠加。',
   },
   {
     key: '探测节点持有情况',
-    name: '探测节点持有情况',
+    name: '检查节点持有情况',
     en: 'PROBE',
-    desc: '一次问答式探测：问清并集内每个分块当前由谁持有。节点的申报只作线索，分量一律由交付的字节当场算出。',
+    desc: '检查当前并集内每分块分别由哪个存储节点持有。不信任存储节点的申报，分量由交付内容在本地重新计算。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '从持有者取回这些分块的密文。分量由密文自己算出来，不采信节点申报的数值。',
-  },
-  {
-    key: '取回分量与凭证',
-    name: '取回分量与凭证',
-    en: 'CERTS',
-    desc: '向持有者收同一份文件内的凭证，按“一个分块只交给第一个答得上来的节点”认领：聚合要求各凭证的下标集合两两不相交，副本不能被算两次。',
+    desc: '持有者取回分块密文。分量由密文自行计算，不信任节点申报的数值。',
   },
   {
     key: '证据合成',
-    name: '证据合成（VC.Agg）',
+    name: '证据合成',
     en: 'AGG',
     desc:
-      '把各节点的凭证按论文的聚合算法合成：$\\mathrm{VC.Agg}((I,v_I,\\pi_I),(J,v_J,\\pi_J))\\to\\pi_{I\\cup J}$。' +
-      '前提是同一承诺 $C_f$ 且 $I\\cap J=\\emptyset$；只收凭证、不需全量值，故为毫秒级。',
+      '各节点的凭证按聚合算法合成：$\\mathrm{VC.Agg}((I,v_I,\\pi_I),(J,v_J,\\pi_J))\\to\\pi_{I\\cup J}$。' +
+      '同一承诺 $C_f$ 且 $I\\cap J=\\emptyset$；仅使用当前参数无需全量值，耗时毫秒级。',
   },
   {
     name: '聚合完成',
     en: 'DONE',
-    desc:
-      '所得证据覆盖 $I\\cup J$，仍为两个群元素。它是合法的子向量开口，因此可再聚合、次序任意（incremental / multi-hop）；' +
-      '检验交给下一步。',
+    desc: '所得证据覆盖 $I\\cup J$，仍为两个群元素。合法子向量开口，因此可按任意次序再聚合。',
   },
   QUERY_LAST_STEP,
 ]
@@ -758,7 +750,6 @@ const TITLE_BY_KIND = {
 }
 /** 副标题：把“哪一类过程、关键代价在哪”一句话说清（弹框标题下面一行）。 */
 const SUBTITLE_BY_KIND = {
-  aggSame: '同一文件 · VC.Agg：只把节点凭证聚合起来，不需要全量值（毫秒级）',
   aggCross: '不同文件 · 归约：先把各文件的承诺抬进一条合并位置集，再重开一份证据（秒级）',
   disaggCross: '跨文件 · 按文件重取：合并向量上的证据拆不成另一份文件的证据，只能按那份文件自己的向量重取一次',
 }
@@ -1706,9 +1697,9 @@ onMounted(() => {
     <div v-if="disaggResult" class="panel mt-3">
       <h4 class="sec-title">分解结果</h4>
       <div class="text-2" style="font-size: 13px">
-        从 {{ blockText(disaggCard, disaggResult.source_indices || []) }}
-        拆出 {{ blockText(disaggCard, disaggResult.indices || []) }}，
-        丢弃 {{ blockText(disaggCard, disaggResult.dropped || []) }}
+        原证据覆盖 {{ blockText(disaggCard, disaggResult.source_indices || []) }}，
+        本次拆出 {{ blockText(disaggCard, disaggResult.indices || []) }}；
+        原证据不受影响（没被选中的分块只是不在新证据的覆盖范围里）。
       </div>
       <details class="note-collapse">
         <summary>说明</summary>
@@ -1803,9 +1794,14 @@ onMounted(() => {
 
         <div class="dg-preview">
           <div>拆出 π_K：<span class="mono">{{ blockText(disaggCard, disaggK) }}</span>（{{ disaggK.length }} 块）</div>
-          <div>丢弃：<span class="mono">{{ blockText(disaggCard, disaggDropped) }}</span>（{{ disaggDropped.length }} 块）</div>
+          <!--
+            ★ 不再列「丢弃：…」（用户 2026-10-18）。分解**不丢弃任何东西**：
+              原证据一字不动，子集证据是从它推出来的另一份开口，
+              没被选中的分块只是不在新证据的覆盖范围里。写成“丢弃”会让人
+              以为那些块被删了或被从原证据里剔掉了。
+          -->
           <p v-if="!disaggDropped.length" class="dg-warn">
-            丢弃集为空：结果与原证据相同。分解应仅保留一部分，请缩小选择范围。
+            未缩小覆盖范围：结果与原证据相同。分解应仅保留一部分，请缩小选择范围。
           </p>
           <details v-else class="note-collapse">
             <summary>说明</summary>

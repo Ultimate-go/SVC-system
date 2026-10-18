@@ -318,7 +318,10 @@ onBeforeUnmount(stop)
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--bg-raised);
-  min-height: 124px;
+  /* ★ 用 min-height 而不是 height：说明长短不一，但卡片不能跟着跳。
+     2026-10-18 从 124 调到 152 —— 分解那条链路的「确定目标子集 / 分解完成」
+     都是两行正文，原来的高度下末尾那行贴在卡片底边，看着就像被挡了一半。 */
+  min-height: 152px;
 }
 .detail-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
 .detail-idx { color: var(--text-3); font-size: 13px; }
@@ -375,8 +378,20 @@ onBeforeUnmount(stop)
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width .28s ease;
 }
-.facts { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
-.fact { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; }
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin-top: 16px;
+  padding-top: 14px;
+  padding-bottom: 2px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.7;
+}
+/* 一条参数（标签 + 值）不拆到两行，否则「第 282-327 块（共 46 块）」会被
+   折行截到半行高。 */
+.fact { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; white-space: nowrap; }
 .fact .v { color: var(--text-1); }
 .foot { display: flex; align-items: center; gap: 6px; }
 .spacer { flex: 1; }
@@ -408,5 +423,26 @@ onBeforeUnmount(stop)
 :deep(.tx-over) {
   border-top: 1px solid currentColor;
   padding: 0 2px;
+}
+</style>
+
+<!--
+  过程弹框的**尺寸**规则单独放在非 scoped 样式里。
+
+  ★ 为什么：`el-dialog` 默认 teleport 到 body，scoped 规则编译出来是
+    `[data-v-xxx] .el-dialog…`，而 body 下面根本没有那个属性 —— 写了也不生效。
+  ★ 干什么：给正文加高度上限并内部滚动。以前正文不设上限，在矮屏 / 高缩放下
+    弹框会比窗口还高，最后那行参数（「原证据覆盖 … / 本次拆分 …」）就被窗口底边
+    切掉半行，页脚也一同被顶出去。
+-->
+<style>
+.el-dialog.process-dialog .el-dialog__body {
+  max-height: calc(100vh - 210px);
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+/* 底部参数行贴底时留一口气，别和页脚上边框挤在一起。 */
+.el-dialog.process-dialog .facts {
+  padding-bottom: 4px;
 }
 </style>

@@ -63,4 +63,8 @@ export const filesApi = {
    */
   replay: (id, blockIdx, on) =>
     api.post(`/api/files/${id}/replay`, { block_idx: blockIdx, on }),
+  /** 当前哪些块正在被“交回旧版本”（服务端状态，进页面就同步一次）。 */
+  // ★ `silent`：这是**尽力而为**的一次查询 —— 老后端没有这个路由时会回 405，
+  //   那时我们只当“没开演示”，不该在界面上弹一条 “Method Not Allowed”。
+  replayStatus: (id) => api.get(`/api/files/${id}/replay`, { silent: true }),
 }

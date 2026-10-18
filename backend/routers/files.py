@@ -754,7 +754,7 @@ def replay_route(
         db,
         user.username,
         "replay_arm" if body.on else "replay_disarm",
-        f"{row.owner}/{row.file_key} 第 {body.block_idx} 块",
+        f"{row.owner}/{row.file_key} 第 {body.block_idx + 1} 块",
         detail=(
             "打开回滚演示：/cipher 对这一块将交回存下来的旧版本"
             if body.on
@@ -762,6 +762,32 @@ def replay_route(
         ),
     )
     return out
+
+
+@router.get("/{file_id}/replay")
+def replay_status_route(
+    file_id: int,
+    user: UserRow = Depends(current_user),
+    mgr: StoreManager = Depends(get_manager),
+    db: Session = Depends(get_db),
+):
+    """**当前有哪些块正在交回旧版本**（给界面显示开关状态）。
+
+    ★ 为什么需要这个只读接口：开关是**服务端**的状态（`replay_blocks` 表），
+      而界面原来只把“我刚点过”记在内存里 —— 刷新页面 / 另一个标签页开过，
+      界面就会显示“未开启”，可服务端其实还在交回旧密文。
+      那正是“明明没开回滚演示，却报长度对不上”的来源（2026-10-18 实测）。
+    """
+    row = db.get(FileRow, file_id)
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "files.gone", "文件不存在")
+    if row.owner != user.username and user.role != "admin":
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "files.not_owner_replay",
+            "仅文件所有者可以查看该文件的回滚演示状态",
+        )
+    return {"blocks": mgr.replay_status(row.owner, row.file_key)}
 
 
 @router.post("/{file_id}/cipher")

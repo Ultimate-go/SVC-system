@@ -749,7 +749,9 @@ async function tryDecrypt(file) {
   //    所以这里改走**客户端**那条路：取密文 → 在浏览器里解封块密钥 → SM4 解密
   //    → 顺手做一次本地验证。这才是“试解密”在这套架构下应有的样子。
   const crypt = useCryptoStore()
-  if (!crypt.unlocked) {
+  // ★ 以**私钥本体**为判据（`crypt.unlocked` 那个标记偶尔会与内存不同步）。
+  if (!crypt.key) crypt.restore(crypt.username || '')
+  if (!crypt.key) {
     ElMessage.warning('浏览器里还没有私钥 —— 请重新登录一次（登录时用口令在本地解封），再试解密')
     return
   }

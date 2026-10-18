@@ -129,6 +129,8 @@ function applyUnlocked(store, sk, username) {
   store.username = username
   store.unlockedAt = Date.now()
   store.error = ''
+  // ★ 私钥换了 ⇒ 让 `key` 那个 getter 失效重算（它靠这个计数器做依赖，见 state 里那段注释）
+  store.keyEpoch += 1
   // 刷新后还能接着用（同一标签页、限 5 分钟窗口）
   saveSession(sk, username)
   // 给它一个寿命（安全审计 I9）
@@ -151,11 +153,26 @@ export const useCryptoStore = defineStore('crypto', {
     unlockedAt: 0,
     /** 最后一次失败的原因（口令错 / 密文被改）。 */
     error: '',
+    /**
+     * 私钥的**版本号**：只在解锁 / 锁定 / 接回时 +1。
+     *
+     * ★★ 为什么需要它（2026-10-18 实测踩到的 bug）：`key` 是一个 Pinia getter，
+     *   而 Pinia 的 getter 就是 computed。如果它只读模块级变量 `_sk`，那就
+     *   **没有任何响应式依赖** —— Vue 会把第一次求值的结果**永久缓存**。
+     *   于是“登录前读过一次 `crypt.key`（那时是 null），登录成功之后也永远读到 null”，
+     *   表现就是：状态栏写着「已解锁 · 私钥在本浏览器」，点解密却说“本机尚未持有私钥”。
+     *   读一下这个计数器，就给 getter 一个真实依赖。
+     */
+    keyEpoch: 0,
   }),
 
   getters: {
     /** 私钥本身（调用方用完就该丢掉，别存到别处）。 */
-    key: () => _sk,
+    key: (s) => {
+      // ★ 必须读一下响应式字段，否则这个 getter 会被永久缓存（见上面 keyEpoch 那段）。
+      void s.keyEpoch
+      return _sk
+    },
     /** 已解锁时还能免密多久 —— 这里没有超时，纯展示用。 */
     ageMs: (s) => (s.unlockedAt ? Date.now() - s.unlockedAt : 0),
   },
@@ -214,6 +231,8 @@ export const useCryptoStore = defineStore('crypto', {
       this.unlocked = false
       this.username = ''
       this.unlockedAt = 0
+      // 私钥没了 ⇒ 同样要让 `key` 那个 getter 失效（否则它还返回旧值）
+      this.keyEpoch += 1
     },
 
     /**
@@ -248,6 +267,7 @@ export const useCryptoStore = defineStore('crypto', {
       this.unlocked = true
       this.username = rec.username || username
       this.unlockedAt = Date.now()
+      this.keyEpoch += 1
       armExpiry(this)
       return true
     },

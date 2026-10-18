@@ -163,6 +163,35 @@ const decryptOpen = ref(false)
 
 /** 点「解密并本地验证」：先把弹框打开（显示出“正在解…”），再跑一遍本地解封。 */
 async function openDecrypt() {
+  // ★★ 先确认**真的**有私钥 —— 判据是 `crypt.key`，不是 `crypt.unlocked` 那个标记：
+  //    刷新过标签页的情况先用 sessionStorage 里那份接回来（限 5 分钟窗口）。
+  //    没有就不开弹框（否则会弹出一个写着“尚未解密”的空框，比不弹还迷惑）。
+  if (!crypt.key) crypt.restore(crypt.username || '')
+  if (!crypt.key) {
+    ElMessage.warning({
+      message:
+        '本机当前没有私钥，无法解密：私钥只在登录时用口令在浏览器本地解封，' +
+        '且只活在本标签页（闲置 15 分钟或关闭标签即失效）。请退出后重新登录一次再试。',
+      duration: 9000,
+      showClose: true,
+    })
+    return
+  }
+  // ★★ 回滚演示开着、而分块情况变了（演示期间追加 / 删除过，或那块已被删掉）：
+  //    服务端留存的旧密文已不属于当前向量 —— 这时去解密只会得到一堆看不懂的错，
+  //    所以在**打开弹框之前**就说清，并且不打开解密弹框（用户 2026-10-18）。
+  if (replayStale.value) {
+    const n = Number(file.value?.block_count ?? 0)
+    ElMessage.warning({
+      message:
+        `分块数量已变化（开启演示时 ${replayArmedCount.value} 块，现在 ${n} 块）：` +
+        '服务端留存的旧密文与当前向量不再对应，解密与验证都无法给出有效结论。' +
+        '请先「关闭演示」，再重新开启（或撤销这次追加 / 删除）。',
+      duration: 9000,
+      showClose: true,
+    })
+    return
+  }
   decryptOpen.value = true
   await doDecrypt()
 }
@@ -182,6 +211,9 @@ const decodePreview = computed(() => {
  *
  * ★ 为什么按 `plain_len` 切而不是固定 1 KB：最后一个分块通常不满一块，
  *   而且分块大小是上传时定的（`file.block_size`），这里只信每块登记的长度。
+ * ★★ 但**回滚演示**时得用“这次真实解出来多长”（`decryptResult.blockLens`）：
+ *   服务端交回的是旧版本那一块，它的长度与**当前**账目可以不同（比如 1024 → 22）。
+ *   按当前账目切就会把旧那块截短、把剩下的字节顶到下一块去，整份视图错位。
  * ★ 累计偏移以**全文**为坐标（不是块内偏移），这样翻到第 N 块时能直接读出
  *   该字节在文件里的位置 —— 与改块页的序号口径一致（界面 1 起，偏移 0 起）。
  */
@@ -191,12 +223,15 @@ const hexBlocks = computed(() => {
   if (!hex || !rows.length) return []
   const total = decryptResult.value.bytes || hex.length / 2
   const replayed = new Set(decryptResult.value.replayedBlocks || [])
+  // 本次真实长度（按块号查）；没有就退回账目上的长度。
+  const realLen = new Map((decryptResult.value.blockLens || []).map((x) => [x.idx, x.len]))
   const out = []
   let cursor = 0
   rows.forEach((b, i) => {
-    // ★ 最后一块吃掉剩余字节：万一 layout 的长度与解出的明文有出入，
+    // ★ 最后一块吃掉剩余字节：万一长度与解出的明文有出入，
     //   也不能把尾巴露在视图外面。
-    const len = i === rows.length - 1 ? Math.max(0, total - cursor) : (b.plain_len || 0)
+    const own = realLen.has(b.block_idx) ? realLen.get(b.block_idx) : (b.plain_len || 0)
+    const len = i === rows.length - 1 ? Math.max(own, total - cursor) : own
     const slice = hex.slice(cursor * 2, (cursor + len) * 2)
     const rws = []
     for (let off = 0; off < slice.length / 2; off += 16) {
@@ -302,6 +337,18 @@ watch(
   //   详见 utils/anchor.js 的长注释（证明什么、不证明什么）。
   const oldLoading = ref(false)
   const oldInfo = ref(null) // { blockIdx, bytes, sha256, hex, binary, anchor, verdict }
+
+/**
+ * 换操作就把上一步的展示清掉（用户 2026-10-18）。
+ *
+ * ★ 从「替换」切到「删除」时，上一步的耗时阶段条 / 取回内容 / 结论不该继续挂着：
+ *   它们描述的是**另一次操作**，留在屏幕上会被当成这一次的结果。
+ */
+watch(activeOp, () => {
+  writeTimings.value = null
+  writeElapsed.value = 0
+  oldInfo.value = null
+})
 
 /** δ 承诺弹框：展示本文件承诺 δ = (U, C) 的完整值，以及对应的 12 位指纹。 */
 const deltaDialogOpen = ref(false)
@@ -460,10 +507,38 @@ async function load() {
     file.value = f
     nodes.value = n
     if (f.layout?.length) modifyForm.blockIdx = f.layout[0].block_idx
+    await syncReplayState()
   } catch (e) {
     error.value = e?.response?.data?.detail || e?.message || '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 把“回滚演示开没开”从**服务端**同步回来。
+ *
+ * ★★ 为什么必须有这一步（2026-10-18 实测）：开关是服务端的状态（`replay_blocks`
+ *   表），而界面原来只记“我刚才点过没有”。于是刷新一次页面、或换一个标签页
+ *   开过，界面就显示“未开启”，服务端却还在交回旧密文 —— 接着替换一次，
+ *   解密就报“长度与账目不符”。那不是数据坏，是界面在说假话。
+ */
+async function syncReplayState() {
+  replayArmed.value = null
+  replayArmedCount.value = null
+  replayArmedList.value = []
+  try {
+    const { data } = await filesApi.replayStatus(id.value)
+    const list = (data?.blocks || []).map((b) => Number(b.block_idx))
+    if (!list.length) return
+    replayArmedList.value = list
+    replayArmed.value = list[0]
+    replayIdx.value = list[0]
+    // 服务端已经开着，但“开启时是多少块”没人记 —— 以当前块数当基线：
+    // 之后的追加 / 删除才会被识别成“块数变了”。
+    replayArmedCount.value = Number(file.value?.block_count ?? 0)
+  } catch {
+    /* 非所有者 / 老后端没有这个接口 ⇒ 当作没开 */
   }
 }
 
@@ -667,6 +742,18 @@ async function doDecrypt() {
     decryptResult.value = {
       hex: bytesToHex(opened.plain),
       bytes: opened.plain.length,
+      /**
+       * 每一块**实际解出来**的长度（不一定是当前账目上的长度）。
+       *
+       * ★★ 为什么必须记：回滚演示里服务端交回的是**旧版本**那一块，它的长度
+       *   与当前账目可以不同。十六进制视图如果按 `file.layout[].plain_len`（当前账目）
+       *   切分，就会把旧那块截短、把余下的字节顶到下一块去 —— 整份视图从此错位。
+       */
+      blockLens: opened.blocks.map((b) => ({
+        idx: b.blockIdx,
+        len: b.plain.length,
+        replayed: b.replayed === true,
+      })),
       verify: opened.verify,
       remoteVerify: opened.remoteVerify,
       deltaVerdict: opened.deltaVerdict,
@@ -723,10 +810,36 @@ async function doDecrypt() {
 //   于是客户端自己算出的分量对不上当前基准 —— 验证不通过。
 const replayIdx = ref(0)
 const replayArmed = ref(null) // null = 没打开；数字 = 已对这块打开
+/**
+ * 开启时这份文件的分块数（快照）。
+ *
+ * ★ 为什么需要它：演示期间追加 / 删除仍然可以做完（用户 2026-10-18 确认要允许），
+ *   但块数一变，服务端留存的那份旧密文就不再对应当前向量 —— 此时去解密
+ *   只会得到一堆看不懂的错。所以拿它做一道闸：块数变了、或者那块已经被删掉了，
+ *   就当场说清，并且**不打开解密弹框**。
+ */
+const replayArmedCount = ref(null)
+/**
+ * 服务端当前被留存的**全部**块号（可能有多个：以前开过、又没关干净的）。
+ *
+ * ★ 关闭演示时要**逐个关**：只关一个的话，其它的还在交回旧密文 ——
+ *   界面显示“已关闭”、实际仍在回滚，又是一次“界面在说假话”。
+ */
+const replayArmedList = ref([])
 const replayBusy = ref(false)
+
+/** 演示已开启但分块情况变了 ⇒ 不能解密（打开弹框前拦）。 */
+const replayStale = computed(() => {
+  if (replayArmed.value === null) return false
+  const n = Number(file.value?.block_count ?? 0)
+  return replayArmedCount.value !== n || replayArmed.value >= n
+})
 
 async function toggleReplay() {
   const on = replayArmed.value === null
+  // ★ 关闭时用**真正被开启的那个块号**（`replayArmed`），不是输入框里的值：
+  //   演示期间输入框可能被改过，块也可能已经被删掉 —— 否则会出现“关不掉”。
+  const target = on ? replayIdx.value : replayArmed.value
   // ★ 打开前问一次（与置零 / 删除同一手法）：这是**故意让验证不通过**的开关，
   //   而且是发生在服务端的真改动（它真的会把旧版本交回）。
   if (on) {
@@ -735,7 +848,7 @@ async function toggleReplay() {
         `自此刻起，服务端将对第 ${humanIdx(replayIdx.value)} 个分块返回「当前版本」的旧密文。\n\n` +
           '服务端会先留存该分块的当前内容；此后你替换该分块并执行解密时，服务端将返回旧的密文，' +
           '于是浏览器重算的分量与当前基准不一致，验证不通过。\n\n' +
-          '本功能用于演示「服务端不可信」，不会破坏数据；点击「关闭」即可恢复。',
+          '演示期间请不要对这份文件做追加或删除：块数一变，留存的旧密文就对不上当前向量了。',
         '开启回滚演示',
         { type: 'warning', confirmButtonText: '开启演示', cancelButtonText: '取消' },
       )
@@ -745,8 +858,25 @@ async function toggleReplay() {
   }
   replayBusy.value = true
   try {
-    await filesApi.replay(id.value, replayIdx.value, on)
-    replayArmed.value = on ? replayIdx.value : null
+    if (on) {
+      await filesApi.replay(id.value, target, true)
+      replayArmed.value = replayIdx.value
+      replayArmedList.value = [replayIdx.value]
+      replayArmedCount.value = Number(file.value?.block_count ?? 0)
+    } else {
+      // 逐个关：服务端可能有历史遗留的几块都开着（见 replayArmedList 的注释）。
+      const all = replayArmedList.value.length ? replayArmedList.value : [target]
+      for (const bi of all) {
+        try {
+          await filesApi.replay(id.value, bi, false)
+        } catch {
+          /* 那一块已经不在（演示期间删过）—— 后端已允许无条件关闭，失败也继续 */
+        }
+      }
+      replayArmed.value = null
+      replayArmedList.value = []
+      replayArmedCount.value = null
+    }
     ElMessage({
       type: on ? 'warning' : 'success',
       duration: 6000,
@@ -939,13 +1069,11 @@ onMounted(load)
       <div v-if="isMine" class="panel ops-demo">
         <div class="sec-head">
           <h4 class="sec-title" style="margin-bottom: 0">演示：服务端返回旧版本数据</h4>
-          <el-tag type="warning" size="small" effect="plain">演示功能 · 会令验证不通过</el-tag>
+          <el-tag type="warning" size="small" effect="plain">仅用于演示</el-tag>
         </div>
 
         <p class="text-2" style="font-size: 13px; margin-top: 4px">
-          这个开关演示「服务端不可信」：开启后，服务端先留存该分块此刻的密文，
-          此后你每一次取它，它都返回这份旧密文。浏览器自算的分量与当前基准对不上，
-          本地验证随即失败 —— 也就是说，服务端即便偷偷换回旧数据，客户端也能自己发现。
+          若服务器返回旧版本数据，验证不通过，避免来自服务器的恶意攻击。
         </p>
 
         <div class="demo-control">
@@ -967,7 +1095,13 @@ onMounted(load)
         </div>
         <p v-if="decryptResult?.replayedBlocks?.length" class="note text-danger" style="margin-bottom: 0">
           本次服务端返回的是<b>第 {{ humanList(decryptResult.replayedBlocks).join('、') }} 个分块</b>的<b>旧版本</b>（替换前的那一版），
-          因此上方的本地验证未通过。该情形属于<b>版本回滚</b>，而非数据损坏。
+          因此上方的本地验证未通过。该情形属于<b>版本回滚</b>，而非数据损坏；
+          旧版本与当前版本的内容长度可以不同，密码学检验不依赖两者一致。
+        </p>
+        <!-- ★ 演示开着但块数变了（追加 / 删除过）—— 当场说清，而不是等解密报错。 -->
+        <p v-if="replayStale" class="note text-danger" style="margin: 6px 0 0">
+          演示已开启，但分块情况已变化（开启时 {{ replayArmedCount }} 块，现在 {{ file?.block_count ?? 0 }} 块）：
+          服务端留存的旧密文与当前向量不再对应，<b>此时无法解密验证</b>。请先关闭演示。
         </p>
 
         <details class="note-collapse">
@@ -1010,7 +1144,7 @@ onMounted(load)
                   type="warning"
                   plain
                   size="small"
-                  style="margin-left: 8px"
+                  style="margin-left: 24px"
                   :disabled="!isMine"
                   :loading="writeRunning"
                   title="把这一块的内容写成等长的全 0 字节（属于替换，不是删除）"
@@ -1027,7 +1161,7 @@ onMounted(load)
               -->
               <el-alert
                 v-if="oldInfo"
-                :type="oldInfo.verdict === 'match' ? 'success' : oldInfo.verdict === 'no-anchor' ? 'info' : 'error'"
+                :type="oldInfo.verdict === 'match' || oldInfo.verdict === 'no-anchor' ? 'success' : 'error'"
                 :closable="false"
                 :title="oldInfo.verdict === 'match'
                   ? `与本地记录一致：第 ${humanIdx(oldInfo.blockIdx)} 个分块 · ${oldInfo.bytes} 字节 · SHA-256 ${oldInfo.sha256}（浏览器本地验证通过，${oldInfo.ms} ms）`
@@ -1037,7 +1171,9 @@ onMounted(load)
                       ? `与本地记录不一致 —— 服务端返回的内容已改变（第 ${humanIdx(oldInfo.blockIdx)} 个分块）`
                       : oldInfo.verdict === 'verify-failed'
                         ? `浏览器本地验证未通过 —— 该分块不可信（第 ${humanIdx(oldInfo.blockIdx)} 个分块）`
-                        : '未读取过该分块：本地无记录，无法判定服务端是否更换过其内容'"
+                        // ★ 本地没记录时**别再说“无法判定”**（用户 2026-10-18）：
+                        //   密文与证据已经在浏览器里验过了，这一句才是本次真正确认过的东西。
+                        : '当前密文已通过本地证据验证'"
               >
                 <div style="font-size: 13px">
                   <p v-if="oldInfo.verdict === 'stale'" class="text-danger">
@@ -1063,10 +1199,6 @@ onMounted(load)
                     这次拿到的是 <span class="mono">{{ oldInfo.sha256 }}</span>。
                     可能的原因是服务端篡改或回滚，也可能是该分块此后被更新（例如在其他标签页中操作）。
                     新取回的内容已填入下方输入框，请自行判断。
-                  </p>
-                  <p v-else-if="oldInfo.verdict === 'no-anchor'">
-                    本地未记录该分块的摘要（可能由其他客户端写入）。<b>当前密文已通过本地证据验证</b>，
-                    交付字节未被替换，但无法判定其与初始写入版本是否一致；后续更新时将记录该分块的锚点。
                   </p>
                   <p v-else>
                     本地锚：{{ fmtWhen(oldInfo.anchor.ts) }} · 由「{{ oldInfo.anchor.source }}」记下
@@ -1100,15 +1232,14 @@ onMounted(load)
               <p class="note">
                 「取回当前内容」的结论基于<b>两条相互独立的依据</b>：① <b>密码学验证</b> ——
                 密文与证据均在浏览器本地校验，服务端无法伪造；
-                ② <b>本地锚</b> —— 本账户写入该分块时留存的明文摘要，保存于本地，服务端不可读写，
+                ② <b>本地验证</b> —— 账户写入该分块时留存的明文摘要，保存于本地，服务端不可读写，
                 可检出回滚至旧版本的情形。该机制的覆盖范围限于当前客户端的记录，跨客户端不互通。
               </p>
               <p class="note">
-                <b>置零</b>：把该分块的内容写成<b>等长的全 0 字节</b>。它属于<b>替换</b>，不是删除 ——
-                操作类型仍是论文 §8.2 的 <span class="mono">op = mod</span>（接口里是
-                <span class="mono">op = "zero"</span>），因此分块仍然存在、序号不变、总块数不变，
-                完整性校验照样通过，只有所有者解封装后才看得到全 0；版本号同样递增 1，
-                且原内容不可恢复。要把分块从向量里移除，只能用「删除」，而且只能删本文件位置段的末尾。
+                <b>置零</b>：把该分块的内容写成<b>等长的全 0 字节</b>。操作路径与替换完全一致，
+                因此分块仍然存在、序号不变、总块数不变，完整性校验通过，只有持有者解封装后全 0 可见；
+                版本号递增 1，且原内容不可恢复。要把分块从向量里移除，只能用「删除」，
+                而且只能删本文件位置段的末尾。
               </p>
             </details>
           </el-tab-pane>
@@ -1131,14 +1262,17 @@ onMounted(load)
                 <el-input-number v-model="dropBlocks" :min="1" :max="Math.max(1, file.block_count - 1)" />
               </div>
               <el-button type="danger" :disabled="!isMine" :loading="writeRunning" @click="doTruncate">删除</el-button>
-              <el-alert type="warning" :closable="false" class="trunc-warn" title="仅删除本文件位置段的末尾">
-                <template #default>
-                  <p style="font-size: 13px">① 每份文件各占一段独立的位置，删除只作用于本文件位置段的末尾：本文件之外的块一个字节都不动，因此不存在「删中间一份要连带删掉其后全部」的连带删除；本文件自己的中间块同样删除不了 —— 那需要重编号、重新承诺。</p>
-                  <p style="font-size: 13px">② 与写入顺序无关：旧坐标（全局素数表）下必须删“当前向量末尾”，所以那时只有最后写进向量的那份文件删得动尾巴；新坐标（块身份派生素数）下每份文件各占一段，这条限制已不存在 —— 后面压着别人后写的块，也照样删得动。</p>
-                  <p style="font-size: 13px">③ 不允许删除至零个分块（整份文件的删除是另一个操作）。此操作不可撤销。</p>
-                </template>
-              </el-alert>
             </div>
+            <!-- ★ 2026-10-18：两段警告文案改成可缩起的小字（用户要求）。 -->
+            <details class="note-collapse">
+              <summary>说明</summary>
+              <p class="note"><b>仅删除本文件位置段的末尾</b></p>
+              <p class="note">
+                ① 每份文件各占一段独立的位置，删除只作用于本文件位置段的末尾：
+                无法删除本文件中间部分的分块，因为需要重新编号和承诺。
+              </p>
+              <p class="note">② 不允许删除至零个分块。此操作不可撤销。</p>
+            </details>
           </el-tab-pane>
         </el-tabs>
         <StageTimeline v-if="writeTimings" :timings="writeTimings" :total-ms="writeElapsed" class="mt-3" />
@@ -1154,6 +1288,16 @@ onMounted(load)
           class="mb-2"
           title="当前账号不是该文件的所有者 —— 本地不具备可解封的密钥"
           description="块密钥由所有者的公钥封装，本机无法解封装。该限制来自密码学上的不可行性，与权限设置无关。"
+        />
+        <!-- ★ 能解密但本机暂时没有私钥（刷新超时 / 换了标签页）：说清原因与下一步，
+             而不是让人点下去只看到“没反应”。 -->
+        <el-alert
+          v-if="file.can_decrypt && !crypt.key"
+          type="warning"
+          :closable="false"
+          class="mb-2"
+          title="本机当前没有私钥，暂时无法解密"
+          description="私钥只在登录时用口令在浏览器本地解封，且只活在本标签页（闲置 15 分钟或关闭标签即失效）。退出后重新登录一次即可。"
         />
         <el-button
           type="primary"
@@ -1177,8 +1321,7 @@ onMounted(load)
             <p>
               <b>素性检验与公开分量</b>：本次涉及的
               {{ decryptResult.primeCheck.checked }} 个位置素数均通过素性检验
-              （<span class="mono">e_i = H(owner‖file_key‖i)</span>，由块身份哈希派生，
-              耗时 {{ decryptResult.primeCheck.ms }} ms）；
+              （<span class="mono">e_i = H(owner‖file_key‖i)</span>）；
               公开分量 <span class="mono">v_i</span> 由浏览器对取回的密文重新计算
               （<span class="mono">v_i = SM3(c_i)</span>），再与服务端返回值逐一比对，
               结果{{ decryptResult.elementAgrees ? '一致' : '不一致（此后的检验一律采用本地计算值）' }}。
@@ -1190,33 +1333,6 @@ onMounted(load)
               <span class="mono">{{ decryptResult.delta.fp }}</span>
               —— 仅用于快速比对，完整的 <span class="mono">U</span> / <span class="mono">C</span>
               见「摘要与参数」中的承诺弹框。
-            </p>
-            <p>
-              <b>与本地基线的比对</b>：
-              <template v-if="decryptResult.deltaVerdict === 'match'">
-                本机保存的承诺基线与服务端返回的 <span class="mono">δ</span> 一致，
-                本次检验所依据的承诺即本机此前见证的那一版本。
-              </template>
-              <template v-else-if="decryptResult.deltaVerdict === 'mismatch'">
-                本机保存的基线与服务端返回的 <span class="mono">δ</span> 不属于同一版本。
-                以本地基线复验的结论：「{{ decryptResult.verify.ok ? '通过' : '不通过' }}」；
-                以服务端返回的 <span class="mono">δ</span> 复验的结论：「{{
-                  decryptResult.remoteVerify && decryptResult.remoteVerify.ok ? '通过' : '不通过'
-                }}」。
-              </template>
-              <template v-else>
-                本机尚未保存该文件的承诺基线，本次以服务端返回的
-                <span class="mono">δ</span> 为准。
-                <template v-if="decryptResult.justAnchored">
-                  本次检验通过，该版本的 <span class="mono">δ</span> 已记入本地；
-                  此后均以本地记录为基线。
-                </template>
-              </template>
-            </p>
-            <p v-if="decryptResult.deltaVerdict === 'mismatch'" class="text-danger">
-              两侧 <span class="mono">δ</span> 不属于同一版本，可能因文件已被更新，
-              或服务端交回了另一版本的 <span class="mono">δ</span> 所致。
-              以本地基线复验通过，仅表示交付内容与本机记录一致，<b>不表示它是最新版本</b>。
             </p>
           </div>
         </el-alert>
@@ -1436,9 +1552,7 @@ onMounted(load)
   gap: 12px;
   max-width: 560px;
 }
-.trunc-warn {
-  max-width: 560px;
-}
+/* 删除页的说明现在是可缩起的小字（见 .note-collapse），不再需要单独宽度限制。 */
 .plain {
   background: var(--bg-raised);
   border: 1px solid var(--line);

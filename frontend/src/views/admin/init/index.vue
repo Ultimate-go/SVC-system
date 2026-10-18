@@ -11,9 +11,20 @@
  *    外加一份「部署时定死、本页不可改」的清单。
  * 1. **算法与目的** —— 这套系统做什么、算法的骨架是什么、要达到什么目的。
  *    方案原样的说明在论文 §5.2 与 docs/方案设计.md，这里只留一屏能读完的骨架。
- * 2. **初始化现状** —— 规模一览（文件 / 块 / 节点 / 用户）、**一致性自检**、
- *    系统参数、存储规模、逐文件摘要。数值全部来自 ``GET /api/system/status``。
- * 3. **运行时状态** —— 运行状态（模式与传输层）与密钥模型（两层封装怎么落的）。
+ * 2. **初始化现状** —— 规模一览（文件 / 块 / 在线节点 / 用户 / 副本 / 副本缺口）、
+ *    系统参数、一致性自检、逐文件摘要。数值全部来自 ``GET /api/system/status``。
+ * 3. **部署模式与密钥模型** —— 两种部署形态的区别，以及两层密钥封装落在哪里。
+ *
+ * ★ 2026-10-18 整理（用户：太乱、去掉不精准的表述）：
+ *   · 删掉「存储规模」整个区块 —— 文件数 / 总块数 / 副本数 / 副本不足四项
+ *     与「规模一览」是同一组数字，一处看就够；
+ *   · 「运行状态」只留部署形态（模式 / 传输 / 离线名单），不再重复在线台数与
+ *     “集群稳定”——那是「规模一览」的判据，写在两处只会自相矛盾；
+ *   · 健康灯只说它真的核过的两件事：「节点全部在线 · 副本达标」
+ *     （原来写「系统运行正常」，把范围说大了 —— 一致性由自检回答）；
+ *   · 「逐文件摘要」去掉一行「δ 指纹：每份各不相同」—— 每行文件自带指纹；
+ *   · 修掉几处不精准的说法：δ 是公开量（不是“客户端只保存 δ”）、
+ *     素数位长不等于 ℓ+1（新坐标下身份派生的是 128 位）、n_max 是老坐标的地址容量。
  *
  * ★ 2026-10-16：「系统自检」从「总览」页搬到这里，并且**收小**：页面上只留
  *   一小块（按钮 + 一行上次结论），十项扫描在弹框里跑（见 SelfCheck.vue）。
@@ -39,7 +50,6 @@ import Icon from '../../../components/icons/Icon.vue'
 const loading = ref(true)
 const error = ref('')
 const status = ref(null)
-const healthDetailOpen = ref(false)
 
 const delta = computed(() => status.value?.delta || {})
 const crs = computed(() => status.value?.crs || {})
@@ -194,7 +204,7 @@ const flowSteps = computed(() => {
     {
       key: 'group', no: 1, title: '隐藏阶群', en: 'GROUP',
       rows: rows([
-        { k: '模数 |N|', v: `${c.N_bits ?? '—'} 位（演示档；无安全强度）` },
+        { k: '模数 |N|', v: `${c.N_bits ?? '—'} 位（演示参数，不提供实际安全强度）` },
         { k: '生成方式', v: '随机取 p、q，算出 N = p·q 后立即销毁 p、q' },
         { k: '公开量', v: 'N 与 g —— 群阶 φ(N) 自始至终无人可知' },
       ]),
@@ -203,9 +213,11 @@ const flowSteps = computed(() => {
     {
       key: 'primes', no: 2, title: '位置素数', en: 'PRIMEGEN',
       rows: rows([
-        { k: '素数位长', v: `${c.prime_bits ?? '—'} 位（= 分量位长 + 1）` },
+        { k: '素数位长', v: `${c.prime_bits ?? '—'} 位（方案参数 ℓ+1）` },
         { k: '派生方式', v: '由「所有者 + 文件标识 + 块号」哈希到素数，每块一个身份素数' },
-        { k: '素数表容量 n_max', v: `${c.n_max ?? '—'}（只对老坐标文件有意义）` },
+        // ★ 不能只写「= 分量位长 + 1」：那只会对**老坐标**（全局素数表）成立。
+        //   新坐标（默认）下素数由块身份哈希派生，实际 128 位（见 svc/mathbase.py::hash_prime）。
+        { k: '素数表容量 n_max', v: `${c.n_max ?? '—'}（仅老坐标文件的地址空间）` },
       ]),
       note: '位置由块的身份派生，因此位置不需要全局分配，删除留下的空洞也不必回收。',
     },
@@ -225,10 +237,14 @@ const flowSteps = computed(() => {
         { k: '副本因子', v: `${st.replica_factor ?? '—'} 份 / 块` },
         {
           k: '节点',
-          v: nodeIds.value.length ? `${nodeIds.value[0]} … ${nodeIds.value[nodeIds.value.length - 1]}` : '—',
+          v: nodeIds.value.length
+            ? `${nodeIds.value[0]} … ${nodeIds.value[nodeIds.value.length - 1]}（共 ${nodeIds.value.length} 台）`
+            : '—',
         },
       ]),
-      note: '每台一个独立进程、各自一份 SQLite。',
+      // ★ 不写「每台一个独立进程」：那只对跨进程部署成立；单进程演示模式下
+      //   各节点同处一个 Python 进程、存储为进程内直连（见 deploy 的 mode / transport）。
+      note: '每台维护自己那份向量视图；跨进程部署时各为一个独立进程、各自一份 SQLite。',
     },
     {
       key: 'ports', no: 5, title: '端口与进程', en: 'PORTS',
@@ -345,8 +361,9 @@ onMounted(async () => {
           <p>
             文件被切成定长分块、逐块用 SM4-CTR 加密，密文分散存放在多台互不信任的存储节点上。
             每份文件对应一条独立向量，向量上的每个位置绑定一个互不相同的素数，
-            全部位置合成一个常数大小的公开承诺 δ。客户端只保存 δ，
-            就能验证任意子集的检索结果，不需要信任任何一台节点。
+            该文件全部位置的公开分量合成一个常数大小的承诺 δ。
+            δ 是<b>公开量</b>：它由服务端保存、可被任何一方读到，任何人都能据此验证任意子集的
+            检索结果 —— 不需要信任任何一台节点，也不需要任何密钥。
           </p>
           <p>
             承诺建立在隐藏阶群上，群阶未知 —— 正因为未知，「求 e 次根」才是困难的，
@@ -386,10 +403,11 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- ② 初始化现状 -->
+    <!-- ② 初始化现状：规模 + 系统参数 + 自检入口收在一屏里。
+         ★ 原来这里还有一个「存储规模」区块，四项（文件数 / 总块数 / 副本数 / 副本不足）
+           与下面这一排完全重复，已合并。 -->
     <div class="section-heading section-heading-spaced">
       <div><span class="section-kicker mono">INITIALIZED SCALE</span><h2>规模一览</h2></div>
-      <span class="section-note mono">LIVE · {{ status.mode }} · {{ status.transport }}</span>
     </div>
     <section class="panel scale-panel">
       <div class="scale-row">
@@ -400,7 +418,7 @@ onMounted(async () => {
           <b class="mono">{{ status.blocks || 0 }}</b><span>个块</span>
         </div>
         <div class="scale-item">
-          <b class="mono">{{ status.nodes || 0 }}</b><span>台存储节点</span>
+          <b class="mono">{{ status.nodes || 0 }}</b><span>台节点在线</span>
         </div>
         <div class="scale-item">
           <b class="mono">{{ keywrap.users || 0 }}</b><span>个用户</span>
@@ -408,12 +426,52 @@ onMounted(async () => {
         <div class="scale-item">
           <b class="mono">{{ status.replica_factor || 0 }}</b><span>份副本 / 块</span>
         </div>
+        <div
+          class="scale-item"
+          :title="status.under_replicated ? '开副本之前上传的历史数据，重新上传可补齐' : '当前没有缺口'"
+        >
+          <b class="mono">{{ status.under_replicated || 0 }}</b><span>块副本不足</span>
+        </div>
+        <!-- ★ 这一栏只说它真的核对过的两件事：节点全在线、副本达标。
+             以前写「系统运行正常」是把范围说大了 —— 一致性由下面的一致性自检回答。 -->
         <div class="health-pill" :class="clusterHealthy ? 'is-ok' : 'is-warn'">
           <span class="health-dot" />
-          <span>{{ clusterHealthy ? '系统运行正常' : '需要关注' }}</span>
+          <span>{{ clusterHealthy ? '节点全部在线 · 副本达标' : '有节点离线或缺副本' }}</span>
         </div>
       </div>
     </section>
+
+    <!-- 一致性自检块与系统参数网格的先后顺序：先“系统长什么样”，再“它现在对不对”。
+         具体位置见下方（参数网格之后）；这里先声明参数区块标题。 -->
+    <div class="section-heading section-heading-spaced">
+      <div><span class="section-kicker mono">PUBLIC PARAMETERS</span><h2>系统参数</h2></div>
+    </div>
+    <div class="grid">
+      <StatCard
+        hint-top
+        label="公开参数"
+        :value="crs.N_bits"
+        unit="位"
+        hint="隐藏阶群的模数位长；本部署为演示参数，不提供实际安全强度"
+      />
+      <StatCard hint-top label="分量位长" :value="crs.l" unit="位" hint="一个公开分量 v_i 的比特数" />
+      <StatCard
+        hint-top
+        label="素数位长"
+        :value="crs.prime_bits"
+        unit="位"
+        hint="方案参数 ℓ+1；新坐标下按块身份哈希派生的素数实际为 128 位"
+      />
+      <!-- 原「位置上限 = n_max」已不适用：素数按块身份派生，块数无上限。
+           此处显示「已分配槽位 / 素数表容量」：分子含删除留下的空洞（故 >= 块数），
+           分母是老坐标文件的地址容量 —— 它**不是**块数上限（见上面的 computed）。 -->
+      <StatCard
+        hint-top
+        label="已分配槽位"
+        :value="slotsText"
+        hint="含删除留下的空洞；分母 n_max 只是老坐标文件的地址容量，不是上限"
+      />
+    </div>
 
     <!-- 一致性自检：页面上就这一小块，十项扫描在弹框里跑（见 SelfCheck.vue）。
          ★ 刻意窄一些（max-width），不占一整行 —— 它只是个“顺手跑一下”的入口。 -->
@@ -424,41 +482,6 @@ onMounted(async () => {
       </div>
       <SelfCheck />
     </section>
-
-    <div class="section-heading section-heading-spaced">
-      <div><span class="section-kicker mono">PUBLIC PARAMETERS</span><h2>系统参数</h2></div>
-      <span class="section-note mono">CRS / STATIC</span>
-    </div>
-    <div class="grid">
-      <StatCard hint-top label="公开参数" :value="crs.N_bits" unit="位" hint="隐藏阶群的模数位长" />
-      <StatCard hint-top label="分量位长" :value="crs.l" unit="位" hint="一个分量的比特数" />
-      <StatCard hint-top label="素数位长" :value="crs.prime_bits" unit="位" hint="分量位长 + 1" />
-      <!-- 原「位置上限 = n_max」已不适用：素数按块身份派生，块数无上限。
-           此处显示「已分配槽位 / 素数表容量」：分子含删除留下的空洞（故 >= 块数），
-           分母是老坐标文件的地址容量 —— 它**不是**块数上限（见上面的 computed）。 -->
-      <StatCard
-        hint-top
-        label="存储槽位"
-        :value="slotsText"
-        hint="已分配槽位 / 素数表容量（含删除留下的空洞；新坐标文件不受该容量约束）"
-      />
-    </div>
-
-    <div class="section-heading section-heading-spaced">
-      <div><span class="section-kicker mono">STORAGE FOOTPRINT</span><h2>存储规模</h2></div>
-      <span class="section-note mono">LIVE COUNTERS</span>
-    </div>
-    <div class="grid">
-      <StatCard hint-top label="文件数" :value="status.files" hint="全系统所有文件" />
-      <StatCard hint-top label="总块数" :value="status.blocks" hint="各文件块数之和" />
-      <StatCard hint-top label="副本数" :value="status.replica_factor" hint="每块默认存几份" />
-      <StatCard
-        hint-top
-        label="副本不足"
-        :value="status.under_replicated"
-        :hint="status.under_replicated ? '开副本前上传的历史数据，重新上传可补齐' : '当前无缺口'"
-      />
-    </div>
 
     <div class="compact-sections">
       <section class="compact-section">
@@ -471,16 +494,9 @@ onMounted(async () => {
             <RingGauge :value="replicaOk" :max="status.blocks || 1" label="副本达标" />
             <div class="delta-detail">
               <div class="delta-item"><span class="k">n</span><span class="v mono">{{ delta.n }}</span><span class="hint">在用块数（各文件之和）</span></div>
-              <!-- 摘要为逐文件粒度，不存在单一全局 U / C。 -->
+              <!-- 摘要为逐文件粒度，不存在单一全局 U / C。
+                   「δ 指纹」那一项已删：下面每一行文件自带自己的指纹，不必再摆一个“每份各不相同”。 -->
               <div class="delta-item"><span class="k">向量</span><span class="v mono">{{ deltaFiles.length }}</span><span class="hint">每份文件一条</span></div>
-              <div class="delta-item">
-                <span class="k">δ 指纹</span>
-                <span
-                  class="v mono"
-                  :title="deltaFiles.length === 1 ? ('U = ' + deltaFiles[0].U + '\nC = ' + deltaFiles[0].C) : ''"
-                >{{ deltaFiles.length === 1 ? hexFp(deltaFiles[0].delta_fp, 12) : '每份各不相同' }}</span>
-                <span class="hint">一份文件一个值</span>
-              </div>
             </div>
           </div>
           <p class="fp-note">指纹是文件公开承诺 δ 的 12 位十六进制短摘要（sha256("U:C:n") 的前 12 位），用于在不暴露明文的前提下快速识别与核对文件；悬浮可查看该文件承诺的完整 U 与 C。</p>
@@ -501,29 +517,6 @@ onMounted(async () => {
 
       <section class="compact-section">
         <div class="section-heading">
-          <div><span class="section-kicker mono">RUNTIME HEALTH</span><h2>运行状态</h2></div>
-        </div>
-        <div class="panel health-panel">
-          <div class="panel-title-row"><span class="panel-subtitle">协调者与存储节点连接状态</span><span class="live-mark"><i />MONITORING</span></div>
-          <div class="health-summary"><strong class="mono">{{ status.nodes || 0 }}</strong><span>个节点在线</span><span class="health-summary-status" :class="clusterHealthy ? 'text-ok' : 'text-warn'">{{ clusterHealthy ? '集群稳定' : '需要关注' }}</span></div>
-          <div class="cluster-row">
-            <span class="cluster-item">模式 <b class="mono">{{ status.mode }}</b></span>
-            <span class="cluster-item">传输 <b class="mono">{{ status.transport }}</b></span>
-            <span v-if="status.nodes_down?.length" class="cluster-item text-danger">离线：<b class="mono">{{ status.nodes_down.join(', ') }}</b></span>
-            <span v-else class="cluster-item text-ok">全部在线</span>
-          </div>
-          <div class="detail-toggle" @click="healthDetailOpen = !healthDetailOpen">
-            <span>详情</span><span class="caret" :class="{ open: healthDetailOpen }">▾</span>
-          </div>
-          <div v-show="healthDetailOpen" class="detail-body">
-            <p class="detail-line"><b>模式 {{ status.mode }}</b>：{{ modeDesc }}</p>
-            <p class="detail-line"><b>传输 {{ status.transport }}</b>：{{ transportDesc }}</p>
-          </div>
-        </div>
-      </section>
-
-      <section class="compact-section compact-section--full">
-        <div class="section-heading">
           <div><span class="section-kicker mono">KEY MANAGEMENT</span><h2>密钥模型</h2></div>
           <span class="section-note mono">NO MASTER KEY</span>
         </div>
@@ -534,6 +527,27 @@ onMounted(async () => {
             <div class="keywrap-item"><span class="k">私钥存储位置</span><span class="v">{{ KEY_STORAGE_TEXT }}</span></div>
             <div class="keywrap-item"><span class="k">解封位置</span><span class="v">{{ KEY_UNWRAP_TEXT }}</span></div>
           </div>
+        </div>
+      </section>
+
+      <!--
+        ★ 部署模式单独占一整行窄条：它现在只剩三行字（模式 / 传输 / 离线名单），
+          再和「逐文件摘要」并排就会是一高一矮两张卡，看着乱。
+      -->
+      <section class="compact-section compact-section--full">
+        <div class="section-heading">
+          <div><span class="section-kicker mono">DEPLOYMENT</span><h2>部署模式</h2></div>
+        </div>
+        <div class="panel health-panel">
+          <div class="cluster-row">
+            <span class="cluster-item">模式 <b class="mono">{{ status.mode }}</b></span>
+            <span class="cluster-item">传输 <b class="mono">{{ status.transport }}</b></span>
+            <span v-if="status.nodes_down?.length" class="cluster-item text-danger">
+              离线：<b class="mono">{{ status.nodes_down.join(', ') }}</b>
+            </span>
+          </div>
+          <p class="detail-line"><b>模式</b>：{{ modeDesc }}</p>
+          <p class="detail-line"><b>传输</b>：{{ transportDesc }}</p>
         </div>
       </section>
     </div>
@@ -591,7 +605,6 @@ onMounted(async () => {
 }
 .health-dot, .live-mark i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 12%, transparent); }
 .health-pill.is-warn .health-dot { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 12%, transparent); }
-
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -610,7 +623,8 @@ onMounted(async () => {
 .compact-section > .panel { flex: 1 1 auto; min-height: 262px; box-sizing: border-box; }
 .compact-section--full > .panel { min-height: 0; height: auto; }
 .commitment-panel { height: auto; min-height: 262px; }
-.health-panel { height: auto; min-height: 262px; }
+/* 部署模式现在是整行窄条，不再需要和左栏等高。 */
+.health-panel { height: auto; min-height: 0; }
 .commitment-panel .delta-row { min-height: 112px; }
 .panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
 .panel-subtitle { color: var(--text-2); font-size: 15px; }
@@ -626,14 +640,9 @@ onMounted(async () => {
 .delta-item .hint { color: var(--text-3); font-size: 14px; }
 .fp-note { color: var(--text-3); font-size: 14px; line-height: 1.6; margin: 10px 0 2px; }
 .file-line { color: var(--text-2); font-size: 15px; }
-.health-summary { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 17px; color: var(--text-2); font-size: 15px; }
-.health-summary strong { color: var(--text-1); font-size: 34px; font-weight: 500; letter-spacing: -.04em; }
-.health-summary-status { margin-left: auto; font-size: 14px; }
 .cluster-row { display: flex; flex-wrap: wrap; gap: 24px; font-size: 15px; color: var(--text-2); }
-.detail-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--accent); font-size: 13px; cursor: pointer; user-select: none; }
-.detail-toggle .caret { transition: transform .2s ease; font-size: 11px; }
-.detail-toggle .caret.open { transform: rotate(180deg); }
-.detail-body { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raised); }
+/* 部署模式：模式/传输两行释义跟在取值行后面，拉开一点距离。 */
+.cluster-row + .detail-line { margin-top: 16px; }
 .detail-line { color: var(--text-2); font-size: 14px; line-height: 1.7; margin: 0 0 8px; }
 .detail-line:last-child { margin-bottom: 0; }
 .detail-line b { color: var(--text-1); }
@@ -678,7 +687,7 @@ onMounted(async () => {
   .section-note { padding-top: 4px; }
 }
 /* 一致性自检：页面上就这一小块（窄、矮），十项扫描在弹框里（SelfCheck.vue）。 */
-.selfcheck-panel { max-width: 620px; margin-top: 14px; padding: 13px 16px; }
+.selfcheck-panel { max-width: 620px; margin-top: 18px; padding: 13px 16px; }
 .selfcheck-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 .selfcheck-title { color: var(--text-1); font-size: 15px; }
 @media (max-width: 560px) {
