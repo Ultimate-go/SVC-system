@@ -198,6 +198,17 @@ async function openDecrypt() {
 
 const isMine = computed(() => file.value?.is_mine)
 
+/**
+ * 任何写操作成功之后，上一次的解密结论就作废了。
+ *
+ * ★ 它描述的是**旧内容**：留着显示会让人以为“这次改完还是这个结论”。
+ *   顺带把十六进制弹框也关掉（里面的字节已经被改过了）。
+ */
+function dropDecryptResult() {
+  decryptResult.value = null
+  decryptOpen.value = false
+}
+
 /** 浏览器侧的私钥状态（私钥只活在内存，见 stores/crypto.js）。 */
 const crypt = useCryptoStore()
 
@@ -524,21 +535,26 @@ async function load() {
  *   解密就报“长度与账目不符”。那不是数据坏，是界面在说假话。
  */
 async function syncReplayState() {
-  replayArmed.value = null
-  replayArmedCount.value = null
-  replayArmedList.value = []
   try {
     const { data } = await filesApi.replayStatus(id.value)
     const list = (data?.blocks || []).map((b) => Number(b.block_idx))
-    if (!list.length) return
+    replaySyncFailed.value = false
     replayArmedList.value = list
-    replayArmed.value = list[0]
-    replayIdx.value = list[0]
-    // 服务端已经开着，但“开启时是多少块”没人记 —— 以当前块数当基线：
-    // 之后的追加 / 删除才会被识别成“块数变了”。
-    replayArmedCount.value = Number(file.value?.block_count ?? 0)
+    if (list.length) {
+      replayArmed.value = list[0]
+      replayIdx.value = list[0]
+      // 服务端已经开着，但“开启时是多少块”没人记 —— 以当前块数当基线：
+      // 之后的追加 / 删除才会被识别成“块数变了”。
+      replayArmedCount.value = Number(file.value?.block_count ?? 0)
+    } else {
+      replayArmed.value = null
+      replayArmedCount.value = null
+    }
   } catch {
-    /* 非所有者 / 老后端没有这个接口 ⇒ 当作没开 */
+    // ★★ 查询失败（后端未重启 → 405；非所有者 → 403）**绝不能**把本地状态
+    //    抹成“未开启”—— 那正是“点一下替换，演示开关自己关了”的直接原因。
+    //    保持原样，并且把“这次没问成”记下来，好在面板上如实说明。
+    replaySyncFailed.value = true
   }
 }
 
@@ -560,6 +576,7 @@ async function doModify() {
     dropDeltaAnchor(id.value)
     oldInfo.value = null
     ElMessage.success(`已替换第 ${humanIdx(idx)} 个分块；当前为第 ${data.version} 版（本地锚已更新）`)
+    dropDecryptResult()
     await load()
   } catch {
   } finally {
@@ -609,6 +626,7 @@ async function doZero() {
     ElMessage.success(
       `已置零第 ${humanIdx(idx)} 个分块（${data.zeroed?.bytes ?? '?'} 字节全 0，长度不变）；当前为第 ${data.version} 版`,
     )
+    dropDecryptResult()
     await load()
   } catch {
   } finally {
@@ -628,6 +646,7 @@ async function doAppend() {
     dropDeltaAnchor(id.value)
     ElMessage.success(`已追加 ${data.added_blocks} 个分块，共 ${data.block_count} 个分块`)
     appendText.value = ''
+    dropDecryptResult()
     await load()
   } catch {
   } finally {
@@ -655,6 +674,7 @@ async function doTruncate() {
     markWriteEnd(t0)
     dropDeltaAnchor(id.value)
     ElMessage.success(`已删除末尾 ${data.dropped_blocks} 个分块`)
+    dropDecryptResult()
     await load()
   } catch {
   } finally {
@@ -772,6 +792,17 @@ async function doDecrypt() {
       ms: opened.ms,
       timings: pack.timings,
     }
+    // ★★ 服务端会如实标出“哪几块交回的是旧版本”。如果进页面时那个 GET
+    //    没问成（后端未重启 → 405），就以这里为准把开关状态接过来 ——
+    //    至少能让人看到“确实开着”，并且能一键关掉。
+    const rep0 = decryptResult.value.replayedBlocks || []
+    if (rep0.length) {
+      replayArmedList.value = rep0.slice()
+      replayArmed.value = rep0[0]
+      if (replayArmedCount.value == null) {
+        replayArmedCount.value = Number(file.value?.block_count ?? 0)
+      }
+    }
     if (!opened.verify.ok) {
       // ★★ 回滚 ≠ 数据被改坏。服务器交回旧版本时验证也会不过（旧密文算不出
       //    当前 δ），但那是**服务器在撑**，不是节点上的数据坏了 —— 不能说成
@@ -826,6 +857,8 @@ const replayArmedCount = ref(null)
  *   界面显示“已关闭”、实际仍在回滚，又是一次“界面在说假话”。
  */
 const replayArmedList = ref([])
+/** 这次向服务端确认开关状态没成功（后端未重启 / 非所有者）—— 面板上如实标出。 */
+const replaySyncFailed = ref(false)
 const replayBusy = ref(false)
 
 /** 演示已开启但分块情况变了 ⇒ 不能解密（打开弹框前拦）。 */
@@ -1102,6 +1135,10 @@ onMounted(load)
         <p v-if="replayStale" class="note text-danger" style="margin: 6px 0 0">
           演示已开启，但分块情况已变化（开启时 {{ replayArmedCount }} 块，现在 {{ file?.block_count ?? 0 }} 块）：
           服务端留存的旧密文与当前向量不再对应，<b>此时无法解密验证</b>。请先关闭演示。
+        </p>
+        <!-- ★ 没能向服务端确认开关状态（后端未重启 / 非所有者）—— 别装作知道。 -->
+        <p v-if="replaySyncFailed" class="note text-3" style="margin: 6px 0 0">
+          未能向服务端确认演示开关状态（后端可能还没重启到新版），以上为本地记录。
         </p>
 
         <details class="note-collapse">

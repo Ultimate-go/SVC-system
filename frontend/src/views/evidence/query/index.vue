@@ -524,8 +524,12 @@ const basketHolderCount = computed(
 --------------------------------------------------------------------------- */
 const VERIFY_STEPS = [
   {
-    name: '确定下标集合',
+    // ★ 名字按用户口径：位置集合（下标是内部叫法，界面统一说“位置”）。
+    name: '确定位置集合',
     en: 'SELECT',
+    // ★ 公式（`$...$`）由 ProcessDialog 里的 utils/tex.js 渲染，只支持那套子集。
+    //   「共几块」不放这里：它是**本次的真实块数**，由 verifySteps 按 lastVerifyScope
+    //   填进去（用户 2026-10-19：不要写成 $|I|$，要写具体多少块）。
     desc: '仅对指定分块作结论。一份证据在其覆盖的下标上有定义，未被覆盖的分块不因这份证据而被判定为通过。',
   },
   {
@@ -546,19 +550,27 @@ const VERIFY_STEPS = [
     key: '取回分量与凭证',
     name: '重新计算分量',
     en: 'DIGEST',
-    desc: '浏览器在本地对取回的密文重新计算公开分量（即密文的 SM3 摘要），不采用服务端提供的数值。公开分量由密文唯一确定。',
+    desc:
+      '浏览器在本地对取回的密文重新计算公开分量（即密文的 SM3 摘要），不采用服务端提供的数值。公开分量由密文唯一确定。' +
+      '\n$v_i = \\mathrm{SM3}(c_i)$；位置 $i$ 映射为素数 $e_i$，位置见证 $S_i = g^{E/e_i}$，其中 $E = \\prod_j e_j$。',
   },
   {
     key: '证据合成',
-    name: '证据聚合',
+    name: '增量聚合',
     en: 'AGGREGATE',
-    desc: '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素、不超过 256 字节，与本次覆盖的分块数无关。',
+    desc:
+      '把各分块的公开分量按身份聚合为一份证据：规模恒为两个群元素、不超过 256 字节，与本次覆盖的分块数无关。' +
+      '\n$\\pi_I = (S_I, \\Lambda_I)$，$S_I = g^{E/e_I}$，$\\Lambda_I = \\prod_{j \\notin I} (S_j^{1/e_I})^{v_j}$。' +
+      '\n所得证据可继续聚合：$\\mathrm{VC.Agg}(\\pi_I, \\pi_J) \\to \\pi_{I \\cup J}$，要求 $I \\cap J = \\emptyset$。',
   },
   {
     key: '承诺验证',
     name: '公开检验',
     en: 'VERIFY',
-    desc: '将聚合承诺 δ = (U, C) 与所得证据执行一次配对检验。该检验只用到公开量：不需明文、不需任何密钥，也不需要信任任何一方，任何持有同样输入的主体都能独立复算。',
+    desc:
+      '将聚合承诺 δ = （U，C）与所得证据执行一次配对检验。该检验只用到公开量：不需明文、不需任何密钥，也不需要信任任何一方，任何持有同样输入的主体都能独立复算。' +
+      '\n先校验 $S_I^{e_I} = U$，再由 $S_I$ 现场重构 $S_i = S_I^{e_I/e_i}$；' +
+      '\n接受当且仅当 $\\Lambda_I^{e_I} \\cdot \\prod_{i \\in I} S_i^{v_i} = C$。',
   },
   {
     name: '结果判定',
@@ -577,12 +589,14 @@ const processOpen = ref(false)
 const lastVerify = ref(null)
 
 /**
- * 本次验证的范围：「哪一份文件、哪些块」。
+ * 本次验证的范围：「哪一份文件、哪些块、共几块」。
  *
- * ★ 它只出现在「确定下标集合」那一步的正文里（用户要求把原来右上角那排
+ * ★ 它只出现在「确定位置集合」那一步的正文里（用户要求把原来右上角那排
  *   中间量「范围 / δ_n / δ 指纹」整个去掉，范围信息并入正文）。
+ * ★ ``count`` 是这次真正选中的块数：正文里要写“共 3 块”而不写 $|I|$
+ *   （用户 2026-10-19）。``indices`` / ``blocks`` 都是去重后的数组，长度即块数。
  */
-const lastVerifyScope = ref({ file: '', blocks: '' })
+const lastVerifyScope = ref({ file: '', blocks: '', count: 0 })
 
 const verifySteps = computed(() => {
   const sc = lastVerifyScope.value
@@ -590,7 +604,13 @@ const verifySteps = computed(() => {
   return VERIFY_STEPS.map((s) => {
     if (s.en === 'SELECT') {
       // 换行靠 ProcessDialog 里 `.desc` 的 `white-space: pre-line`（见那边注释）。
-      return { ...s, desc: `${s.desc}\n当前选择文件 ${sc.file}\n选定位置 ${sc.blocks}` }
+      return {
+        ...s,
+        desc:
+          `${s.desc}\n本次位置集合记作 $I$，共 ${sc.count} 块；` +
+          '分量 $v_i$ 只对 $i \\in I$ 有定义。' +
+          `\n当前选择文件 ${sc.file}\n选定位置 ${sc.blocks}`,
+      }
     }
     if (s.en === 'VERDICT') return { ...s, desc: passed ? PASS_LINE : FAIL_LINE }
     return s
@@ -644,8 +664,13 @@ async function runQuery() {
     // ★ 验证刚跑完时把过程弹出来：结论谁都会给，"凭什么说这个结论"才是这套系统的东西。
     lastVerify.value = data
     lastVerifyScope.value = advancedMode.value
-      ? { file: '（高级：按全局下标，不针对某一份文件）', blocks: `全局下标 ${span(indices)}` }
-      : { file: picked.file_key, blocks: `第 ${span(blocks)} 块` }
+      ? {
+          file: '（高级：按全局位置，不针对某一份文件）',
+          blocks: `全局位置 ${span(indices).replace(/,\s*/g, '、')}`,
+          count: indices.length,
+        }
+      // ★ 写法按用户口径：「1、3、5-6」——连续段用 X-Y，离散的用「、」分隔。
+      : { file: picked.file_key, blocks: span(blocks).replace(/,\s*/g, '、'), count: blocks.length }
     processOpen.value = true
     // 顺手把"现在多少块"同步给集合：它据此标出"已经被删掉的下标"
     basket.syncN(data?.delta_n)
