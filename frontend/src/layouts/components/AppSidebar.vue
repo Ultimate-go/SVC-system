@@ -182,6 +182,11 @@ function go(item) {
   border-right: 1px solid var(--line);
   overflow: hidden;
   transition: width 0.2s ease;
+  /* ★ 2026-10-19：背景图组件是 `position: fixed; z-index: 0`，而侧栏是静态定位 ——
+     默认绘在它**下面**，于是网格会盖到侧栏上（菜单那一条带网格）。
+     这里抬一层，左侧背景就是干净的实心面板。 */
+  position: relative;
+  z-index: 1;
 }
 .sidebar.open {
   width: var(--sidebar-w);

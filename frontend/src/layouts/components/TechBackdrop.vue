@@ -17,6 +17,7 @@
     radial-gradient(ellipse 70% 50% at 50% 0%, rgba(34, 211, 238, 0.05), transparent 70%),
     repeating-linear-gradient(0deg, var(--line) 0, var(--line) 1px, transparent 1px, transparent 20px),
     repeating-linear-gradient(90deg, var(--line) 0, var(--line) 1px, transparent 1px, transparent 20px);
-  opacity: 0.5;
+  /* ★ 2026-10-19：网格线稍微加深（原来 .5 太淡，屏幕上几乎看不见）。 */
+  opacity: 0.75;
 }
 </style>

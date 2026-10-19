@@ -22,7 +22,7 @@ import { useAuthStore } from '../../../stores/auth'
 import { useAggregateStore } from '../../../stores/aggregate'
 import { useCryptoStore } from '../../../stores/crypto'
 import { openBlocks } from '../../../utils/crypto/index'
-import { forgetAnchorsOf, getDeltaAnchorFor } from '../../../utils/anchor'
+import { forgetAnchorsOf, getDeltaAnchorFor, dropCrsAnchor } from '../../../utils/anchor'
 import { span, fmtBytes, hexPreview } from '../../../utils/format'
 import {
   estimateCipherPackBytes,
@@ -737,7 +737,7 @@ function resetUpload() {
   if (fileRef.value) fileRef.value.clearFiles()
 }
 
-async function tryDecrypt(file) {
+async function tryDecrypt(file, retried = false) {
   // ★★ 默认模型下**服务端不持有私钥**（`server_key=false`）——
   //    `/api/files/{id}/decrypt`（服务端解密）会回
   //    “服务端这次会话里没有你的私钥”，即**必然失败**。
@@ -804,13 +804,40 @@ async function tryDecrypt(file) {
     // 解出来了就把之前记下的失败状态抹掉（节点恢复后重试成功，这一行就该恢复正常）。
     clearBroken(file)
   } catch (e) {
+    // ★★ 2026-10-19：**群参数与本地记录不一致**时要给一个出口。
+    //   那是“这套部署的群参数被重建过”的信号（`--reset` / 换库），
+    //   不处理的话这个浏览器之后就再也解不开任何文件 —— 而用户只能清缓存。
+    //   确认后丢掉本地群参数锚，按当前部署重新见证一次。
+    if (e?.code === 'crs-mismatch') {
+      let ok = false
+      try {
+        await ElMessageBox.confirm(e.message, '群参数已变化', {
+          confirmButtonText: '重新见证',
+          cancelButtonText: '取消',
+          type: 'warning',
+        })
+        ok = true
+      } catch {
+        ok = false
+      }
+      if (ok && !retried) {
+        dropCrsAnchor()
+        try {
+          return await tryDecrypt(file, true)
+        } catch {
+          /* 下面统一提示 */
+        }
+      }
+      markBroken(file, '群参数与本地记录不一致')
+      return
+    }
     // ★ 拦截器已经弹过后端那句中文（节点联系不上 / 400 / 503…），这里**只补**
     //   它没覆盖的纯前端异常（块密钥解封失败、SM4 解不开…）。以前这里无条件弹
     //   `e.message`，于是同一个失败会多出一条 “Request failed with status code 400”。
     if (!e?.shown) ElMessage.error(e?.message || '本地解密失败')
-    // 解密失败（典型：某块所在节点被模拟损坏 / 掉线）= 这份文件此刻取不全，
-    // 那一行不能再显示“可解密 / 可验证”。
-    markBroken(file, '上一次试解密失败')
+    // ★ 失败**只做提示、不判死刑**（用户 2026-10-19）：节点会恢复、网络会好、
+    //   锚可以重新见证 —— 所以按钮照旧可点，重试成功就自动恢复正常。
+    markBroken(file, e?.message || '上一次解密失败')
   } finally {
     tip.close()
   }
@@ -1274,26 +1301,40 @@ onMounted(load)
           </el-table-column>
           <el-table-column label="验证" width="86" align="center">
             <template #default="{ row }">
-              <!-- ★ 失败过的行不再显示「可验证」：那会让人以为这份文件还好好的。
-                   原因挂在 title 上（节点联系不上 / 验证没通过）。 -->
-              <span v-if="isBroken(row)" class="broken" :title="brokenReason(row)">不可用</span>
+              <!-- ★ 失败过的行**不再被锁死**（用户 2026-10-19）：一次失败不能当成
+                   “以后都不行”—— 节点会恢复、本地锚可以重新见证、网络会好。
+                   这里只把「上一次失败」如实标在旁边（原因挂 title），按钮照旧可重试。 -->
               <!-- ★ 做成按钮而不是一段静态文字：点下去真的去取凭证、用公开的 δ
                    当场验一次，弹窗给结论 —— “可验证”这句话才有分量。 -->
               <el-button
-                v-else
                 link
                 type="primary"
                 size="small"
-                title="谁都能验证：当场取回凭证，用公开的 δ 做一次配对检验"
+                :title="isBroken(row)
+                  ? `上一次失败：${brokenReason(row)}（可以重试）`
+                  : '谁都能验证：当场取回凭证，用公开的 δ 做一次配对检验'"
                 @click="runVerify(row)"
               >可验证</el-button>
+              <span v-if="isBroken(row)" class="last-fail" :title="brokenReason(row)">上次失败</span>
             </template>
           </el-table-column>
           <el-table-column label="解密" width="90" align="center">
             <template #default="{ row }">
-              <!-- 同一个理由：取不全的文件不谈“可解密”。 -->
-              <span v-if="isBroken(row)" class="broken" :title="brokenReason(row)">不可用</span>
-              <LockTag v-else :can-decrypt="row.can_decrypt" />
+              <!-- 同上：解密按钮不再被失败状态遮蔽，只在旁边提示“上次失败”。 -->
+              <!-- ★ 2026-10-19：与「验证」并列 —— 能解密的行直接是可点的绿按钮，
+                   点下去就整份取回并在浏览器里解；不能解密的行仍只摆一个锁标签。 -->
+              <el-button
+                v-if="row.can_decrypt"
+                link
+                type="success"
+                size="small"
+                :title="isBroken(row)
+                  ? `上一次失败：${brokenReason(row)}（可以重试）`
+                  : '整份取回密文，在浏览器里解封块密钥并解密（同时做一次本地验证）'"
+                @click="tryDecrypt(row)"
+              >解密</el-button>
+              <LockTag v-else :can-decrypt="false" />
+              <span v-if="isBroken(row)" class="last-fail" :title="brokenReason(row)">上次失败</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="250" align="center">
@@ -1302,14 +1343,6 @@ onMounted(load)
               <el-button link type="primary" :loading="poolBusy" @click="addToPool(row)">
                 {{ inPool(row) ? '刷新' : '入池' }}
               </el-button>
-              <el-button
-                link
-                type="primary"
-                :title="`会把整份密文取回来（约 ${fmtBytes(
-                  estimateCipherPackBytes(row.total_bytes, row.block_count),
-                )}）再在浏览器里解 —— 与「详情」页那条路一样`"
-                @click="tryDecrypt(row)"
-              >试解密</el-button>
               <el-button
                 v-if="row.is_mine"
                 link
@@ -1508,10 +1541,13 @@ onMounted(load)
 }
 
 /* 失败状态标记：红色、带悬浮原因（同一行两个列共用）。 */
-.broken {
+/* 上一次失败：**只提示、不阻断**（按钮仍然可点，重试能自己恢复）。 */
+.broken,
+.last-fail {
   color: var(--danger);
-  font-size: 13px;
+  font-size: 12px;
   cursor: help;
+  margin-left: 6px;
 }
 
 /* ---------- 试解密结果消息框：让 \n 真的换行 ----------

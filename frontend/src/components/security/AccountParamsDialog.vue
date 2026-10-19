@@ -51,7 +51,7 @@ function goProfile() {
 <template>
   <el-dialog
     :model-value="modelValue"
-    title="本账号的加密参数"
+    title="本账号的系统参数"
     width="min(760px, 94vw)"
     class="acct-params-dialog"
     append-to-body
@@ -59,7 +59,7 @@ function goProfile() {
     @closed="emit('seen')"
   >
     <p class="lead text-2">
-      这是这个账号第一次进入系统。下面这些参数在注册时由服务端生成，此后不再改变；
+      这是本账号第一次进入系统。下面这些参数在注册时由服务端生成，此后不再改变；
       以后可以在「个人中心」随时查看。
     </p>
 
@@ -97,15 +97,14 @@ function goProfile() {
       </details>
     </div>
 
-    <h5 class="sec">这些参数怎么用</h5>
     <ul class="notes">
-      <li>上传文件时，每个分块的 SM4 密钥都用本账号的公钥封装；只有本账号的私钥解得开。</li>
+      <li>上传文件时，每个分块的 SM4 密钥都用本账号的公钥封装；只有本账号的私钥可以解密。</li>
       <li>浏览器的解锁与解密都用本账号的口令完成，服务端不持有私钥。</li>
       <li>可验证查询不受账号限制：任何登录用户都能验证任意文件的承诺。</li>
     </ul>
 
     <p class="warn-line">
-      口令用于解封私钥。口令遗失后，本账号已上传的文件无法解密，且没有第二把钥匙。
+      口令用于解封私钥。口令遗失后，本账号已上传的文件无法解密。
     </p>
 
     <template #footer>

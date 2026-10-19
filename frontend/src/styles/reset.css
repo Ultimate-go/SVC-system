@@ -21,6 +21,11 @@ body {
   background: var(--bg-page);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  /* ★ 2026-10-19：整体放大一档（用户：很多字太小）。
+     各组件里的字号是写死的 px，靠继承改不动，所以在根上用一个缩放系数
+     统一抬 —— 正文 14→15.1、13px 的说明文字→14、12px 的附注→13。
+     只作用在 body 上，弹框（append-to-body）也在 body 里，一起放大。 */
+  zoom: 1.08;
 }
 
 a {

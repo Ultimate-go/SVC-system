@@ -42,7 +42,7 @@ import { BLOCK_PREVIEW_LIMIT } from '../../../utils/constants.js'
 import { useCryptoStore } from '../../../stores/crypto'
 import { openBlocks } from '../../../utils/crypto/index.js'
 import { bytesToHex } from '../../../utils/crypto/bytes.js'
-import { getAnchor, setAnchor, sha256Hex, fmtWhen, getDeltaAnchorFor, setDeltaAnchor, dropDeltaAnchor, getCrsAnchor, setCrsAnchor, crsFingerprint, matchHistory } from '../../../utils/anchor'
+import { getAnchor, setAnchor, sha256Hex, fmtWhen, getDeltaAnchorFor, setDeltaAnchor, dropDeltaAnchor, getCrsAnchor, setCrsAnchor, dropCrsAnchor, crsFingerprint, matchHistory } from '../../../utils/anchor'
 import PageHeader from '../../../components/common/PageHeader.vue'
 import BlockPreviewBar from '../../../components/common/BlockPreviewBar.vue'
 import DetailToggle from '../../../components/common/DetailToggle.vue'
@@ -827,6 +827,30 @@ async function doDecrypt() {
       ElMessage.success(`浏览器本地解密 + 证据验证通过（${opened.ms} ms）`)
     }
   } catch (e) {
+    // ★★ 2026-10-19：群参数与本地记录不一致 —— 说明这套部署被重建过。
+    //   确认后丢掉本地群参数锚，按当前部署重新见证一次（否则这个浏览器永远解不开）。
+    if (e?.code === 'crs-mismatch') {
+      let ok = false
+      try {
+        await ElMessageBox.confirm(e.message, '群参数已变化', {
+          confirmButtonText: '重新见证',
+          cancelButtonText: '取消',
+          type: 'warning',
+        })
+        ok = true
+      } catch {
+        ok = false
+      }
+      if (ok) {
+        dropCrsAnchor()
+        try {
+          await doDecrypt()
+        } catch {
+          /* 下面统一提示 */
+        }
+      }
+      return
+    }
     // ★ 同上：取密文失败时后端那句中文已经由拦截器弹过了，这里只处理
     //   纯前端异常（块密钥解封失败、SM4 解不开）。
     if (!e?.shown) ElMessage.error(e?.message || '客户端解密失败')
@@ -1463,7 +1487,7 @@ onMounted(load)
             class="hx-block"
             :style="{ borderLeftColor: `hsl(${b.hue} 62% 55%)` }"
           >
-            <div class="hx-head" :style="{ color: `hsl(${b.hue} 70% 74%)` }">
+            <div class="hx-head" :style="{ color: `hsl(${b.hue} 58% 30%)` }">
               第 {{ b.idx + 1 }} 块
               <span class="hx-sep">·</span>
               {{ b.len }} 字节
@@ -1834,7 +1858,9 @@ onMounted(load)
 .hx-verdict-k { font-size: 12.5px; opacity: 0.75; margin-right: 2px; }
 .hx-sep { opacity: 0.35; }
 
-/* 左书签栏 + 右十六进制视图。书签颜色由 `--hx-hue` 控制，与块的左色条同源。 */
+/* 左书签栏 + 右十六进制视图。书签颜色由 `--hx-hue` 控制，与块的左色条同源。
+   ★ 2026-10-19：整块改成**浅色**（用户：论文里建议不要深色背景的截图），
+     颜色全部走主题变量，深色主题下自然变回深底。 */
 .hx-main {
   display: flex;
   gap: 10px;
@@ -1850,8 +1876,9 @@ onMounted(load)
   flex-direction: column;
   gap: 4px;
   padding: 6px;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #0b1018;
+  background: var(--bg-raised);
   scrollbar-width: thin;
 }
 .hx-tab {
@@ -1859,28 +1886,29 @@ onMounted(load)
   height: 30px;
   padding: 0;
   border: 0;
-  border-left: 3px solid hsl(var(--hx-hue) 62% 55%);
+  border-left: 3px solid hsl(var(--hx-hue) 62% 45%);
   border-radius: 4px;
-  background: hsl(var(--hx-hue) 45% 18% / 55%);
-  color: hsl(var(--hx-hue) 58% 70%);
+  background: hsl(var(--hx-hue) 55% 92%);
+  color: hsl(var(--hx-hue) 58% 32%);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s, transform 0.12s;
 }
 .hx-tab:hover {
-  background: hsl(var(--hx-hue) 55% 28% / 85%);
-  color: #eaf3ff;
+  background: hsl(var(--hx-hue) 62% 86%);
+  color: hsl(var(--hx-hue) 65% 24%);
   transform: translateX(2px);
 }
 .hx-tab:focus-visible {
-  outline: 2px solid hsl(var(--hx-hue) 70% 62%);
+  outline: 2px solid hsl(var(--hx-hue) 70% 50%);
   outline-offset: 1px;
 }
 .hx-tab.is-now {
-  background: hsl(var(--hx-hue) 62% 40%);
-  color: #fff;
+  background: hsl(var(--hx-hue) 62% 88%);
+  color: hsl(var(--hx-hue) 68% 24%);
   font-weight: 600;
+  box-shadow: inset 0 0 0 1px hsl(var(--hx-hue) 55% 60%);
 }
 
 .hx-wrap {
@@ -1889,17 +1917,18 @@ onMounted(load)
   max-height: 58vh;
   overflow: auto;
   padding: 10px 8px 4px 0;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #0b1018;
+  background: var(--bg-raised);
 }
 .hx-block {
   margin: 0 0 10px 8px;
   border-left: 3px solid #4a7fb5;
   border-radius: 6px;
-  background: #111a25;
+  background: var(--bg-panel);
   overflow: hidden;
 }
-.hx-block:nth-child(even) { background: #0f1721; }
+.hx-block:nth-child(even) { background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-page)); }
 .hx-head {
   display: flex;
   align-items: center;
@@ -1908,10 +1937,10 @@ onMounted(load)
   padding: 5px 10px;
   font-size: 12.5px;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.035);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--text-1) 4%, transparent);
+  border-bottom: 1px solid var(--line);
 }
-.hx-replay { margin-left: auto; font-size: 12px; font-weight: 500; color: #f0b429; }
+.hx-replay { margin-left: auto; font-size: 12px; font-weight: 500; color: #b45309; }
 .hx-body { padding: 6px 10px 8px; }
 .hx-row {
   display: grid;
@@ -1921,19 +1950,19 @@ onMounted(load)
   font-size: 12.5px;
   line-height: 1.75;
 }
-.hx-row:hover { background: rgba(120, 170, 230, 0.07); }
-.hx-off { color: #5d7b99; }
+.hx-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.hx-off { color: var(--text-3); }
 .hx-bytes { display: flex; flex-wrap: wrap; }
-.hx-c { width: 1.95em; text-align: center; color: #cfe3f7; }
-.hx-zero { color: #41556b; }
+.hx-c { width: 1.95em; text-align: center; color: var(--text-1); }
+.hx-zero { color: var(--text-3); opacity: .6; }
 .hx-ascii {
-  color: #7fa6c9;
+  color: var(--text-2);
   padding-left: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid var(--line);
   letter-spacing: 0.5px;
   word-break: break-all;
 }
-.hx-dotc { color: #3d5164; }
+.hx-dotc { color: var(--text-3); opacity: .6; }
 @media (max-width: 900px) {
   .hx-row { grid-template-columns: 74px minmax(0, 1fr); }
   .hx-ascii { display: none; }

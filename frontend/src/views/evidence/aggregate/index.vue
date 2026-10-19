@@ -1141,23 +1141,6 @@ async function confirmCrossDisagg() {
  *   混在一起时，"这张卡到底在说谁"要靠逐张读标题才看得出来；分开之后一眼分明。
  *   组内保持原有顺序（不重排，免得刚取的那张突然换位置）。
  */
-const orderedCards = computed(() => {
-  const single = []
-  const cross = []
-  for (const c of panel.cards) {
-    if (isCrossCard(c)) cross.push(c)
-    else single.push(c)
-  }
-  return [...single, ...cross]
-})
-
-/** 某一组的第一张卡的位置（用于在它前面插图组标题）。 */
-const groupBoundary = computed(() => {
-  const cards = orderedCards.value
-  const firstCross = cards.findIndex((c) => isCrossCard(c))
-  return { firstCross, total: cards.length }
-})
-
 /** 这张卡算「跨文件证据」吗（合并向量上取得的，或覆盖了多份文件）。 */
 function isCrossCard(c) {
   return cardFiles(c).length > 1 || !!c.mergedUniverse
@@ -1175,39 +1158,34 @@ function clearGroup(kind) {
 }
 
 /**
- * 第 ``i`` 张卡之前要不要插一个组标题。返回标题对象（不要插就返回 null）。
+ * 两组卡（各带一个边框）。
  *
- * ★ 只在「本组第一张」前面插 —— 用下标比较而不是给每张卡算一个「组 id」，
- *   是为了让模板里只有一层 ``v-for``（卡片那段结构很长，复制两份迟早会分叉）。
+ * ★ 2026-10-19（用户：区域不明显）：原来只靠一行组标题分隔，现在每组外面
+ *   套一个框。模板仍然只写一份卡片结构 —— 外层按组分、内层按卡分。
+ *   组内保持原有顺序（不重排，免得刚取的那张突然换位置）。
  */
-function groupHeadAt(i) {
-  const { firstCross } = groupBoundary.value
-  if (i === 0) {
-    return firstCross === 0
-      ? {
-          kind: 'cross',
-          title: '跨文件证据（合并向量）',
-          note:
-            '由多份文件的承诺抬进同一条合并向量后取得，其位置属于那条合并向量，' +
-            '不按单份文件编号；分解时不能按单文件块号切分。',
-        }
-      : {
-          kind: 'single',
-          title: '单文件证据',
-          note: '仅覆盖单文件；聚合使用同一向量内的 VC.Agg，仅处理凭证，不涉及密文。',
-        }
-  }
-  if (i === firstCross && firstCross > 0) {
-    return {
-      kind: 'cross',
-      title: '跨文件证据（合并向量）',
-      note:
-        '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
-        '不按单份文件编号 —— 分解时也不能按单文件块号去切。',
-    }
-  }
-  return null
+const GROUP_META = {
+  single: {
+    title: '单文件证据',
+    note: '仅覆盖单文件；聚合使用同一向量内的 VC.Agg，仅处理凭证，不涉及密文。',
+  },
+  cross: {
+    title: '跨文件证据（合并向量）',
+    note:
+      '由多份文件的承诺抬进一条合并向量后开的证据。它的位置属于那条合并向量，' +
+      '不按单份文件编号 —— 分解时也不能按单文件块号去切。',
+  },
 }
+
+const cardGroups = computed(() => {
+  const single = []
+  const cross = []
+  for (const c of panel.cards) (isCrossCard(c) ? cross : single).push(c)
+  const out = []
+  if (single.length) out.push({ kind: 'single', cards: single, ...GROUP_META.single })
+  if (cross.length) out.push({ kind: 'cross', cards: cross, ...GROUP_META.cross })
+  return out
+})
 
 /** 这张卡是不是只覆盖一份文件（分解的硬要求）。 */
 const disaggFiles = computed(() => cardFiles(disaggCard.value))
@@ -1553,23 +1531,26 @@ onMounted(() => {
            两者的性质不同：单文件卡上是那一份文件自己的向量承诺；跨文件卡是
            `_prove_merged` 把各文件承诺抬进一条**合并向量**后开的，它的下标
            属于那条合并向量，不是任何单份文件的下标。混在一起看不出“这张卡在说谁”。
-           只为让模板里只有一层 v-for（卡片那段结构很长，复制两份迟早分叉），
-           分组标题在渲染时按位置插（见 `groupHeadAt`）。 -->
-      <template v-for="(card, i) in orderedCards" :key="card.id">
-        <div v-if="groupHeadAt(i)" class="card-group-head">
+           ★ 2026-10-19：两组**各带一个边框**（用户：区域不明显）。卡片那段结构
+           很长，仍然只写一份 —— 外层按组分、内层按卡分，两层 v-for 套着同一段。 -->
+      <section v-for="g in cardGroups" :key="g.kind" class="card-group" :class="'is-' + g.kind">
+        <div class="card-group-head">
           <div class="group-head-row">
-            <h5 class="group-title">{{ groupHeadAt(i).title }}</h5>
+            <h5 class="group-title">{{ g.title }}</h5>
             <el-button
               link
               type="danger"
               size="small"
               class="group-clear"
-              @click="clearGroup(groupHeadAt(i).kind)"
+              @click="clearGroup(g.kind)"
             >清空</el-button>
           </div>
-          <p class="group-note">{{ groupHeadAt(i).note }}</p>
+          <p class="group-note">{{ g.note }}</p>
         </div>
+        <div class="card-group-body">
         <div
+          v-for="card in g.cards"
+          :key="card.id"
           class="card panel"
           :data-card-id="card.id"
           :class="{ stale: isStale(card), 'is-picked': panel.selectedIds.includes(card.id) }"
@@ -1629,7 +1610,8 @@ onMounted(() => {
           />
         </div>
         </div>
-      </template>
+        </div>
+      </section>
     </div>
     </div>
 
@@ -2029,7 +2011,7 @@ onMounted(() => {
    `text-overflow: ellipsis` **根本不生效** —— 子项的默认 `min-width` 是 `auto`，
    内容多宽它就要多宽，于是 ellipsis 永远轮不到上场。
    完整标题仍可在 hover 时看到（模板里挂了 `title`）。 */
-.cards > .card {
+.cards .card {
   min-width: 0;
 }
 .card :deep(.el-checkbox) {
@@ -2100,6 +2082,23 @@ onMounted(() => {
 .cards {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+/* ---------- 两组各一个框（★ 2026-10-19：用户说区域不明显） ---------- */
+.card-group {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px 10px;
+  /* 实心底：页面背后有一层网格，半透明的框会把网格透进来。 */
+  background: var(--bg-panel);
+}
+.card-group.is-cross {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+.card-group-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 /* ---------- 划选：拖动期间禁止拽出文本选区，并给选中卡片一点看得见的边 ---------- */
@@ -2137,7 +2136,7 @@ onMounted(() => {
   white-space: nowrap;
 }
 /* 卡片内边距收紧：三行文字加内边距即卡片高度，不再另设高度。 */
-.cards > .card {
+.cards .card {
   padding: 8px 10px;
 }
 .sec-title {
@@ -2277,7 +2276,7 @@ onMounted(() => {
   font-weight: 600;
 }
 /* ---------- 矩形卡：固定三行，展开区在第 3 行之下 ---------- */
-.cards > .card {
+.cards .card {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2356,13 +2355,9 @@ onMounted(() => {
   max-height: 100%;
   overflow: auto;
 }
-/* 分组标题吸顶：滚动时始终能看出当前落在哪一组 */
+/* 分组标题：两组已经在各自的框里，不再吸顶（吸顶会盖住框的圆角）。 */
 .cards .card-group-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--bg-page);
-  padding: 4px 0 6px;
+  padding: 2px 2px 8px;
 }
 @media (max-width: 1100px) {
   .agg-wrap { grid-template-columns: minmax(0, 1fr); }

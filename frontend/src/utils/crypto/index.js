@@ -139,15 +139,18 @@ export function openBlocks(pack, sk, opts = {}) {
       if (crsAnchor.prime_bits != null) primeBits = Number(crsAnchor.prime_bits)
     } else {
       crsVerdict = 'mismatch'
-      throw new Error(
+      // ★ 2026-10-19：给错误打上 `code` —— 调用方据此提供“确认这是新部署、
+      //   重新见证”的出口（否则这条错一出，这个浏览器就再也解不开任何文件）。
+      const err = new Error(
         '系统群参数与本地记录的不一致 —— 拒绝继续验证。\n' +
           `  本地锚： N ${crsFingerprint(crsAnchor.N)}，素数位长 ${crsAnchor.prime_bits}\n` +
           `  本次收到：N ${crsFingerprint(remoteN)}，素数位长 ${remoteBits}\n` +
           '  N 变了就是「换了考场」：拿新的 N 重新验证没有意义 —— 服务端可以自选一个\n' +
           '  已知阶的 N，反解出能让任何密文“通过”的证据。\n' +
-          '  若这确实是换了一次部署（群参数被重建），请到「个人中心」清掉本地群参数锚，\n' +
-          '  再重新见证一次。',
+          '  若这确实是换了一次部署（群参数被重建），点「重新见证」即可。',
       )
+      err.code = 'crs-mismatch'
+      throw err
     }
   }
 

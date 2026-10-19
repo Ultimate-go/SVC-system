@@ -1089,7 +1089,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         metavar="N",
-        help="素数表预热到 N 个（不填=按当前用量自动，0=跳过，8192=直接算满）",
+        help="素数表预热到 N 个（不填=按当前用量自动，0=跳过，10000=直接算满）",
     )
     ap.add_argument(
         "--strict",

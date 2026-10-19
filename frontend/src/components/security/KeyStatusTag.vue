@@ -40,9 +40,6 @@ const serverHoldsKey = computed(() => props.user?.session_key === true)
     <span v-if="serverHoldsKey" class="tag warn" title="旧模型（登录时传了 server_key=true）：私钥也在服务端内存里">
       服务端也持有私钥
     </span>
-    <span v-else class="tag muted" title="默认模型：后端不解封、不保存私钥；解密与验证都在浏览器里">
-      服务端无私钥
-    </span>
   </div>
 </template>
 
