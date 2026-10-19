@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"逐块各查一次：{many_ms:8.1f} ms —— 比合成一份慢 {many_ms / one_ms:.1f} 倍")
     print("\n「验 m 份已有证据」这个场景")
     print(f"  逐份 svc.verify      ：{verify_sep_ms:8.1f} ms（{len(cases)} 份）")
-    print(f"  批量（两条信道都合）：{batch_ms:8.1f} ms（同一份文件内的 {len(cases0)} 份）")
+    print(f"  批量：{batch_ms:8.1f} ms（同一份文件内的 {len(cases0)} 份）")
     ratio = batch_ms / verify_sep_ms if verify_sep_ms else float("inf")
     print(f"  ⇒ 批量{'快' if ratio < 1 else '慢'} {abs(1 / ratio if ratio < 1 else ratio):.2f} 倍")
     print("=" * 72)

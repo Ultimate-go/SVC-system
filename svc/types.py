@@ -292,7 +292,7 @@ class BatchReport:
     ) -> "BatchReport":
         return BatchReport(
             VerifyCode.OK,
-            f"{n_cases} 份证据一次验通过（两条信道都合）",
+            f"{n_cases} 份证据一次验通过",
             n_cases,
             (),
             tuple(int(r) for r in rho),
