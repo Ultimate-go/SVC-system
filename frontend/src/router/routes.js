@@ -146,7 +146,7 @@ export const routes = [
         path: 'init',
         name: 'init',
         component: () => import('../views/admin/init/index.vue'),
-        meta: { requiresAdmin: true, title: '系统初始化' },
+        meta: { requiresAdmin: true, title: '初始化与系统自检' },
       },
     ],
   },

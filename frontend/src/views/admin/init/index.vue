@@ -1,16 +1,29 @@
 <script setup>
 /**
- * 系统初始化 —— 管理员工作台下的第一页。
+ * 初始化与系统自检 —— 管理员工作台下的第一页。
+ *
+ * ★ 2026-10-19（用户要求）：把「系统自检」整组搬进来，页面改名为
+ *   **初始化与系统自检**，并改成**一次点击、两件事一起做**：
+ *
+ *   · 页面上先只摆一个按钮「初始化与系统自检」（+ 一段说明）；
+ *   · 点下去 → 初始化流水线（六张参数卡依次点亮）与十项一致性自检
+ *     **并行**跑，跑完才把「全局运行态势 / 规模一览 / 系统参数 / 逐文件摘要 /
+ *     密钥模型 / 部署模式」这些区块展开（小设计：没点之前不铺一屏参数，
+ *     先把“点一下会发生什么”说清楚）；
+ *   · 同一次登录只点一次：跑完按钮置为已完成，重进页面直接是展开态，
+ *     那一组自检从本机记录还原（见 SelfCheck.vue）。
  *
  * 内容分四部分，对应「先把系统交代清楚，再开始干活」这件事：
  *
- * 0. **初始化流水线** —— 这一页的**第一件事**（登录管理员直接进这一页）：
+ * 0. **初始化与系统自检** —— 这一页的**第一件事**（登录管理员直接进这一页）：
  *    先选参数来源（默认 / 自定义），再让数据流把六张卡依次点亮 ——
  *    隐藏阶群 → 位置素数 → 分量与承诺 → 存储节点 → 端口与进程 → 落库与自检。
  *    自定义那个弹框里放着**能由用户决定**的两张卡（台数 / 端口，原存储节点页上那两张），
  *    外加一份「部署时定死、本页不可改」的清单。
- * 1. **算法与目的** —— 这套系统做什么、算法的骨架是什么、要达到什么目的。
- *    方案原样的说明在论文 §5.2 与 docs/方案设计.md，这里只留一屏能读完的骨架。
+ * 1. **全局运行态势** —— 从文件进入系统到形成可验证证据的六段处理链路，
+ *    点开任一阶段可看该段的密码学原理与关键式子。
+ *    ★ 2026-10-19：整块由「总览」页**迁移**至此（连卡片与点开的知识页一起），
+ *      原先这里的「算法与目的」三栏讲的是同一件事，已删。
  * 2. **初始化现状** —— 规模一览（文件 / 块 / 在线节点 / 用户 / 副本 / 副本缺口）、
  *    系统参数、一致性自检、逐文件摘要。数值全部来自 ``GET /api/system/status``。
  * 3. **部署模式与密钥模型** —— 两种部署形态的区别，以及两层密钥封装落在哪里。
@@ -40,11 +53,11 @@ import { systemApi } from '../../../api/system'
 import { deployApi } from '../../../api/deploy'
 import { initFlowPlayed, markInitFlowPlayed } from '../../../utils/session'
 import { hexFp } from '../../../utils/format'
-import { rich } from '../../../utils/tex'
 import StatCard from '../../../components/common/StatCard.vue'
 import RingGauge from '../../../components/chart/RingGauge.vue'
 import SelfCheck from '../../../components/security/SelfCheck.vue'
 import InitFlow from '../../../components/chart/InitFlow.vue'
+import ProcessingFlow from '../../../components/chart/ProcessingFlow.vue'
 import Icon from '../../../components/icons/Icon.vue'
 
 const loading = ref(true)
@@ -125,15 +138,6 @@ const TRANSPORT_DESC = {
 const modeDesc = computed(() => MODE_DESC[status.value?.mode] || '当前部署模式未收录说明，请结合部署文档确认该取值。')
 const transportDesc = computed(() => TRANSPORT_DESC[status.value?.transport] || '当前传输层未收录说明；它由后端按部署配置自动选择。')
 
-/** 算法骨架里的几条式子，走与原理卡片同一套 LaTeX 渲染。 */
-const FORMULAS = [
-  '$N = p \\cdot q$，$p$、$q$ 生成后立即丢弃，因此没有人知道群的阶',
-  '位置 $i$ 配素数 $e_i$，记 $E = \\prod_{i} e_i$，见证 $S_i = g^{E / e_i}$',
-  '承诺 $C = \\prod_{i} S_i^{v_i} \\bmod N$',
-  '打开 $I$ 的证据是两个群元素 $\\pi_I = (S_I,\\ \\Lambda_I)$，其中 $S_I = g^{E / E(I)}$',
-  '验证 $S_I^{E(I)} = U$ 与 $C = \\Lambda_I^{E(I)} \\cdot \\prod_{i \\in I} S_i^{v_i} \\bmod N$',
-]
-
 async function load() {
   loading.value = true
   error.value = ''
@@ -151,7 +155,7 @@ async function load() {
 /* ---------------------------------------------------------------------------
    ⓪ 初始化流水线
    ---------------------------------------------------------------------------
-   ★ 这一页是演示的**第一站**（登录管理员直接进这里）：一个「系统初始化」按钮，
+   ★ 这一页是演示的**第一站**（登录管理员直接进这里）：一个「初始化与系统自检」按钮，
      点下去把"这套系统的参数是怎么定下来的"演一遍。
 
    ★ **每次登录只演一遍**：告一段落之后按钮就变成「初始化已完成」且不可点
@@ -170,7 +174,11 @@ const deploy = ref(null)
 const ports = ref(null)
 /** 正在放（防连点）。 */
 const initRunning = ref(false)
-/** 已演完（或本次登录早先已演过）——按钮置为「初始化已完成」且不可点。 */
+/** 已点过（或本次登录早先点过）—— 点过之后才展开页面其余区块。 */
+const started = ref(false)
+/** 自检子组件（十项清单）：由这里的按钮触发，它自己不放按钮。 */
+const selfCheckRef = ref(null)
+/** 已跑完（或本次登录早先已跑过）——按钮置为已完成且不可点。 */
 const initDone = ref(false)
 
 /** 台数与端口（仅管理员接口；本页本身就是 requiresAdmin，失败就当没有）。 */
@@ -206,18 +214,18 @@ const flowSteps = computed(() => {
       rows: rows([
         { k: '模数 |N|', v: `${c.N_bits ?? '—'} 位（演示参数，不提供实际安全强度）` },
         { k: '生成方式', v: '随机取 p、q，算出 N = p·q 后立即销毁 p、q' },
-        { k: '公开量', v: 'N 与 g —— 群阶 φ(N) 自始至终无人可知' },
+        { k: '公开量', v: 'N 、 g ' },
       ]),
-      note: '一切都建立在这上面：群阶未知，「求 e 次根」才是难的，而指数取整数的那些运算又能公开做。',
+      note: '群阶未知，指数运算公开可做，核心难度在求 e 次根。',
     },
     {
       key: 'primes', no: 2, title: '位置素数', en: 'PRIMEGEN',
       rows: rows([
-        { k: '素数位长', v: `${c.prime_bits ?? '—'} 位（方案参数 ℓ+1）` },
-        { k: '派生方式', v: '由「所有者 + 文件标识 + 块号」哈希到素数，每块一个身份素数' },
+        { k: '素数位长', v: `${c.prime_bits ?? '—'} 位（分量长度ℓ + 1）` },
+        { k: '派生方式', v: '由「所有者 + 文件标识 + 块号」哈希到素数，每块独立身份素数' },
         // ★ 不能只写「= 分量位长 + 1」：那只会对**老坐标**（全局素数表）成立。
         //   新坐标（默认）下素数由块身份哈希派生，实际 128 位（见 svc/mathbase.py::hash_prime）。
-        { k: '素数表容量 n_max', v: `${c.n_max ?? '—'}（仅老坐标文件的地址空间）` },
+        { k: '素数表容量 n_max', v: `${c.n_max ?? '—'}` },
       ]),
       note: '位置由块的身份派生，因此位置不需要全局分配，删除留下的空洞也不必回收。',
     },
@@ -226,7 +234,7 @@ const flowSteps = computed(() => {
       rows: rows([
         { k: '分量 v_i', v: 'SM3(该块密文)' },
         { k: '分量位长 ℓ', v: `${c.l ?? '—'} 位` },
-        { k: '承诺 δ', v: '((U, C), n) —— 每份文件各一条' },
+        { k: '承诺 δ', v: '((U, C), n)' },
       ]),
       note: '证据恒为两个群元素（≤ 256 字节），与文件大小无关。',
     },
@@ -244,48 +252,48 @@ const flowSteps = computed(() => {
       ]),
       // ★ 不写「每台一个独立进程」：那只对跨进程部署成立；单进程演示模式下
       //   各节点同处一个 Python 进程、存储为进程内直连（见 deploy 的 mode / transport）。
-      note: '每台维护自己那份向量视图；跨进程部署时各为一个独立进程、各自一份 SQLite。',
+      note: '每台存储节点维护自己的向量视图；跨进程部署时各为一个独立进程。',
     },
     {
       key: 'ports', no: 5, title: '端口与进程', en: 'PORTS',
       rows: rows([
         { k: '后端 / 前端', v: `${ports.value?.backend ?? '—'} / ${ports.value?.frontend ?? '—'}` },
         { k: '节点端口', v: portList.value },
-        {
-          k: '生效方式',
-          v: ports.value?.restart_required ? '已保存新端口 —— 重启后生效' : '当前进程已在用这套端口',
-        },
       ]),
-      note: '改台数与端口都写进 nodes/deploy.json，重启才生效（弹框里可一键重启）。',
+      note: '改台数与端口已写入 nodes/deploy.json，重启后生效（弹框里可一键重启）。',
     },
     {
       key: 'persist', no: 6, title: '落库与自检', en: 'PERSIST',
       rows: rows([
         { k: '落库', v: 'CRS、位置账目与账号写入 vds.db' },
-        { k: '账号', v: `${keywrap.value.users ?? 0} 个（私钥以口令封装，服务器不持明文）` },
+        { k: '账号', v: `${keywrap.value.users ?? 0} 个（私钥以口令封装，服务器不持有明文）` },
         { k: '自检', v: '十项一致性核对 —— 见下方「一致性自检」' },
       ]),
-      note: '初始化完成的判据不是"文件传上去了"，而是"登记表 / 节点视图 / 增量摘要三者一致"。',
+      note: '登记表 / 节点视图 / 增量摘要三者一致，初始化完成',
     },
   ]
 })
 
 /**
- * 点「系统初始化」：放一遍。
- * 演完盖戳（utils/session.js）+ 置为已完成 —— 同一次登录里按钮不再可点。
+ * 点「初始化与系统自检」：两件事同时跑。
+ * 跑完盖戳（utils/session.js）+ 置为已完成 —— 同一次登录里按钮不再可点。
  */
 async function startInit() {
   if (initDone.value || initRunning.value) return
   initRunning.value = true
+  // ★ 先展开：流水线六张卡与十项清单得先挂上去，动画才播得起来
+  started.value = true
   await nextTick()
-  await flowRef.value?.play()
+  // ★ 两条动效并行：一条讲“参数怎么定下来的”，一条核对“现在账实是否一致”。
+  await Promise.all([flowRef.value?.play(), selfCheckRef.value?.run()])
   initRunning.value = false
   initDone.value = true
   markInitFlowPlayed()
 }
 
-/** 本次登录早先已经演过 ⇒ 直接呈现完成态（卡片全部长开），不再播。 */
+/** 本次登录早先已经跑过 ⇒ 直接呈现完成态（卡片全部长开、自检结果从本机还原）。 */
 async function showFinished() {
+  started.value = true
   initDone.value = true
   await nextTick()
   flowRef.value?.finish()
@@ -306,23 +314,13 @@ onMounted(async () => {
   </div>
   <div v-else-if="status" class="init-page">
 
-    <!-- ⓪ 初始化流水线：这一页的第一件事 —— 参数怎么定下来 -->
+    <!-- ⓪ 初始化与系统自检：这一页的第一件事 —— 点一次，两件事一起跑 -->
     <div class="section-heading">
-      <div><span class="section-kicker mono">INIT PIPELINE</span><h2>初始化流水线</h2></div>
-      <span class="section-note mono">PARAMETERS</span>
+      <div><span class="section-kicker mono">INIT &amp; SELF-CHECK</span><h2>初始化与系统自检</h2></div>
+      <span class="section-note mono">ONE CLICK</span>
     </div>
     <section class="panel flow-panel">
       <div class="flow-actions">
-        <div class="flow-lead">
-          <p>
-            下面这条流水线把「这套系统的参数是怎么定下来的」演一遍：
-            隐藏阶群 → 位置素数 → 分量与承诺 → 存储节点 → 端口与进程 → 落库与自检。
-          </p>
-          <p class="flow-sub">
-            播放前每张卡只露标题，数据流扫过它，参数才长出来。
-            每次登录只演一遍 —— 演完这个按钮就置为「初始化已完成」。
-          </p>
-        </div>
         <div class="flow-buttons">
           <el-button
             type="primary"
@@ -331,76 +329,40 @@ onMounted(async () => {
             @click="startInit"
           >
             <Icon v-if="!initRunning" :name="initDone ? 'check' : 'key'" :size="13" style="margin-right: 6px" />
-            {{ initDone ? '初始化已完成' : '系统初始化' }}
+            {{ initDone ? '初始化与系统自检已完成' : '初始化与系统自检' }}
           </el-button>
         </div>
       </div>
 
-      <InitFlow ref="flowRef" :steps="flowSteps" />
+      <InitFlow v-if="started" ref="flowRef" :steps="flowSteps" />
+
+      <!-- 十项一致性自检：上面那个按钮点一次会连带跑一遍；
+           跑完之后**自检自己还有「再次自检」**（初始化只能一次，自检可以无限次）。
+           :restore 只在“本次登录早先已跑过”时为真 —— 点按钮那一瞬不要还原旧结论。 -->
+      <div v-if="started" class="selfcheck-block">
+        <SelfCheck ref="selfCheckRef" :restore="initDone" />
+      </div>
 
       <p v-if="initDone" class="flow-done">
         <span class="mono flow-done-tag">READY</span>
-        初始化已完成 —— 参数已依次写入并落库。逐项现状见下方「规模一览 / 系统参数」，
-        一致性由「一致性自检」核对。
-        <span class="flow-where">
-          要改台数或端口：<router-link to="/devices">存储节点</router-link>（保存后重启生效）；
-          隐藏阶群位数 / 分量位长 / 素数表容量 / 分块大小区间由部署配置决定， 界面上不可改。
-        </span>
+        初始化已完成、十项自检完成，参数已依次写入并落库，逐项现状见下方区块。
       </p>
     </section>
 
-    <!-- ① 算法与目的 -->
+    <!-- ① 全局运行态势：处理链路（★★ 2026-10-19 由总览页**整体迁入**）
+         ★ 原「算法与目的」一整块（这套系统做什么 / 算法的骨架 / 目的）已删 ——
+           它讲的正是这条六段链路与它的原理，与卡片里的知识页内容重复；
+           现在原理改为**点开卡片**看（见 components/chart/ProcessingFlow.vue）。 -->
+    <template v-if="started">
     <div class="section-heading">
-      <div><span class="section-kicker mono">ALGORITHM &amp; PURPOSE</span><h2>算法与目的</h2></div>
-      <span class="section-note mono">OVERVIEW</span>
+      <div><span class="section-kicker mono">SYSTEM OVERVIEW</span><h2>全局运行态势</h2></div>
+      <span class="section-note mono">IAVC-VDSS</span>
     </div>
-    <section class="panel intro-panel">
-      <div class="intro-grid">
-        <div class="intro-col">
-          <h3>这套系统做什么</h3>
-          <p>
-            文件被切成定长分块、逐块用 SM4-CTR 加密，密文分散存放在多台互不信任的存储节点上。
-            每份文件对应一条独立向量，向量上的每个位置绑定一个互不相同的素数，
-            该文件全部位置的公开分量合成一个常数大小的承诺 δ。
-            δ 是<b>公开量</b>：它由服务端保存、可被任何一方读到，任何人都能据此验证任意子集的
-            检索结果 —— 不需要信任任何一台节点，也不需要任何密钥。
-          </p>
-          <p>
-            承诺建立在隐藏阶群上，群阶未知 —— 正因为未知，「求 e 次根」才是困难的，
-            而「指数取整数」的那些计算又都能公开做出来。这是整套方案能公开计算见证、
-            又能公开验证的原因。
-          </p>
-        </div>
-        <div class="intro-col">
-          <h3>算法的骨架</h3>
-          <ul class="formula-list">
-            <li v-for="(f, i) in FORMULAS" :key="i"><span v-html="rich(f)" /></li>
-          </ul>
-          <p class="intro-note">
-            证据大小与文件大小无关，也与这一次打开多少块无关；两份证据可以合并成一份，
-            也可以从一份里拆出子集，因此一次取证可以覆盖多个块。
-          </p>
-        </div>
-        <div class="intro-col">
-          <h3>目的</h3>
-          <ul class="goal-list">
-            <li>
-              <b>验证不受限</b>
-              承诺 δ 是公开量，任何登录用户都能验证任意文件的完整性 —— 包括别人的文件。
-            </li>
-            <li>
-              <b>解密受限</b>
-              每个分块的 SM4 密钥都用文件所有者的 SM2 公钥封装，只有那把私钥解得开。
-              这是一条密码学上的门，不是接口里的一个判断。
-            </li>
-            <li>
-              <b>证据可增量聚合</b>
-              多份证据能合并为一份，合并后的证据仍然可以继续参与合并；
-              也能从一份里拆出子集，不必重新向节点取证。
-            </li>
-          </ul>
-        </div>
-      </div>
+    <section class="panel hero-panel">
+      <p class="hero-lead">
+        从文件进入系统到形成可验证证据的完整数据链路。点开任一阶段，可看该段的密码学原理与关键式子。
+      </p>
+      <ProcessingFlow />
     </section>
 
     <!-- ② 初始化现状：规模 + 系统参数 + 自检入口收在一屏里。
@@ -441,8 +403,7 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 一致性自检块与系统参数网格的先后顺序：先“系统长什么样”，再“它现在对不对”。
-         具体位置见下方（参数网格之后）；这里先声明参数区块标题。 -->
+    <!-- 系统参数：系统“长什么样”（一致性在顶部那十项里看） -->
     <div class="section-heading section-heading-spaced">
       <div><span class="section-kicker mono">PUBLIC PARAMETERS</span><h2>系统参数</h2></div>
     </div>
@@ -473,15 +434,7 @@ onMounted(async () => {
       />
     </div>
 
-    <!-- 一致性自检：页面上就这一小块，十项扫描在弹框里跑（见 SelfCheck.vue）。
-         ★ 刻意窄一些（max-width），不占一整行 —— 它只是个“顺手跑一下”的入口。 -->
-    <section class="panel selfcheck-panel">
-      <div class="selfcheck-head">
-        <span class="section-kicker mono">CONSISTENCY CHECK</span>
-        <span class="selfcheck-title">一致性自检</span>
-      </div>
-      <SelfCheck />
-    </section>
+    <!-- 一致性自检已并入顶部那个按钮（见 ⓪）：这里不再单留一小块。 -->
 
     <div class="compact-sections">
       <section class="compact-section">
@@ -551,6 +504,7 @@ onMounted(async () => {
         </div>
       </section>
     </div>
+    </template>
   </div>
 </template>
 
@@ -564,25 +518,14 @@ onMounted(async () => {
 .section-kicker { color: var(--accent); font-size: 13px; letter-spacing: .13em; }
 .section-note { color: var(--text-3); font-size: 13px; letter-spacing: .08em; }
 
-/* ---- 算法与目的 ---- */
-.intro-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) minmax(0, 1fr); gap: 22px; }
-.intro-col h3 { color: var(--text-1); font-size: 15px; font-weight: 600; margin: 0 0 10px; }
-.intro-col p { color: var(--text-2); font-size: 14px; line-height: 1.85; margin: 0 0 10px; }
-.intro-col p:last-child { margin-bottom: 0; }
-.formula-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
-.formula-list li {
-  padding: 7px 10px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--text-2);
-  font-size: 13px;
-  line-height: 1.7;
+/* ---- 全局运行态势（原总览页的 hero 面板，2026-10-19 整体迁入） ---- */
+.hero-panel {
+  position: relative;
+  overflow-x: hidden;
+  padding: 16px 18px 18px;
+  background: radial-gradient(circle at 88% 8%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 34%), var(--bg-panel);
 }
-.intro-note { color: var(--text-3); font-size: 13px; line-height: 1.75; margin: 12px 0 0; }
-.goal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.goal-list li { color: var(--text-2); font-size: 14px; line-height: 1.8; }
-.goal-list b { display: block; color: var(--text-1); font-weight: 600; margin-bottom: 2px; }
+.hero-lead { color: var(--text-2); font-size: 13px; line-height: 1.75; margin: 0 0 12px; }
 
 /* ---- 规模一览 ---- */
 .scale-panel { padding: 18px; }
@@ -665,9 +608,6 @@ onMounted(async () => {
 .keywrap-item .k { color: var(--text-3); white-space: nowrap; }
 .keywrap-item .v { color: var(--text-1); }
 
-@media (max-width: 1100px) {
-  .intro-grid { grid-template-columns: 1fr; gap: 18px; }
-}
 @media (max-width: 900px) {
   .compact-sections { grid-template-columns: 1fr; }
   .compact-section > .panel, .commitment-panel, .health-panel, .key-panel { height: auto; min-height: 0; }
@@ -686,13 +626,8 @@ onMounted(async () => {
   .section-heading { align-items: flex-start; }
   .section-note { padding-top: 4px; }
 }
-/* 一致性自检：页面上就这一小块（窄、矮），十项扫描在弹框里（SelfCheck.vue）。 */
-.selfcheck-panel { max-width: 620px; margin-top: 18px; padding: 13px 16px; }
-.selfcheck-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
-.selfcheck-title { color: var(--text-1); font-size: 15px; }
-@media (max-width: 560px) {
-  .selfcheck-panel { max-width: none; }
-}
+/* 十项一致性自检：接在流水线下面，用一条虚线跟“参数怎么定下来的”分开。 */
+.selfcheck-block { margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--line); }
 
 /* ---- ⓪ 初始化流水线：选参数的两个按钮 + 那一句结论 ---- */
 .flow-panel { padding-top: 16px; }
@@ -703,10 +638,6 @@ onMounted(async () => {
   gap: 20px;
   margin-bottom: 14px;
 }
-.flow-lead { max-width: 760px; }
-.flow-lead p { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.8; }
-.flow-lead b { color: var(--text-1); }
-.flow-sub { margin-top: 5px !important; color: var(--text-3) !important; }
 .flow-buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .flow-done {
   margin: 12px 0 2px;
@@ -726,7 +657,6 @@ onMounted(async () => {
   font-size: 11px;
   letter-spacing: .12em;
 }
-.flow-where { display: block; margin-top: 4px; color: var(--text-3); }
 
 @media (max-width: 700px) {
   .flow-actions { flex-direction: column; gap: 12px; }

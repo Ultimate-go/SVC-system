@@ -20,6 +20,10 @@
  *   （「01 隐藏阶群 GROUP」），数据流扫过它之后卡片**长开**、露出里面的
  *   参数键值对。实现用 `grid-template-rows: 0fr → 1fr`，高度是真动画，
  *   不是 `v-show` 那种硬切的显示/隐藏。
+ *
+ * ★ 2026-10-19（用户：太长）：播完之后**整条流水线收起成一行**——
+ *   只留「01 隐藏阶群 ✓ › 02 位置素数 ✓ › …」，参数明细与注解全部不再铺开；
+ *   要看具体参数值走下方「系统参数」那一组卡片。播放过程中仍逐张展开。
  */
 import { ref, computed } from 'vue'
 
@@ -86,6 +90,19 @@ defineExpose({ play, reset, finish })
       <span v-else-if="done" class="if-meta-done">READY</span>
     </div>
 
+    <!-- 播完之后：整条流水线收起成一行（只留序号 + 步骤名 + 勾） -->
+    <div v-if="done && !playing" class="if-brief">
+      <template v-for="(s, i) in steps" :key="s.key">
+        <span class="if-brief-item">
+          <span class="mono if-brief-no">{{ String(s.no).padStart(2, '0') }}</span>
+          <span class="if-brief-title">{{ s.title }}</span>
+          <span class="if-brief-tick">✓</span>
+        </span>
+        <span v-if="i < steps.length - 1" class="if-brief-sep" aria-hidden="true">›</span>
+      </template>
+    </div>
+
+    <div v-else class="if-stack">
     <div v-for="(s, i) in steps" :key="s.key" class="if-slot">
       <div
         class="if-card"
@@ -108,7 +125,6 @@ defineExpose({ play, reset, finish })
             <ul class="if-rows">
               <li v-for="(r, j) in s.rows" :key="j" class="if-row">
                 <span class="if-k">{{ r.k }}</span>
-                <span class="if-eq mono">=</span>
                 <span class="if-v mono">{{ r.v }}</span>
               </li>
             </ul>
@@ -129,6 +145,7 @@ defineExpose({ play, reset, finish })
         <span class="if-line" />
         <span v-if="playing && lit >= i + 1 && lit <= i + 2" class="if-pack" />
       </div>
+    </div>
     </div>
   </div>
 </template>
@@ -158,6 +175,22 @@ defineExpose({ play, reset, finish })
 .if-meta-done { color: var(--ok); }
 
 .if-slot { position: relative; }
+
+/* 播完后的一行摘要：只有序号、步骤名与勾 —— 参数明细交给下方「系统参数」。 */
+.if-brief { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 2px 0 10px; animation: if-brief-in .26s ease; }
+.if-brief-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-panel);
+}
+.if-brief-no { font-size: 11px; color: var(--accent); letter-spacing: .1em; }
+.if-brief-title { font-size: 13px; color: var(--text-1); }
+.if-brief-tick { font-size: 11px; color: var(--ok); }
+.if-brief-sep { color: var(--text-3); font-size: 12px; }
 
 .if-card {
   position: relative;
@@ -198,9 +231,8 @@ defineExpose({ play, reset, finish })
 .if-now { color: var(--accent); }
 
 .if-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-.if-row { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.if-row { display: flex; align-items: baseline; gap: 14px; font-size: 13px; }
 .if-k { color: var(--text-2); flex: none; min-width: 132px; }
-.if-eq { color: var(--text-3); }
 .if-v { color: var(--text-1); word-break: break-all; }
 .if-note { margin: 7px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
 
@@ -262,6 +294,7 @@ defineExpose({ play, reset, finish })
 @keyframes if-scan { 0% { transform: translateX(-110%); } 100% { transform: translateX(340%); } }
 @keyframes if-drop { 0% { transform: translateY(-2px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(24px); opacity: 0; } }
 @keyframes if-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes if-brief-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 560px) {
   .if-k { min-width: 96px; }

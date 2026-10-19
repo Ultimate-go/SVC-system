@@ -2,24 +2,28 @@
 /**
  * 系统自检 —— 逐项核对集群与向量一致性（后端 ``POST /api/admin/check``，只读）。
  *
- * ★ 为什么是个组件（2026-10-16）：这一段原本是「总览」页上的一整节，
- *   标题 + 面板 + 十项清单占满一整行。现在搬到 **管理员工作台 → 系统初始化**，
- *   并且**收小**：
+ * ★ 2026-10-19：从「一小块 + 弹框」改回**页面上的一组清单**，挂进
+ *   **管理员工作台 → 初始化与系统自检**：那一页的按钮点下去，初始化流水线与
+ *   这十项核对**一起**跑，跑完页面才把系统参数等区块展开。
  *
- *   · 页面上只留**一小块**（一个按钮 + 一行"本机上次自检"），不占一整行；
- *   · 真正那十项扫描放到一个**弹框**里跑（进度条 + 逐项动效 + 结论 + 耗时）；
- *   · 自检完成后，页面上那一小块自己就变成了结论（✓ 全部通过 / ✕ 未通过）。
+ *   · 组件自己**不再有按钮**：由父页面（init/index.vue）拿 ref 调 ``run()``；
+ *   · 十项逐项点亮 + 进度条 + 结论 + 耗时，全部直接摆在页面上；
+ *   · 上一次的结论与逐项状态存在本机（``vds_last_check_v1``），重进页面时
+ *     直接还原 —— 不必为了看一眼结论再扫一遍。
  *
  * 后端是一次调用返回全部结论，逐项动画是**揭示过程**而非真实分次请求 ——
- * 所以标题里那个耗时取的是**真实的一次请求耗时**，不是动画时长。
+ * 所以那个耗时取的是**真实的一次请求耗时**，不是动画时长。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { systemApi } from '../../api/system'
 import StageTimeline from './StageTimeline.vue'
-import Icon from '../icons/Icon.vue'
 
-/** 逐项清单：与后端 ``store.check()`` 的检查项一一对应。 */
-const CHECK_ITEMS = [
+const props = defineProps({
+  /** 挂载时是否还原本机上一次的结果：重进页面要，点按钮开跑时不要（否则会闪一下旧结论）。 */
+  restore: { type: Boolean, default: true },
+})
+
+/** 逐项清单：与后端 ``store.check()`` 的检查项一一对应。 */const CHECK_ITEMS = [
   { key: 'registry', name: '位置段登记表', desc: '登记表自身一致' },
   { key: 'sync', name: '登记表与向量', desc: '登记表与向量同步' },
   { key: 'reach', name: '节点可达性', desc: '所有节点可联系' },
@@ -76,7 +80,6 @@ function saveLastCheck(record) {
   }
 }
 
-const dialogOpen = ref(false)
 const checking = ref(false)
 const checkResult = ref(null)
 const checkSteps = ref([])
@@ -93,13 +96,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function itemName(key) {
-  return CHECK_ITEMS.find((x) => x.key === key)?.name || key
-}
-
 function locateFailKey(message) {
   for (const it of FAIL_LOCATE) if (it.re.test(message)) return it.key
   return null
+}
+
+function itemName(key) {
+  return CHECK_ITEMS.find((x) => x.key === key)?.name || key
 }
 
 /** 「本机上次自检」的相对时间（不足一分钟按“刚刚”）。 */
@@ -111,18 +114,7 @@ function fmtAgo(ts) {
   return `${Math.round(sec / 86400)} 天前`
 }
 
-/** 页面上那一小块里的结论文字。 */
-const summaryText = computed(() => {
-  const l = lastCheck.value
-  if (!l) return ''
-  return l.ok
-    ? `全部通过 ${l.passed}/${l.total}`
-    : l.failKey
-      ? `未通过：${itemName(l.failKey)}`
-      : '未通过（未能定位到具体检查项）'
-})
-
-// ★ 相对时间要跟着走：页面上那一小块显示的是「刚刚 / N 分钟前」，
+// ★ 相对时间要跟着走：页面上显示的是「刚刚 / N 分钟前」，
 //   不刷新的话它会一直停在打开那一刻的说法。**卸载时要清掉**，
 //   否则每次切进切出都留下一个定时器。
 const now = ref(Date.now())
@@ -142,9 +134,8 @@ const agoText = computed(() => {
   return lastCheck.value ? fmtAgo(lastCheck.value.at) : ''
 })
 
-async function runCheck() {
+async function run() {
   if (checking.value) return
-  dialogOpen.value = true
   checking.value = true
   checkResult.value = null
   checkElapsed.value = 0
@@ -179,6 +170,10 @@ async function runCheck() {
       passed: CHECK_ITEMS.length,
       total: CHECK_ITEMS.length,
       message: CHECK_OK_TEXT,
+      states: checkSteps.value.map((s) => s.state),
+      elapsed: checkElapsed.value,
+      timings: r.data?.timings || null,
+      notes: r.data?.notes || [],
     })
   } else {
     // 定位得到就标出那一项；定位不到就**什么都不标**。
@@ -199,49 +194,68 @@ async function runCheck() {
       total: CHECK_ITEMS.length,
       failKey: failKey || '',
       message: r.message,
+      states: checkSteps.value.map((s) => s.state),
+      elapsed: checkElapsed.value,
     })
   }
   checking.value = false
 }
 
-function openDialog() {
-  dialogOpen.value = true
+/** 从本机记录还原上一次的结论与逐项状态（重进页面时不必再扫一遍）。 */
+function restoreLastCheck() {
+  const l = lastCheck.value
+  if (!l || !Array.isArray(l.states) || !l.states.length) return
+  checkSteps.value = CHECK_ITEMS.map((it, i) => ({ ...it, state: l.states[i] || 'pending' }))
+  checkElapsed.value = Number(l.elapsed) || 0
+  checkResult.value = l.ok
+    ? { ok: true, timings: l.timings || null, notes: l.notes || [] }
+    : {
+        ok: false,
+        message: l.message || '',
+        located: !!l.failKey,
+        timings: l.timings || null,
+        notes: l.notes || [],
+      }
 }
+
+if (props.restore) restoreLastCheck()
+
+// ★ 按钮在父页面（初始化与系统自检）：点一次，初始化与自检一起跑。
+defineExpose({ run })
+/** 右上角那枚状态灯：扫描中 / 已完成 / 未开始。 */
+const stateText = computed(() =>
+  checking.value ? 'SCANNING' : checkSteps.value.length ? 'DONE' : 'IDLE',
+)
+
+/**
+ * 收起后那一行摘要（用户 2026-10-19：十项全摆出来太长，跑完就收）。
+ *
+ * ★ 失败时把**出错项的名字**写进这一行 —— 收起不等于不告知哪里不对。
+ */
+const summaryText = computed(() => {
+  const total = checkSteps.value.length
+  if (!total) return ''
+  const ms = checkElapsed.value ? ` · ${checkElapsed.value} ms` : ''
+  if (checkResult.value?.ok) return `十项核对完成 · 通过 ${passedCount.value}/${total}${ms}`
+  const failed = checkSteps.value.find((s) => s.state === 'fail')
+  const who = failed ? `：${failed.name}` : lastCheck.value?.failKey ? `：${itemName(lastCheck.value.failKey)}` : ''
+  return `核对未通过${who} · 通过 ${passedCount.value}/${total}${ms}`
+})
 </script>
 
 <template>
-  <!-- ★ 页面上只留这一小块：一个按钮 + 一行结论，不占一整行。 -->
-  <div class="selfcheck-inline">
-    <el-button size="small" :loading="checking" @click="runCheck">
-      <Icon name="refresh" :size="13" style="margin-right: 6px" />启动自检
-    </el-button>
-    <button v-if="lastCheck" type="button" class="selfcheck-chip" :class="lastCheck.ok ? 'is-ok' : 'is-bad'" @click="openDialog">
-      <span class="mark" :class="lastCheck.ok ? 'mark-pass' : 'mark-fail'">{{ lastCheck.ok ? '✓' : '✕' }}</span>
-      <span class="chip-text">
-        本机上次自检 · {{ agoText }} · {{ summaryText }}
-      </span>
-      <span class="chip-more">看详情</span>
-    </button>
-    <span v-else class="selfcheck-hint">尚未自检过 —— 点左边按钮，逐项核对集群与向量。</span>
-  </div>
-
-  <!-- 自检过程与结论：都在这个框里 -->
-  <el-dialog
-    v-model="dialogOpen"
-    title="系统自检 · 逐项核对"
-    width="600px"
-    class="selfcheck-dialog"
-    :close-on-click-modal="!checking"
-    :show-close="!checking"
-  >
+  <div class="selfcheck">
     <div class="panel-title-row">
       <span class="panel-subtitle">逐项核对集群与向量一致性</span>
-      <span class="live-mark" :class="{ 'is-scan': checking }">
-        <i />{{ checking ? 'SCANNING' : lastCheck?.ok === false && !checkSteps.length ? 'IDLE' : 'DONE' }}
-      </span>
+      <div class="sc-head-right">
+        <span class="live-mark" :class="{ 'is-scan': checking }"><i />{{ stateText }}</span>
+        <!-- ★ 自检可反复执行 —— 受「一次登录只能点一次」限制的是初始化，不是这里（用户 2026-10-19）。 -->
+        <el-button size="small" :loading="checking" @click="run">再次自检</el-button>
+      </div>
     </div>
 
-    <div v-if="checkSteps.length" class="check-list">
+    <!-- 十项清单只在**扫描过程中**铺开；跑完立刻收起，只留一行结论（用户 2026-10-19）。 -->
+    <div v-if="checking" class="check-list">
       <div class="check-progress">
         <span class="mono check-progress-label">SCANNING {{ passedCount }} / {{ checkSteps.length }}</span>
         <div class="check-progress-bar"><span :style="{ width: (passedCount / checkSteps.length) * 100 + '%' }" /></div>
@@ -259,9 +273,13 @@ function openDialog() {
         <span v-if="s.state === 'running'" class="scanline" aria-hidden="true" />
       </div>
     </div>
-    <p v-else class="text-3" style="font-size: 13px; margin: 0">
-      还没有自检记录。点「重新自检」跑一次 —— 十项逐项核对。
+    <p v-else-if="checkSteps.length" class="sc-sum">
+      <span class="mono sc-sum-tag" :class="checkResult?.ok ? 'is-ok' : 'is-bad'">
+        {{ checkResult?.ok ? 'PASS' : 'FAIL' }}
+      </span>
+      <span>{{ summaryText }}</span>
     </p>
+    <p v-else class="sc-hint">尚未自检 —— 十项会在「初始化与系统自检」点下后逐项亮起。</p>
 
     <div v-if="checkResult" class="check-verdict">
       <el-alert
@@ -272,8 +290,7 @@ function openDialog() {
       />
       <p
         v-if="checkResult.ok === false && checkResult.located === false"
-        class="text-3"
-        style="font-size: 13px; line-height: 1.7; margin: 8px 0 0"
+        class="text-3 sc-note"
       >
         未能定位到具体检查项 —— 清单保持灰点（未判定），结论以本条为准。
       </p>
@@ -295,41 +312,23 @@ function openDialog() {
       />
     </div>
 
-    <template #footer>
-      <el-button size="small" :loading="checking" @click="runCheck">重新自检</el-button>
-      <el-button size="small" type="primary" :disabled="checking" @click="dialogOpen = false">关闭</el-button>
-    </template>
-  </el-dialog>
+    <p v-if="lastCheck && !checking" class="sc-ago mono">本机上次自检 · {{ agoText }}</p>
+  </div>
 </template>
 
 <style scoped>
-/* ---- 页面上那一小块 ---- */
-.selfcheck-inline {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.selfcheck-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 10px 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--bg-raised);
-  color: var(--text-2);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color .2s ease, color .2s ease;
-}
-.selfcheck-chip:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--text-1); }
-.selfcheck-chip.is-bad { border-color: color-mix(in srgb, var(--danger) 34%, transparent); }
-.chip-more { color: var(--accent); margin-left: 2px; }
-.selfcheck-hint { color: var(--text-3); font-size: 13px; }
+/* ---- 内嵌在「初始化与系统自检」页里的一组清单 ---- */
+.selfcheck { display: flex; flex-direction: column; }
+.sc-hint { color: var(--text-3); font-size: 13px; margin: 4px 0 0; }
+.sc-head-right { display: flex; align-items: center; gap: 10px; }
+.sc-sum { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text-2); margin: 2px 0 0; }
+.sc-sum-tag { font-size: 11px; letter-spacing: .1em; padding: 1px 6px; border-radius: 4px; }
+.sc-sum-tag.is-ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.sc-sum-tag.is-bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.sc-note { font-size: 13px; line-height: 1.7; margin: 8px 0 0; }
+.sc-ago { color: var(--text-3); font-size: 12px; letter-spacing: .04em; margin: 10px 0 0; }
 
-/* ---- 弹框里的逐项扫描 ---- */
+/* ---- 逐项扫描 ---- */
 .panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .panel-subtitle { color: var(--text-2); font-size: 14px; }
 .live-mark { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 13px; letter-spacing: .08em; }

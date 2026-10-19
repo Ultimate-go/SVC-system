@@ -362,32 +362,15 @@ function blocksOf(card, list) {
 /**
  * 把一组全局下标用**界面坐标**说出来。
  *
- * :param expand: ``true`` = 逐个列出块号；``false`` = 压成区间（「第 1-4 块」）。
+ * :param expand: ``true`` = 逐个列出块号；``false`` = 压成区间（「第 0-3 块」）。
  * :returns: 换算不了时如实退回数字（不假装它是个块号）。
- *
- * ★ 块号内部是 0 起算（``BlockRow.block_idx``），界面上给人看的一律从 1 起 ——
- *   与分解弹框下拉的 ``idxLabel`` / 完整标题里的 ``x + 1`` 保持一致，
- *   否则同一个弹框里上半部分写「第 1 块」、下半部分写「第 0 块」。
  */
 function blockText(card, list, expand = false) {
   const gs = Array.isArray(list) ? list : []
   if (!gs.length) return '（空）'
   const bs = blocksOf(card, gs)
   if (!bs) return expand ? humanList(gs).join(', ') : span(gs)
-  const shown = bs.map((b) => b + 1)
-  return `第 ${expand ? humanList(shown).join(', ') : span(shown)} 块`
-}
-
-/**
- * 一组全局下标 → **源文件内给人看的序号**（1 起，不带“第 / 块”字样）。
- *
- * 分解动画里写「当前选定目标子集为 1-6」用这个；换算不出来返回 ``null``，
- * 由调用方决定怎么退回 —— **绝不把全局下标塞回给人看**（用户 2026-10-19）。
- */
-function blockNoText(card, list) {
-  const bs = blocksOf(card, list)
-  // 离散的块用「、」分隔（与「可验证查询」页的写法一致），连续段仍用 X-Y。
-  return bs ? span(bs.map((b) => b + 1)).replace(/,\s*/g, '、') : null
+  return `第 ${expand ? humanList(bs).join(', ') : span(bs)} 块`
 }
 
 function cardTitle(card) {
@@ -572,10 +555,7 @@ const AGG_SAME_STEPS = [
   {
     name: '合并集合',
     en: 'UNION',
-    // ★ 公式（`$...$`）由 ProcessDialog 里的 utils/tex.js 渲染，只支持那套子集。
-    desc:
-      '把所选各集合覆盖的分块集合取并集。单份证据只在其覆盖的下标上有定义，因此两份证据不能按同一语义直接叠加。' +
-      '\n合并结果 $I \\cup J$；能直接聚合的前提是 $I \\cap J = \\emptyset$（若有交集先使用 $\\mathrm{VC.Disagg}$ 进行去除）。',
+    desc: '把所选各集合覆盖的分块集合取并集。单份证据只在其覆盖的下标上有定义，因此两份证据不能按同一语义直接叠加。',
   },
   {
     key: '探测节点持有情况',
@@ -587,9 +567,7 @@ const AGG_SAME_STEPS = [
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc:
-      '持有者取回分块密文。分量由密文自行计算，不信任节点申报的数值。' +
-      '\n得到 $c_i$ 后本地算 $v_i = \\mathrm{SM3}(c_i)$，见证仍是 $S_i = g^{E/e_i}$。',
+    desc: '持有者取回分块密文。分量由密文自行计算，不信任节点申报的数值。',
   },
   {
     key: '证据合成',
@@ -597,18 +575,12 @@ const AGG_SAME_STEPS = [
     en: 'AGG',
     desc:
       '各节点的凭证按聚合算法合成：$\\mathrm{VC.Agg}((I,v_I,\\pi_I),(J,v_J,\\pi_J))\\to\\pi_{I\\cup J}$。' +
-      '同一承诺 $C_f$ 且 $I\\cap J=\\emptyset$；仅使用当前参数无需全量值，耗时毫秒级。' +
-      '\n$S_{I\\cup J} \\leftarrow \\mathrm{ShamirTrick}(S_I, S_J, e_I, e_J)$，' +
-      '$e_I = \\prod_{i \\in I} e_i$。' +
-      '\n先去除交叉项：$\\rho_I = \\Lambda_I / \\prod_{j \\in J} \\varphi_j^{v_j}$，$\\varphi_j = S_{I\\cup J}^{e_J/e_j}$；$\\sigma_J$ 同理。' +
-      '\n再按 $\\Lambda_{I\\cup J} \\leftarrow \\mathrm{ShamirTrick}(\\rho_I, \\sigma_J, e_I, e_J)$ 合并。',
+      '同一承诺 $C_f$ 且 $I\\cap J=\\emptyset$；仅使用当前参数无需全量值，耗时毫秒级。',
   },
   {
     name: '聚合完成',
     en: 'DONE',
-    desc:
-      '所得证据覆盖 $I\\cup J$，仍为两个群元素。合法子向量开口，因此可按任意次序再聚合。' +
-      '\n即 $\\pi_{I\\cup J} = (S_{I\\cup J}, \\Lambda_{I\\cup J})$：大小与覆盖了多少块无关。',
+    desc: '所得证据覆盖 $I\\cup J$，仍为两个群元素。合法子向量开口，因此可按任意次序再聚合。',
   },
   QUERY_LAST_STEP,
 ]
@@ -676,9 +648,7 @@ const DISAGG_SAME_STEPS = [
     name: '确定目标子集',
     en: 'SUBSET',
     // 第一行（本次选定的子集）由 processSteps 填在最前面。
-    desc:
-      '从当前位置集合覆盖的分块中选出要拆分的部分（按界面序号），无需连续区间。' +
-      '\n记目标子集 $K$，要求 $K \\subseteq I$；$I \\setminus K$ 为需要加入 $\\pi_K$ 的位置。',
+    desc: '从当前位置集合覆盖的分块中选出要拆分的部分（按界面序号），无需连续区间。',
   },
   {
     key: '拆出子集证据',
@@ -686,9 +656,7 @@ const DISAGG_SAME_STEPS = [
     en: 'DISAGG',
     desc:
       '$\\mathrm{VC.Disagg}((I,v_I,\\pi_I),K)\\to\\pi_K$，$K\\subseteq I$；' +
-      '代数运算、无需与存储节点通信，可一次拆分到任意子集，无需逐层回退。' +
-      '\n$S_K = S_I^{e_{I \\setminus K}}$，$\\chi_j = S_I^{e_{I \\setminus K}/e_j}$（$j \\in I \\setminus K$）。' +
-      '\n$\\Lambda_K = \\Lambda_I^{e_{I\\setminus K}} \\cdot \\prod_{j \\in I \\setminus K} \\chi_j^{v_j}$。',
+      '代数运算、无需与存储节点通信，可一次拆分到任意子集，无需逐层回退。',
   },
   {
     // 正文（本次覆盖了哪些索引、共几块）由 processSteps 填。
@@ -715,32 +683,37 @@ const DISAGG_SAME_STEPS = [
  */
 const DISAGG_CROSS_STEPS = [
   {
-    name: '指定文件',
+    name: '指定目标文件',
     en: 'PICK',
     desc: '跨文件证据是在合并向量上取得的，其下标不属于任何单份文件；分解前必须先指定要拆出的那一份。',
   },
   {
-    name: '确定块集合',
+    name: '确定文件分块集合',
     en: 'SUBSET',
-    desc: '取该文件在这张卡里覆盖的、它自己的第几块到第几块。这里用的是**文件内块号**，不是合并向量上的下标 —— 它们是两套坐标。',
+    desc:
+      '取该文件在本次证据中被覆盖的块集合 $K \\subseteq P_f$。' +
+      '本步使用文件内块号，与合并向量上的下标不同。',
   },
   {
     key: '探测节点持有情况',
-    name: '探测节点持有情况',
+    name: '查询存储节点',
     en: 'PROBE',
-    desc: '只问该文件的那一段位置由谁持有。节点的申报只作线索。',
+    desc: '查询该文件内各分块的当前持有节点，作为取回路径的依据。',
   },
   {
     key: '取回密文',
-    name: '取回密文',
+    name: '取回分块密文',
     en: 'FETCH',
-    desc: '从持有者取回这些分块的密文。分块内容必须真的拿到：这是“重取”与“代数拆”的根本区别。',
+    desc: '从持有者取回这些分块的密文。',
   },
   {
     key: '取回分量与凭证',
-    name: '取回分量与凭证',
+    name: '证据取回',
     en: 'CERTS',
-    desc: '向持有者收取该文件这些块的凭证（一个块只交给第一个答得上来的节点，避开副本重复）。',
+    desc:
+      '向持有节点收取该文件各分块的证据：每份包含下标集合 $I$、这组下标上的公开分量 ' +
+      '$F_I = (v_i)_{i \\in I}$，以及对应的子向量开口 $\\pi_I = (S_I, \\Lambda_I)$。' +
+      '同一下标仅采用首个应答节点，避免副本重复计入。',
   },
   {
     key: '证据合成',
@@ -783,7 +756,6 @@ const TITLE_BY_KIND = {
 /** 副标题：把“哪一类过程、关键代价在哪”一句话说清（弹框标题下面一行）。 */
 const SUBTITLE_BY_KIND = {
   aggCross: '不同文件 · 归约：先把各文件的承诺抬进一条合并位置集，再重开一份证据（秒级）',
-  disaggCross: '跨文件 · 按文件重取：合并向量上的证据拆不成另一份文件的证据，只能按那份文件自己的向量重取一次',
 }
 
 const processOpen = ref(false)
@@ -818,8 +790,8 @@ const processSteps = computed(() => {
       return {
         ...s,
         desc:
-          `分解所得证据覆盖源文件第 ${sc.subset} 块，共 ${sc.count} 块。\n` +
-          '所得证据 $\\pi_K = (S_K, \\Lambda_K)$ 仍为两个群元素、不超过 256 字节；分解过程不影响原证据。',
+          `分解所得证据覆盖位置索引 ${sc.subset}，共 ${sc.count} 块。\n` +
+          '证据仍为两个群元素且大小不超过 256 字节；分解过程不影响原证据。',
       }
     }
     return s
@@ -1346,20 +1318,18 @@ async function confirmDisagg() {
       K,
     })
     disaggResult.value = data
-    // ★ 本次选定的子集：一律用**源文件内的序号**（1 起），不印全局下标
-    //   （用户 2026-10-19：115-120 这种数是内部坐标，会误导人）。
-    const subset = blockNoText(c, K) || '—'
-    panel.addCard({ label: `拆出：第 ${subset} 块`, src: '分解而来', result: data })
+    panel.addCard({ label: `拆出：${span(K)}`, src: '分解而来', result: data })
     disaggOpen.value = false
     ElMessage.success(`已拆出覆盖 ${K.length} 个分块的证据`)
-    // ★ 本次选定的子集（源文件序号，用「、」分隔）+ 块数 —— 步骤正文要拿它填。
+    // ★ 本次选定的子集（界面序号，用「、」分隔）+ 块数 —— 步骤正文要拿它填。
+    const subset = span(K).replace(/,\s*/g, '、')
     disaggScope.value = { subset, count: K.length }
     // ★ 末步「可验证查询」的结论：直接取后端这次检验的结论（`/api/evidence/disagg`
     //   会用当前 δ 当场验一遍，验不过会抛错，所以到这里的 ok 就是真结论）。
     processVerdict.value = data?.ok !== false
     showProcess('disaggSame', data?.timings, [
       { k: '原证据覆盖', v: `${c.indices?.length ?? 0} 块` },
-      { k: '本次拆分', v: subset === '—' ? '—' : `第 ${subset} 块（共 ${K.length} 块）` },
+      { k: '本次拆分', v: `第 ${subset} 块（共 ${K.length} 块）` },
     ])
   } catch (e) {
     disaggResult.value = { ok: false, message: e?.response?.data?.detail || '分解失败' }
@@ -1557,7 +1527,6 @@ onMounted(() => {
         </el-button>
         <el-button :disabled="!panel.selectedCards.length" @click="openDisagg" :loading="disaggRunning">分解（单文件）</el-button>
         <el-button :disabled="!panel.selectedCards.length" @click="openCrossDisagg" :loading="crossRunning">分解（跨文件）</el-button>
-        <el-button @click="openIncr">增量聚合演示</el-button>
         <el-button v-if="panel.cards.length" link @click="panel.selectAll()" :disabled="panel.selectedIds.length === panel.cards.length">全选</el-button>
         <el-button v-if="panel.selectedIds.length" link @click="panel.clearSelection()">取消选择</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
