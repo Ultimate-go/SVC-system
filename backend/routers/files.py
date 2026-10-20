@@ -492,7 +492,7 @@ def _do_append(
     )
     db.refresh(row)
     # ★ 这里记的必须是 **append**（安全审计 P5）：以前 append 记成 "truncate"、
-    #   truncate 记成 "append"，两个数在性能页上完全颠倒 —— 排查时会误导人。
+    #   truncate 记成 "append"，两个数在运行性能面板上完全颠倒 —— 排查时会误导人。
     metrics.record("append", sw.total_ms(), sw.rows())
     return {**out, "file": _file_public(row, mgr), "timings": sw.payload()}
 

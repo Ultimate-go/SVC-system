@@ -22,7 +22,8 @@ const props = defineProps({
   subtitle: { type: String, default: '' },
   /**
    * 步骤数组：[{ key, name, en, desc, estMs, facts }]
-   *  - key    与后端 timings 的 stage 名一致；不一致时该步不显示耗时
+   *  - key    与后端 timings 的 stage 名一致（``scripts/check_stage_names.py`` 钉它）；
+   *           上传页还靠它取 `estMs` 与每步的中间量 —— 对不上就取不到，而不是报错
    *  - name   步骤名（界面显示）
    *  - en     英文短名（界面显示，可省略）
    *  - desc   该步做什么、判据是什么
@@ -33,8 +34,8 @@ const props = defineProps({
   /**
    * 后端返回的 { total_ms, stages: [{ stage, ms, count }] }；尚未返回时为 null。
    *
-   * ★ 调用方仍在传（三个页面都传），弹框现在**不显示**它 —— 保留这个 prop
-   *   是为了调用处不用改，哪天要把耗时行接回来直接用。
+   * ★ 调用方仍在传（三个页面都传），但弹框**不显示耗时**（2026-10-16 用户：太挤）；
+   *   保留这个 prop 是为了调用处不用改，哪天要把耗时行接回来直接用。
    */
   timings: { type: Object, default: null },
   /** 底部参数列表 [{ k, v }]；取值由调用方保证为真值。 */

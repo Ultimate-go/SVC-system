@@ -506,7 +506,7 @@ function applyPlan(seg) {
  *
  * ★★ 为什么必须切：块数**没有上限**（位置预算取消之后），而一次
  *   `POST /api/query` 最多带 ``MAX_QUERY_INDICES`` 个下标。不切的话，
- *   稍大的文件（> 8192 块）必然 422 —— 而那正是审计 F1：
+ *   稍大的文件（> 10000 块）必然 422 —— 而那正是审计 F1：
  *   “入池”是同一批接口里**唯一**没做保护的一条路。
  */
 function splitQueryParts(indices) {

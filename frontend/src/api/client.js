@@ -12,13 +12,13 @@ import { apiErrorText } from '../data/errors.js'
  *   的 message 只接受字符串 / VNode ⇒ 直接塞进去弹出来的不是原因，
  *   是一团乱码（形如 `[object Object]` 或裸数组）。
  *
- *   最容易撞上的场景：一次 ``POST /api/query`` 带超过 8192 个下标 ——
+ *   最容易撞上的场景：一次 ``POST /api/query`` 带超过 10000 个下标 ——
  *   块数**没有上限**，所以“拿一份大文件的全部块去入池”就会走到这里
  *   （审计 F1）。归一之后至少能看见“indices：List should have at most
- *   8192 items”。
+ *   10000 items”。
  *
  *   数组形态取每条 ``msg`` 拼起来，并带上字段路径 —— 不带路径的话，
- *   “at most 8192 items” 根本不知道说的是哪个字段。
+ *   “at most 10000 items” 根本不知道说的是哪个字段。
  *
  * （导出它是为了能被测试钉住：``frontend/tests/apiDetail.test.js``。）
  */

@@ -3,7 +3,7 @@
  *
  * ★ 为什么值得单开一份：FastAPI 的参数校验错误（422）里 `detail` 是**数组**，
  *   而 Element Plus 的 message 只接受字符串 ⇒ 直接塞进去弹出来的是一团乱码，
- *   用户拿不到任何可读原因。最容易撞上的场景正是"一次带超过 8192 个下标"
+ *   用户拿不到任何可读原因。最容易撞上的场景正是"一次带超过 10000 个下标"
  *   （块数没有上限，「入池」那条路修之前就会走到这里）。
  *
  *   这里钉的是"**至少能看见原因**"：字段名 + 原话。
@@ -23,15 +23,15 @@ test('★ 数组（pydantic 422）：拼成一句人话，且带上字段名', (
     {
       type: 'too_long',
       loc: ['body', 'indices'],
-      msg: 'List should have at most 8192 items after validation, not 8300',
-      input: new Array(8300).fill(1),
-      ctx: { max_length: 8192 },
+      msg: 'List should have at most 10000 items after validation, not 12000',
+      input: new Array(12000).fill(1),
+      ctx: { max_length: 10000 },
     },
   ]
   const out = readableDetail(detail)
   assert.equal(
     out,
-    'indices：List should have at most 8192 items after validation, not 8300',
+    'indices：List should have at most 10000 items after validation, not 12000',
   )
   assert.ok(!out.includes('[object'), '不能出现 [object Object]')
   assert.ok(!out.includes('{'), '不能把整个对象 stringify 出去')

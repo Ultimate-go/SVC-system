@@ -90,7 +90,7 @@ export function parseIndexRange(text, maxCount = MAX_QUERY_INDICES, noun = '下�
  *   n，越界当场说清"这份文件只有几块"，不必等服务端回一个 400 让人猜。
  *   ★★ 它还要跟 ``MAX_QUERY_INDICES`` **取小**（审计 N2）：块数**没有上限**
  *   （64 字节一块的话，1 MB 文件就能切出 16384 块），只拿块数当上限会
- *   放行一个 >8192 块的区间，然后由 ``/api/query/files`` 回 400。
+ *   放行一个 >10000 块的区间，然后由 ``/api/query/files`` 回 400。
  */
 export function parseBlockRange(text, maxBlocks = null) {
   // 块号是**这份文件内部**的坐标：给了块数就用它当上限（更严）；

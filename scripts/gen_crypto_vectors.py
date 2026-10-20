@@ -310,7 +310,7 @@ def client_pack() -> dict:
                 "g": str(crs_n.g),
                 "l": 256,
                 "prime_bits": 257,
-                "n_max": 8192,
+                "n_max": 10000,
             },
             "delta": {
                 "U": str(crs_n.U_n),

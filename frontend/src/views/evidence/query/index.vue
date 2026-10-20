@@ -2,7 +2,7 @@
 /**
  * 可验证查询（验证不受限）。
  *
- * - **选文件 + 填第几块**验证（块号支持 0-3, 8 区间语法）+ 允许部分结果开关。
+ * - **选文件 + 填第几块**验证（块号从 1 起，支持 `1-4, 9` 区间语法）+ 允许部分结果开关。
  *   ★ 全局下标是**内部坐标**，只留在"高级"里 —— 主路径上不让它出现。
  * - 展示结论（承诺验证的 code_name）、proof.size_bytes、holders、refs、missing。
  * - 「按指标筛选文件」：文件持有者、文件标识（包含 / 精确）、块数区间、大小区间，
@@ -11,7 +11,7 @@
  *   关掉浏览器再回来还在。集合里每一块都记着"它是谁的第几块"（详情里看）。
  *   点「验证集合里的全部块」才真的去取数据 —— **一次** ``POST /api/query``
  *   把整个集合验一遍，并给出报告。
- * - 「按文件 + 第几块验证」：选文件、填块号（支持 0-3, 8 区间语法）。
+ * - 「按文件 + 第几块验证」：选文件、填块号（从 1 起，支持 `1-4, 9` 区间语法）。
  * - **逐块指纹**：验证结果里可以看到每个下标对应的分量
  *   —— 跟着全局的「简略 / 详细」开关（详细模式才铺出来）。
  */
@@ -40,7 +40,8 @@ const basket = useBasketStore()
 /** 详细模式：把逐块分量铺出来（简略模式只给结论）。 */
 const detailed = computed(() => theme.detailMode === 'detail')
 
-const indicesInput = ref('0-3, 8')
+// ★ 默认值也是**界面编号**（从 1 起）—— 填 `0-3` 会被 `parseIndexRange` 当场拒掉。
+const indicesInput = ref('1-3, 9')
 const allowPartial = ref(false)
 const running = ref(false)
 const result = ref(null)
@@ -406,12 +407,12 @@ async function addBlocksPrompt(f) {
   let value = ''
   try {
     const r = await ElMessageBox.prompt(
-      `这份文件共 ${f.block_count} 块。填第几块（如 0-3, 8），只把这几块收进集合。`,
+      `这份文件共 ${f.block_count} 块。填第几块（如 1-4, 9），只把这几块收进集合。`,
       `选择收录：${f.owner} / ${f.file_key}`,
       {
         confirmButtonText: '收进集合',
         cancelButtonText: '取消',
-        inputPlaceholder: '第几块，如 0-3, 8',
+        inputPlaceholder: '第几块，如 1-4, 9',
         inputValidator: (v) => {
           try {
             return parseBlockRange(v, f.block_count).length ? true : '请输入第几块'
@@ -472,7 +473,7 @@ const basketItemMap = computed(() => {
   return m
 })
 
-/** 一组全局下标 → 界面坐标（按文件归并，如「病历A 第 0-3 块（4 块）」）。 */
+/** 一组全局下标 → 界面坐标（按文件归并，如「病历A 第 1-4 块（4 块）」）。 */
 function basketText(list) {
   const gs = Array.isArray(list) ? list : []
   if (!gs.length) return '（空）'
@@ -520,7 +521,7 @@ const basketHolderCount = computed(
    ---------------------------------------------------------------------------
    检验完全由公开量完成：δ、π_I 与本地重算的分量即可判定，无需采信服务端的结论。
    弹框逐步展示这些量是怎样产生的，以及每一步在链路上的作用。
-   `key` 与后端 `with stage("…")` 的名字对齐；对不上就不显示耗时，不编数字。
+   `key` 与后端 `with stage("…")` 的名字对齐；对不上就取不到那一步的预估耗时，不编数字。
 --------------------------------------------------------------------------- */
 const VERIFY_STEPS = [
   {
@@ -535,7 +536,7 @@ const VERIFY_STEPS = [
   {
     key: '探测节点持有情况',
     // ★ 只改给人的名字，``key`` 不动 —— 它与后端 ``with stage("…")`` 的名字对齐
-    //   （scripts/check_stage_names.py 钉的就是 key），改了名字就没耗时了。
+    //   （scripts/check_stage_names.py 钉的就是 key），改了名字就取不到预估耗时了。
     name: '查询节点持有情况',
     en: 'PROBE',
     desc: '查询各存储节点，集合内的分块当前分别由谁持有。节点的申报只作为参考，随后要由公开检验加以核对，本身不构成结论。',

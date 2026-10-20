@@ -7,10 +7,6 @@
  * - 按 delta_fp 判断作废（不是 n）。
  * - 「一次验这 N 份」→ verify-batch，两个耗时都显示，agree 不一致报警。
  * - 分解再聚合 4 步演示。
- * - **增量聚合演示**：同一份文件分两段各自聚合，再把两份**中间结果**合并，
- *   并当场与「一次性取全」逐位对照 —— 说明“攢着建”与“推倒重来”得到的是
- *   同一份证据，所以已经聚合过的部分不必重算。（合并走 ``/api/evidence/agg``，
- *   那一步不向节点取任何数据。）
  * - **逐块指纹**：每张卡片可以展开看"这份证据覆盖的每个下标，它的分量指纹是多少"
  *   —— 跟着全局的「简略/详细」开关，也能在单张卡片上自己开合。
  */
@@ -19,7 +15,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAggregateStore } from '../../../stores/aggregate'
 import { useThemeStore } from '../../../stores/theme'
 import { evidenceApi } from '../../../api/evidence'
-import { filesApi } from '../../../api/files'
 import { systemApi } from '../../../api/system'
 import { span, humanList, fmtAgo } from '../../../utils/format'
 import { MAX_QUERY_INDICES } from '../../../utils/constants.js'
@@ -527,7 +522,7 @@ const aggregating = ref(false)
    ---------------------------------------------------------------------------
    聚合的语义是把下标并起来、把承诺抬到同一条合并向量上重新计算一次；
    两份证据不能直接拼接 —— 每份证据只对它覆盖的下标有定义。
-   `key` 与后端 `with stage("…")` 的名字对齐，对不上就不显示耗时。
+   `key` 与后端 `with stage("…")` 的名字对齐，对不上就取不到那一步的预估耗时。
 --------------------------------------------------------------------------- */
 /**
  * 四类流程的最后一小步：所得证据随后按「可验证查询」那 7 步走。
@@ -561,7 +556,7 @@ const AGG_SAME_STEPS = [
     key: '探测节点持有情况',
     name: '检查节点持有情况',
     en: 'PROBE',
-    desc: '检查当前并集内每分块分别由哪个存储节点持有。不信任存储节点的申报，分量由交付内容在本地重新计算。',
+    desc: '检查当前并集内每分块分别由哪个存储节点持有，作为取回路径的依据（节点申报不构成证据）。',
   },
   {
     key: '取回密文',
@@ -592,7 +587,7 @@ const AGG_SAME_STEPS = [
  *   而一文件一向量 ⇒ 每份文件各有 $C_f$；$\\Lambda_I$ 的支撑集只覆盖本文件的
  *   补集，跳文件的交叉项抵消不掉。于是先把承诺抬进一条合并向量、再重开证据。
  * ★ 能对上的静态阶段名只有「合并位置集合」与「合并向量上的承诺验证」；
- *   其余几条后端带动态参数（如 ``重算合并证据（Open，|P|=…）``），对不上就不显示耗时。
+ *   其余几条后端带动态参数（如 ``重算合并证据（Open，|P|=…）``），对不上就取不到预估耗时。
  */
 const AGG_CROSS_STEPS = [
   {
@@ -604,13 +599,15 @@ const AGG_CROSS_STEPS = [
     key: '探测节点持有情况',
     name: '探测节点持有情况',
     en: 'PROBE',
-    desc: '问清并集内每个分块当前由谁持有。跨文件时一次要问的台数更多，这是这条链路比单文件慢的第一个原因。',
+    desc: '查询并集内各分块的当前持有节点，作为取回路径的依据。持有关系的申报本身不构成证据，仅供定位。',
   },
   {
     key: '取回密文',
     name: '取回密文',
     en: 'FETCH',
-    desc: '从各交付者取回并集内分块的密文。跨文件聚合必须拿到密文（单文件那条只需凭证），这是第二个原因。',
+    desc:
+      '自持有节点取回密文 $c_i$，并在本地重算公开分量 $v_i = \\mathrm{SM3}(c_i)$。' +
+      '单文件路径同样要取密文并重算分量 —— 两条链路的差别在**成证方式**，不在取什么。',
   },
   {
     key: '合并位置集合',
@@ -675,7 +672,7 @@ const DISAGG_SAME_STEPS = [
  *   ``/api/query/files``（``evidenceApi.queryFiles``），后端执行的是
  *   ``_fetch`` + ``_prove`` 的**单文件**分支，所以阶段名是
  *   「探测节点持有情况 / 取回密文 / 取回分量与凭证 / 证据合成 / 承诺验证」。
- *   对不上就不显示耗时 —— 不编数字。
+ *   对不上就取不到预估耗时 —— 不编数字。
  *
  * ★ 为什么不能像单文件那样直接拆：合并向量上的证据属于**那条合并向量**，
  *   $\\Lambda$ 的支撑集只盖到本文件的补集，跨文件交叉项抵消不掉；
@@ -1316,176 +1313,6 @@ async function confirmDisagg() {
   }
 }
 
-/* ---------------------------------------------------------------------------
-   增量聚合演示（★ 这一次用户要的）
-
-   要讲清的一件事：**"先聚合一部分、以后再把新来的并进来"是真的复用，不是重算。**
-
-   它成立的依据是 ``VC.Agg`` 的两条性质（``svc/scheme.py::agg``）：
-
-     * 两份**不相交**子集的证据能合成一份覆盖并集的证据：π_I ⊗ π_J = π_{I∪J}；
-     * 合并结果本身仍是合法证据 ⇒ 可以再参与合并，**次数不限、顺序任意**。
-
-   于是这里按最直白的划分演一遍：取一份文件的前 3 块聚一次、后 3 块聚一次，
-   再把两份**中间结果**并起来 —— 然后**当场对照**"一次性取全 6 块"的那份证据，
-   逐位比较 (S, Λ)。
-
-   ★ 为什么值得把对照做出来：光说"结果一样"没人信，也没法验；而"一样"这件事
-     恰好就是"增量"的**定义** —— 攒着建得到的东西与推倒重来得到的**完全相同**，
-     所以原先那部分不必重算。
-
-   ★ 全程用的都是真接口、真耗时：取两段走 ``/api/query/files``（会向节点收凭证），
-     合并走 ``/api/evidence/agg``（**不向节点取任何数据** —— 响应里
-     ``cert_count = 0``、``nodes_used = []`` 就是这件事的书面交代）。
---------------------------------------------------------------------------- */
-const incrOpen = ref(false)
-const incrLoading = ref(false)
-const incrRunning = ref(false)
-const incrFiles = ref([])
-const incrFileIdx = ref(null)
-const incrSteps = ref([])
-const incrErr = ref('')
-
-/** 演示一次取几个块：够就取 6（前 3 / 后 3），不够就尽量对半。 */
-const INCR_TARGET = 6
-
-const incrFile = computed(() => incrFiles.value[incrFileIdx.value] || null)
-
-/**
- * 这一次的两段怎么分。
- *
- * ★ 用**文件内块号**（0 起）而不是全局位置号：全局位置是内部坐标，
- *   界面上不出现（见本文件开头那段规矩）。
- */
-const incrPlan = computed(() => {
-  const f = incrFile.value
-  if (!f) return null
-  const total = Number(f.block_count) || 0
-  if (total < 2) return null
-  const half = Math.min(Math.floor(total / 2), Math.floor(INCR_TARGET / 2))
-  const first = Array.from({ length: half }, (_, i) => i)
-  const second = Array.from({ length: total - half }, (_, i) => half + i)
-  return { total, first, second, all: [...first, ...second] }
-})
-
-async function openIncr() {
-  incrOpen.value = true
-  incrSteps.value = []
-  incrErr.value = ''
-  if (incrFiles.value.length) return
-  incrLoading.value = true
-  try {
-    const { data } = await filesApi.list()
-    const rows = Array.isArray(data) ? data : data?.files || []
-    // 只留够两段的：一段一块是合并不了的最小规模。
-    incrFiles.value = rows.filter((r) => (Number(r.block_count) || 0) >= 2)
-    if (incrFiles.value.length) incrFileIdx.value = 0
-  } catch (e) {
-    incrErr.value = e?.response?.data?.detail || e?.message || '取文件列表失败'
-  } finally {
-    incrLoading.value = false
-  }
-}
-
-/** 只留合并接口要的那三项（卡片原样传）。 */
-function asCard(d) {
-  return { indices: d.indices, values: d.values, proof: d.proof }
-}
-
-async function runIncr() {
-  const f = incrFile.value
-  const plan = incrPlan.value
-  if (!f || !plan) return
-  incrRunning.value = true
-  incrErr.value = ''
-  incrSteps.value = []
-  const target = [f.owner, f.file_key]
-  const wall = (t0) => Math.round(performance.now() - t0)
-
-  try {
-    // ① 前一段
-    let t0 = performance.now()
-    const A = (await evidenceApi.queryFiles([target], plan.first)).data
-    incrSteps.value.push({
-      id: 'A', title: '分段聚合（前段）', blocks: plan.first, resp: A, ms: wall(t0),
-      how: '向持有该段分块的节点收取检索凭证，聚为一份证据',
-      takes: `覆盖 ${plan.first.length} 块`,
-    })
-
-    // ② 后一段
-    t0 = performance.now()
-    const B = (await evidenceApi.queryFiles([target], plan.second)).data
-    incrSteps.value.push({
-      id: 'B', title: '分段聚合（后段）', blocks: plan.second, resp: B, ms: wall(t0),
-      how: '同样收取凭证；两段互不相干，可以分别累积',
-      takes: `覆盖 ${plan.second.length} 块`,
-    })
-
-    // ③ 合并两份**已有**证据
-    t0 = performance.now()
-    const M = (await evidenceApi.agg(asCard(A), asCard(B))).data
-    incrSteps.value.push({
-      id: 'M', title: '合并两份证据', blocks: plan.all, resp: M, ms: wall(t0),
-      how: '把两份已经存在的证据合为一份：不取密文、不重算分量',
-      takes: `覆盖 ${plan.all.length} 块，仍是 2 个群元素`,
-    })
-
-    // ④ 对照：一次性取全
-    t0 = performance.now()
-    const F = (await evidenceApi.query(M.indices)).data
-    incrSteps.value.push({
-      id: 'F', title: '对照：一次性取全', blocks: plan.all, resp: F, ms: wall(t0),
-      how: '不作分段，直接向节点索取覆盖全部这些分块的证据，用于与上一步逐位比对',
-      takes: '同一批分块',
-    })
-
-    // 三张卡进聚合面板（合并那张也能当对照那张：下标集合相同，聚合面板会按集合去重）。
-    panel.addCard({ label: `第 ${plan.first[0] + 1}-${plan.first.at(-1) + 1} 块`, src: '增量聚合：前一段', result: A })
-    panel.addCard({ label: `第 ${plan.second[0] + 1}-${plan.second.at(-1) + 1} 块`, src: '增量聚合：后一段', result: B })
-    panel.addCard({ label: `第 ${plan.all[0] + 1}-${plan.all.at(-1) + 1} 块`, src: '增量聚合：两份中间结果合并而来', result: M })
-  } catch (e) {
-    incrErr.value = e?.response?.data?.detail || e?.message || '演示失败'
-  } finally {
-    incrRunning.value = false
-  }
-}
-
-/** 第三步的响应（合并）与第四步的响应（一次取全）。 */
-const incrMerged = computed(() => incrSteps.value.find((s) => s.id === 'M')?.resp || null)
-const incrFull = computed(() => incrSteps.value.find((s) => s.id === 'F')?.resp || null)
-
-/** 合并得到的 (S, Λ) 与一次取全的是不是**逐位相同**。 */
-const incrSame = computed(() => {
-  const m = incrMerged.value
-  const f = incrFull.value
-  if (!m || !f) return null
-  return m.proof.S_I === f.proof.S_I && m.proof.Lambda_I === f.proof.Lambda_I
-})
-
-/** 合并那一步真的没碰节点吗 —— 看后端自己报的账。 */
-const incrMergeFacts = computed(() => {
-  const m = incrMerged.value
-  if (!m) return null
-  const stages = (m.timings?.stages || []).map((s) => s.stage)
-  return {
-    nodes: (m.nodes_used || []).length,
-    certs: m.cert_count ?? 0,
-    fetched: stages.some((s) => s.includes('取回') || s.includes('探测')),
-    stages,
-  }
-})
-
-/** 块号串 → 「第 1-3 块」（连续时给区间，不连续就逐个列）。 */
-function blkRange(list) {
-  const a = (list || []).map(Number).sort((x, y) => x - y)
-  if (!a.length) return '—'
-  const contiguous = a.every((v, i) => i === 0 || v === a[i - 1] + 1)
-  if (!contiguous) return humanList(a).map((n) => `第 ${n} 块`).join('、')
-  const lo = a[0] + 1
-  const hi = a[a.length - 1] + 1
-  return lo === hi ? `第 ${lo} 块` : `第 ${lo}-${hi} 块`
-}
-
 onMounted(() => {
   syncDelta()
 })
@@ -1817,150 +1644,6 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <!--
-      增量聚合演示。
-      ★ 为什么单独开一个弹框：这件事（"攒着建"）只有把**两段 → 合并 → 对照**
-        连续走一遍才看得清，塞在卡片墙上讲不明白。
-      ★ 每一步都是真调用，耗时也是真耗时 —— 这一页到处是"数字都要有出处"的规矩，
-        演示里更不该出现编出来的数。
-    -->
-    <el-dialog v-model="incrOpen" title="增量聚合：分段聚合与合并" width="840px">
-      <p class="note" style="margin-top: 0">
-        同一份文件的前半段与后半段<strong>分别</strong>聚合，再把两份<strong>中间结果</strong>合并。
-        合并那一步用的是两份已经存在的证据 —— 它不再向任何存储节点要数据。
-        下面每一步都是真跑：真接口、真耗时、真结果；跑完三张证据会一起进聚合面板。
-      </p>
-
-      <div class="dg-row">
-        <span class="dg-lbl">演示哪份文件</span>
-        <el-select v-model="incrFileIdx" filterable style="flex: 1; min-width: 260px" :loading="incrLoading">
-          <el-option
-            v-for="(f, i) in incrFiles"
-            :key="i"
-            :value="i"
-            :label="`${f.file_key}（${f.owner}）：${f.block_count} 块`"
-          />
-        </el-select>
-        <el-button type="primary" :loading="incrRunning" :disabled="!incrPlan" @click="runIncr">
-          跑一遍
-        </el-button>
-      </div>
-
-      <el-alert
-        v-if="!incrLoading && !incrFiles.length"
-        type="info"
-        :closable="false"
-        class="mt-2"
-        title="眼下没有能演示的文件"
-        description="这个演示需要一份至少 2 块的文件。可以先到「上传文件」页上传一份并切成 6 块以上，再回来跑。"
-      />
-
-      <el-alert v-if="incrErr" type="error" :closable="false" class="mt-2" :title="incrErr" />
-
-      <template v-if="incrPlan">
-        <div class="incr-plan">
-          <span class="text-3">这次的划分：</span>
-          <span class="mono">前一段 {{ blkRange(incrPlan.first) }}</span>
-          <span class="sep">·</span>
-          <span class="mono">后一段 {{ blkRange(incrPlan.second) }}</span>
-          <span class="sep">·</span>
-          <span class="mono text-3">共 {{ incrPlan.total }} 块</span>
-        </div>
-
-        <div class="incr-graph" :class="{ done: incrSteps.length >= 3 }">
-          <div class="incr-col">
-            <div class="incr-node" :class="{ on: incrSteps.some((s) => s.key === 'A') }">
-              <span class="text-3">第一段</span>
-              <span class="mono">{{ blkRange(incrPlan.first) }}</span>
-            </div>
-            <div class="incr-node" :class="{ on: incrSteps.some((s) => s.key === 'B') }">
-              <span class="text-3">第二段</span>
-              <span class="mono">{{ blkRange(incrPlan.second) }}</span>
-            </div>
-          </div>
-          <div class="incr-op">
-            <span>合并</span>
-            <span class="text-3">两份已有证据</span>
-            <span class="text-3">不取数据</span>
-          </div>
-          <div class="incr-col">
-            <div class="incr-node is-wide" :class="{ on: incrSteps.some((s) => s.key === 'M') }">
-              <span class="text-3">并起来</span>
-              <span class="mono">{{ blkRange(incrPlan.all) }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="incrSteps.length" class="incr-steps">
-          <div v-for="s in incrSteps" :key="s.id" class="incr-step">
-            <div class="incr-step-head">
-              <span class="incr-title">{{ s.title }}</span>
-              <span class="mono text-3">{{ blkRange(s.blocks) }} · {{ s.ms }} ms</span>
-            </div>
-            <div class="text-2" style="font-size: 13px">{{ s.how }}</div>
-            <div class="mono text-3" style="font-size: 12px">
-              证据 {{ s.resp.proof.size_bytes }} 字节（2 个群元素）
-              <template v-if="s.id === 'M'">
-                · 参与节点 {{ (s.resp.nodes_used || []).length }} 台
-                · 收到凭证 {{ s.resp.cert_count ?? 0 }} 份
-                · 取回密文 0 块
-              </template>
-              <template v-else>
-                · 参与节点 {{ (s.resp.nodes_used || []).length }} 台
-                · 收到凭证 {{ s.resp.cert_count ?? 0 }} 份
-              </template>
-            </div>
-          </div>
-        </div>
-
-        <template v-if="incrSame !== null">
-          <el-alert
-            :type="incrSame ? 'success' : 'error'"
-            :closable="false"
-            class="mt-2"
-            :title="incrSame
-              ? '合并所得与一次性取全逐位相同（S 与 Λ 都一致）'
-              : '合并所得与一次性取全不一致（实现可能有问题）'"
-          >
-            <template #default>
-              <p style="font-size: 13px; margin: 0">
-                两段各自聚合、再合并，与把这批块一次性取全，得到的是<strong>同一份证据</strong>。
-                所以已经聚合过的部分不必重算 —— 这就是「增量」二字的实处：
-                合并的代价只与<strong>新并进来的那部分</strong>有关，与已经有过的部分无关。
-              </p>
-            </template>
-          </el-alert>
-
-          <details class="note-collapse">
-            <summary>说明</summary>
-            <p class="note">
-              合并那一步用的是<strong>两份已经存在的证据</strong>：没有向任何存储节点取数据
-              （本次参与节点 {{ incrMergeFacts?.nodes ?? 0 }} 台、收到凭证
-              {{ incrMergeFacts?.certs ?? 0 }} 份），也没有重新计算任何一块的分量。
-              本次这一步在后端只走了
-              {{ (incrMergeFacts?.stages || []).join('、') || '—' }}。
-              留下的三张证据都已入池，可以接着验证、继续合并或再做分解。
-            </p>
-          </details>
-        </template>
-
-        <details class="note-collapse">
-          <summary>说明</summary>
-          <p class="note">
-            <strong>分解那半句：一步到位，还是只能退回上一次的程度？</strong>
-            两者是同一件事。<br />
-            从一份覆盖 6 块的证据出发，可以<strong>一步</strong>拆出覆盖第 1、3、5 块的证据
-            —— 跳着拆、不必逐层往回退；也可以一步拆回「上一次那一段」。
-            而且拆出来的第 1-3 块，与当初聚合出来的第 1-3 块<strong>逐位相同</strong>：
-            这正是「退回上一次」与「一步拆到位」重合成一句话的原因。
-            代价与丢掉的那部分成正比，同样不向节点取数据。<br />
-            但拆出来的只能是<strong>子集</strong>：想得到含「原证据没覆盖的分块」的证据，
-            无论拆多少次都拆不出来，必须另外取一份再合并 —— 聚合面板存在的理由就在这里。
-          </p>
-        </details>
-      </template>
-    </el-dialog>
-
     <!-- 聚合 / 分解过程：这两件事在界面上最少见，也最值得讲。 -->
     <ProcessDialog
       v-model="processOpen"
@@ -2188,93 +1871,6 @@ onMounted(() => {
   color: var(--warn);
 }
 
-/* ---------- 增量聚合演示 ---------- */
-.incr-plan {
-  margin-top: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 13px;
-}
-/* 计算图：左边两段、中间一步合并、右边一份。 */
-.incr-graph {
-  margin-top: 10px;
-  padding: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-sunken, var(--bg-raised));
-}
-.incr-col {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.incr-node {
-  min-width: 128px;
-  padding: 8px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-  opacity: 0.55;
-  transition: opacity 0.2s ease, border-color 0.2s ease;
-}
-.incr-node.is-wide {
-  min-width: 160px;
-}
-/* 这一步真的跑过之后才亮起来 —— 亮的是"已经发生过的事"，不是预告。 */
-.incr-node.on {
-  opacity: 1;
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-}
-.incr-op {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 0 10px;
-  font-size: 13px;
-  color: var(--text-2);
-}
-.incr-op > span:first-child {
-  font-weight: 600;
-  color: var(--accent);
-}
-.incr-graph.done .incr-op > span:first-child::after {
-  content: ' ✓';
-}
-.incr-steps {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.incr-step {
-  padding: 8px 12px;
-  border: 1px solid var(--line);
-  border-left: 2px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-}
-.incr-step-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.incr-title {
-  font-size: 14px;
-  font-weight: 600;
-}
 /* ---------- 矩形卡：固定三行，展开区在第 3 行之下 ---------- */
 .cards .card {
   display: flex;

@@ -63,7 +63,7 @@ test('★ 人读 1 起：填 0 必须报错，填 1 对应内部 0', () => {
 
 test('规模闸门在展开之前判（填一个天文数字不会把页面拖死）', () => {
   // 真去展开的话：1e9 个元素 —— 这条测试会直接跑不完。
-  assert.match(thrownMessage(() => parseIndexRange('1-999999999', 8192)), /单次上限 8192 个/)
+  assert.match(thrownMessage(() => parseIndexRange('1-999999999', 10000)), /单次上限 10000 个/)
   // ★ 注意措辞：在 `parseBlockRange` 这条路上，「块」出现在前半句
   //   （「将展开为 1000000000 个块」），后半句只是「单次上限 1142 个」。
   const msg = thrownMessage(() => parseBlockRange('1-999999999', 1142))
@@ -79,16 +79,16 @@ test('块号越界：说清这份文件只有几块', () => {
   assert.match(msg, /超出部分：6/)
 })
 
-test('N2：块数超过 8192 的文件，也只能一次填 8192 块', () => {
+test('N2：块数超过 10000 的文件，也只能一次填 10000 块', () => {
   // 块数**没有上限**（64 字节一块的话 1 MB 就是 16384 块）：只拿块数当上限
-  // 会放行一个 >8192 的区间，然后由 /api/query/files 回 400。
+  // 会放行一个 >10000 的区间，然后由 /api/query/files 回 400。
   // 所以两边取小 —— 这一步必须在**前端**拦住。
-  assert.throws(() => parseBlockRange('1-16384', 16384), /单次上限 8192 个/)
-  // 8192 以内不受影响：16384 块的文件里填 1-101 照样合法。
+  assert.throws(() => parseBlockRange('1-16384', 16384), /单次上限 10000 个/)
+  // 10000 以内不受影响：16384 块的文件里填 1-101 照样合法。
   assert.equal(parseBlockRange('1-101', 16384).length, 101)
-  // 刚好 8192 块允许，多一块就拦。
-  assert.equal(parseBlockRange('1-8192', 16384).length, 8192)
-  assert.throws(() => parseBlockRange('1-8193', 16384), /单次上限 8192 个/)
+  // 刚好 10000 块允许，多一块就拦。
+  assert.equal(parseBlockRange('1-10000', 16384).length, 10000)
+  assert.throws(() => parseBlockRange('1-10001', 16384), /单次上限 10000 个/)
 })
 
 test('正常解析不受影响（区间 / 逗号 / 去重排序；入参 1 起、出参 0 起）', () => {
