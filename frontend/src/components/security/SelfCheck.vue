@@ -152,17 +152,35 @@ async function run() {
     })
     .catch((e) => ({ ok: false, message: e?.response?.data?.detail || e?.message || '自检失败' }))
 
-  // 逐项扫描：先亮起扫描态，再落为通过。
+  // ★★ 结果未知时只亮「正在核对」，**绝不先标成 pass**。
+  //   上一版是「先逐个亮绿、等请求回来再改红」—— 节点掉线时十项会先全部显示通过，
+  //   随后才把第 3 项刷成失败，看的人只记住了那一片绿（用户 2026-10-20 报的就是这个）。
+  //   现在先等真实结论，再按结论逐项揭示：通过→绿、失败→红、未判定→灰。
+  checkSteps.value[0].state = 'running'
+  const r = await real
+
+  // 真实结论 → 每一项的最终状态（与旧逻辑同一套判定，只是提前算好再揭示）。
+  let finalStates
+  if (r.ok) {
+    finalStates = CHECK_ITEMS.map(() => 'pass')
+  } else {
+    const failKey = locateFailKey(r.message)
+    const failIdx = failKey ? CHECK_ITEMS.findIndex((x) => x.key === failKey) : -1
+    finalStates = CHECK_ITEMS.map((_, i) => {
+      if (failIdx >= 0 && i < failIdx) return 'pass'
+      if (i === failIdx) return 'fail'
+      return 'pending' // 未判定：灰点（不再冒充已通过）
+    })
+  }
+
   for (let i = 0; i < CHECK_ITEMS.length; i++) {
     const step = checkSteps.value[i]
     step.state = 'running'
     await sleep(SCAN_MS)
-    step.state = 'pass'
+    step.state = finalStates[i]
     await sleep(STEP_GAP_MS)
   }
 
-  // 揭晓真实结论。
-  const r = await real
   if (r.ok) {
     checkResult.value = r.data
     saveLastCheck({
@@ -182,13 +200,7 @@ async function run() {
     //   **一次调用**返回首个问题，而任何没被规则覆盖的原因（比如库读不出来）
     //   都会被按到「增量摘要一致性」头上 —— 那是在编一个看起来很像的结论。
     const failKey = locateFailKey(r.message)
-    const failIdx = failKey ? CHECK_ITEMS.findIndex((x) => x.key === failKey) : -1
-    checkSteps.value.forEach((s, i) => {
-      if (failIdx >= 0 && i < failIdx) s.state = 'pass'
-      else if (i === failIdx) s.state = 'fail'
-      else s.state = 'pending' // 未判定：灰点（不再冒充已通过）
-    })
-    checkResult.value = { ok: false, message: r.message, located: failIdx >= 0 }
+    checkResult.value = { ok: false, message: r.message, located: !!failKey }
     saveLastCheck({
       at: Date.now(),
       ok: false,

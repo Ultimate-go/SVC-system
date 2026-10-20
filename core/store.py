@@ -1000,13 +1000,16 @@ class VectorStore:
                     assignments=assignments,
                     blobs=blobs,
                 )
-        except TransportError:
+        except BaseException:
             # ★ 一次追加只要有**一台**没跟上，全网就不一致了：已经跟上的 δ 已经是新的，
             #   没跟上的还是旧的，而**协调者自己不推进**（下面那几行没执行）。
             #   更麻烦的是：登记表**已经分配过**这批下标，所以"再传一次文件"
             #   是错的（会撞上"登记表游标与向量长度不一致"）。
             #   ★ 方案约定：写失败**不留现场、也不重发** —— 没推上去的副本直接丢弃，
             #     并把已分配的位置退回登记表，这次写当作从未发生。
+            #   ★★ 捕获 BaseException 而不是 TransportError：传输层可能抛出别的
+            #     异常（注入故障、编程错误），而**任何**异常都不该在登记表里留脏账。
+            #     退不回去的后果是之后每次读值都以 KeyError 收场，且看不出根因。
             if context.get("kind", "add") == "add":
                 # ★★ 这次写**永远不会完成**，但登记表**已经分配过**这批位置了。
                 #    不退回去的话，协调者手里就留下"有位置、没分量"的脏账，
@@ -2140,6 +2143,13 @@ class VectorStore:
             以及验证结论。``ok=False`` 时 ``message`` 说清是哪一环没过。
         """
         if file_id is None:
+            # ★★ 空库必须报错，而不是“逐份跑一个空列表 ⇒ 没有坏项 ⇒ ok=True”。
+            #   上一版就是后者：一枚文件都没传时，发起 8 个挑战也回“通过”
+            #   （用户 2026-10-20 报的），因为 ``bad`` 为空。
+            if not self.files:
+                raise ValueError(
+                    "系统里还没有任何文件 —— 没有可挑战的分块。先上传一份文件再跑存储证明。"
+                )
             # ★ 逐份跑 —— 审计要的是“每一份文件都还在”，而不是“向量整体还在”。
             each = [
                 self.pos_audit(file_id=fid, lambda_pos=lambda_pos, rng=rng)
@@ -2193,6 +2203,14 @@ class VectorStore:
         delta = self.delta_of(*file_id)
         pos_all = tuple(self.registry.positions_of(*file_id))
         n = delta.n
+        # ★ λ 大于块数时不能“取满 n”混过去：PoR 的结论是「丢掉的比例小于 1/λ」，
+        #   而 λ > n 时真实覆盖面是 1/n，报出来的却是 1/λ —— 看上去更严，实际不是。
+        #   （``pos_challenge`` 底层仍取 min，作为防御；但调用方必须先把话说清。）
+        if lambda_pos > n > 0:
+            raise ValueError(
+                f"{file_id[0]}/{file_id[1]} 只有 {n} 个分块，挑战数 {lambda_pos} 超过块数 —— "
+                f"PoR 按“随机点 λ 个位置”衡量丢失比例，λ 不能大于块数。"
+            )
         if n == 0:
             raise ValueError(f"{file_id[0]}/{file_id[1]} 没有块，没有可挑战的数据")
 

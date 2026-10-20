@@ -66,12 +66,12 @@ def login(user: str) -> httpx.Headers:
 
 section("0. 登录与状态")
 H_ADMIN = login("admin")
-H_USER = login("zhangsan")
+H_USER = login("system1")
 # ★ 默认是“客户端解封”模型：后端手里没私钥，所以 /decrypt 一定 403
 #   （那是**设计如此**，不是 bug）。要在这里做“解出原文”的逐位比对，
 #   得用文档里那条对比路径：server_key=true（后端代管私钥）。
 _r = c.post("/api/auth/login",
-            json={"username": "zhangsan", "password": PWD, "server_key": True})
+            json={"username": "system1", "password": PWD, "server_key": True})
 H_OWN = {"Authorization": f"Bearer {_r.json()['token']}"}
 check("管理员登录成功", bool(H_ADMIN["Authorization"]))
 check("普通用户登录成功", bool(H_USER["Authorization"]))
@@ -138,7 +138,7 @@ q = r.json().get("verify") or r.json()
 check("★ 检索结果验证通过", bool(q.get("ok")), str(q)[:200])
 
 r = c.post("/api/query/files", headers=H_USER,
-           json={"targets": [["zhangsan", KEY_A]], "block_indices": [[0, 1]]})
+           json={"targets": [["system1", KEY_A]], "block_indices": [[0, 1]]})
 check("POST /api/query/files 200", r.status_code == 200, show(r, 250))
 if r.status_code == 200:
     _b = r.json()
@@ -203,12 +203,16 @@ check("POST /api/query/verify-batch 200", r.status_code == 200, show(r, 250))
 if r.status_code == 200:
     check("★ 批量验证（一次结论）通过", bool(r.json().get("ok")), show(r, 250))
 
-r = c.post("/api/por", headers=H_USER, json={})
-check("POST /api/por 200", r.status_code == 200, show(r, 250))
+# ★ λ 不能大于任何一份文件的块数（见 ``VectorStore.pos_audit`` 的校验），
+#   所以这里按“最小块数”取 λ —— 写死 8 的话，小文件会让 /api/por 回 409。
+_files = c.get("/api/files", headers=H_USER).json()
+_counts = [int(f.get("block_count") or 0) for f in _files] or [1]
+lam = max(1, min(8, min(_counts)))
+r = c.post("/api/por", headers=H_USER, json={"lambda_pos": lam})
+check(f"POST /api/por 200（lambda_pos={lam}）", r.status_code == 200, show(r, 250))
 if r.status_code == 200:
     check("★ 存储证明通过（各节点确实还存着）",
           bool(r.json().get("ok")), json.dumps(r.json(), ensure_ascii=False)[:220])
-
 
 section("6. ★ 故障演练必须**一个字节都不删**（上次就是把真数据删了）")
 

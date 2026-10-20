@@ -100,7 +100,7 @@ class Sample:
 
 
 #: 演示用的人员。口令统一是 ``pw-<名字>``（与后端演示账号同一个习惯）。
-DEMO_USERS = ("zhangsan", "nurse", "ortho", "lisi", "wangwu")
+DEMO_USERS = ("system1", "nurse", "ortho", "lisi", "system2")
 
 
 def password_of(who: str) -> str:
@@ -176,11 +176,11 @@ def main() -> int:
     sub("2. 上传：加密 → 分块 → 承诺 → **用所有者公钥封块密钥** → 分发")
     plan = [
         # (所有者, 文件名, 字节数)
-        ("zhangsan", "case-基础信息", 3000),
-        ("zhangsan", "case-内科", 2500),
-        ("zhangsan", "case-骨科", 1800),
+        ("system1", "case-基础信息", 3000),
+        ("system1", "case-内科", 2500),
+        ("system1", "case-骨科", 1800),
         ("lisi", "report-A", 4200),
-        ("wangwu", "note", 900),
+        ("system2", "note", 900),
     ]
 
     #: {(所有者, 文件名): {块序号: 封好的块密钥}} —— 块密钥**只以密文形式**存在
@@ -237,7 +237,7 @@ def main() -> int:
 
     # -- 4. 单文件查询 -----------------------------------------------------
     sub("4. 单文件查询（一个用户的某个文件）")
-    idx = store.file_indices("zhangsan", "case-内科")
+    idx = store.file_indices("system1", "case-内科")
     r = store.query(idx)
     print(f"  文件 case-内科 → {len(idx)} 块，全局位置 {list(idx)}")
     print(f"  {r.summary()}")
@@ -245,9 +245,9 @@ def main() -> int:
 
     # -- 5. 跨文件跨用户 ---------------------------------------------------
     sub("5. 跨文件 / 跨用户一次查询 —— 每个文件一条独立向量，一份证据重新算出来")
-    a = store.file_indices("zhangsan", "case-基础信息")
+    a = store.file_indices("system1", "case-基础信息")
     b = store.file_indices("lisi", "report-A")
-    c = store.file_indices("wangwu", "note")
+    c = store.file_indices("system2", "note")
     sel = [a[0], a[-1], b[1], c[0]]
     t = Timer()
     with t:
@@ -263,9 +263,9 @@ def main() -> int:
 
     # -- 5b. 更新：三条路径 -----------------------------------------------
     sub("5b. 更新：改一块 / 追加 / 截断 —— 代价只与改动量相关")
-    tgt = ("zhangsan", "case-内科")
+    tgt = ("system1", "case-内科")
     # 先记下“别人”的指纹：一整套更新跑完要证明它们一个字节没变。
-    others = [("lisi", "report-A"), ("wangwu", "note")]
+    others = [("lisi", "report-A"), ("system2", "note")]
     fp_before = {k: fp_of(store, k) for k in others}
 
     box_upd = key_cts[tgt]
@@ -489,16 +489,16 @@ def main() -> int:
 
     want = payload(2500, 2500 % 251)
     sub("8a. 本人读自己的文件")
-    data = try_read("zhangsan", "zhangsan", "case-内科")
-    print(f"  zhangsan → case-内科：{len(data)} 字节，逐字节一致 = {data == want}")
+    data = try_read("system1", "system1", "case-内科")
+    print(f"  system1 → case-内科：{len(data)} 字节，逐字节一致 = {data == want}")
 
     sub("8b. 别人一律不行 —— 包括管理员（已经**没有主密钥**这种东西了）")
     for who, owner, fkey, why in (
-        ("nurse", "zhangsan", "case-内科", "nurse 的私钥不是张三那把"),
-        ("ortho", "zhangsan", "case-骨科", "同上"),
-        ("lisi", "zhangsan", "case-基础信息", "同上"),
-        ("wangwu", "lisi", "report-A", "王五解不开李四的文件"),
-        ("zhangsan", "wangwu", "note", "反过来也一样"),
+        ("nurse", "system1", "case-内科", "nurse 的私钥不是 system1 那把"),
+        ("ortho", "system1", "case-骨科", "同上"),
+        ("lisi", "system1", "case-基础信息", "同上"),
+        ("system2", "lisi", "report-A", "system2 解不开 lisi 的文件"),
+        ("system1", "system2", "note", "反过来也一样"),
     ):
         try:
             try_read(who, owner, fkey)
@@ -508,25 +508,25 @@ def main() -> int:
             print(f"  ！{who} → {fkey} 竟然成功了（不该！）")
 
     sub("8c. 但**验证**不受限：任何人都能验别人的文件")
-    cov = store.query(store.file_indices("wangwu", "note"))
-    print(f"  zhangsan 验 wangwu 的 note：{'通过 ✓' if cov.ok else '失败（不该！）'}"
+    cov = store.query(store.file_indices("system2", "note"))
+    print(f"  system1 验 system2 的 note：{'通过 ✓' if cov.ok else '失败（不该！）'}"
           "  ← 这条路一个密钥字节都不碰")
 
     sub("8d. 随机访问：只取第 2 段")
     # ★ read 的 indices 是**文件内块号**（与界面上说的“第几块”一致），
     #   不是全局位置号 —— 同一个 1 在两套坐标里指的是不同的块。
     seg2 = 1
-    part = try_read("zhangsan", "zhangsan", "case-内科", [seg2])
+    part = try_read("system1", "system1", "case-内科", [seg2])
     print(f"  取到 {len(part)} 字节（segment_bytes = {store.segment_bytes}）"
           f"，等于原文对应段 = {part == want[store.segment_bytes:2 * store.segment_bytes]}")
 
     sub("8e. 把封好的块密钥改一个字节 —— 连所有者自己也解不开了")
-    ct0 = key_cts[("zhangsan", "case-内科")][0]
+    ct0 = key_cts[("system1", "case-内科")][0]
     print(f"  密文形状 = {sorted(ct0)}   kind = {ct0['kind']!r}")
     intact = ct0["body"]
     ct0["body"] = ("0" if intact[0] != "0" else "1") + intact[1:]
     try:
-        try_read("zhangsan", "zhangsan", "case-内科")
+        try_read("system1", "system1", "case-内科")
     except PermissionError as exc:
         print(f"  ✗ 所有者：{exc}")
     else:
@@ -539,11 +539,15 @@ def main() -> int:
     # -- 8d. 存储证明（PoR）-----------------------------------------------
     sub("8d. 存储证明：不下载任何内容，确认各节点还存着它那份")
     t = Timer()
+    # ★ λ 不能大于块数（见 ``VectorStore.pos_audit`` 的校验）：这份文件只有
+    #   几块，就按几块挑战 —— 取 min 而不是固定 4，否则演示会当场被参数挡住。
+    n_case = len(store.file_indices("system1", "case-内科"))
+    lam = min(4, n_case)
     with t:
-        por = store.pos_audit(file_id=("zhangsan", "case-内科"), lambda_pos=4)
+        por = store.pos_audit(file_id=("system1", "case-内科"), lambda_pos=lam)
     print(
-        f"  挑战 4 个随机位置 → {'通过' if por.get('ok') else '失败'}"
-        f"　{t.take():.0f} ms"
+        f"  挑战 {lam} 个随机位置（该文件共 {n_case} 块）→ "
+        f"{'通过' if por.get('ok') else '失败'}　{t.take():.0f} ms"
     )
     print("  ★ 与“查询”问的不是同一件事：这里**一个字节内容都没取回**，")
     print("    只让各节点按自己那段算出份额，聚合后验一次 —— 用来发现")

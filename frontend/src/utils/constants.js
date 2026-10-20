@@ -8,8 +8,8 @@
 /** 演示账号（口令统一 vds12345），登录页一键填充用。 */
 export const DEMO_ACCOUNTS = [
   { username: 'admin', display: '管理员', hint: '可查看审计流水与用户管理；无他人文件的解密权限' },
-  { username: 'zhangsan', display: '张三', hint: '普通用户；可上传自有文件，对所有文件具备验证权限、仅对自己所持文件具备解密权限' },
-  { username: 'wangwu', display: '王五', hint: '另一普通用户（用于展示「验证不受限、解密受限」语义）' },
+  { username: 'system1', display: '系统用户 01', hint: '普通用户；可上传自有文件，对所有文件具备验证权限、仅对自己所持文件具备解密权限' },
+  { username: 'system2', display: '系统用户 02', hint: '另一普通用户（用于展示「验证不受限、解密受限」语义）' },
 ]
 
 export const DEMO_PASSWORD = 'vds12345'

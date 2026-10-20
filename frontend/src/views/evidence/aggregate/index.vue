@@ -875,8 +875,11 @@ async function mergeNow() {
  *
  * 两张以上的卡如果**跨了不同文件**，批量验证会被后端拒 —— 这不是故障：
  * 一次结论要求所有证据落在**同一个承诺 C** 上（一条向量）。所以先问一句：
- *   先聚合再验证 → 把它们归约成一条合并向量上的证据再验（少一次「被拒」的往返）；
- *   直接验证     → 真被拒了，结果区里那个「先归约」就是下一步。
+ *   “先聚合再验证” → 把它们归约成一条合并向量上的证据再验（少一次「被拒」的往返）。
+ *
+ * ★ 2026-10-20：删掉了「直接验证」那个选项。它只会把用户送进一次**必然失败**的
+ *   请求，再由结果区教他点「先归约」—— 两条路通向同一个地方，却多了一次往返。
+ *   现在框里只剩一个确认按钮，点取消 = 什么都不做。
  */
 async function verifySelected() {
   if (!panel.selectedCards.length) {
@@ -885,37 +888,31 @@ async function verifySelected() {
   }
   const files = panel.unionScope.files
   if (panel.selectedCards.length > 1 && files.size > 1) {
-    let firstAggregate = false
     try {
       await ElMessageBox.confirm(
         `已选 ${panel.selectedCards.length} 张卡片，涉及 ${files.size} 份文件。` +
           '不同文件的证据分别绑定各自的承诺，单次结论要求所有证据位于同一承诺之下。' +
-          '是否先聚合为同一合并向量上的一份证据，再执行验证？',
+          '将先把它们聚合为同一合并向量上的一份证据，再执行验证。',
         '先归约再验证',
         {
           confirmButtonText: '先聚合再验证',
-          cancelButtonText: '直接验证',
+          cancelButtonText: '取消',
           type: 'info',
-          distinguishCancelAndClose: true,
         },
       )
-      firstAggregate = true
-    } catch (action) {
-      // 'close' = 点右上角 × 或按 Esc → 什么都不做；'cancel' = 直接验证
-      if (action === 'close') return
+    } catch {
+      return // 取消 / 关闭 = 什么都不做
     }
-    if (firstAggregate) {
-      const card = await aggregateCards()
-      // ★ 聚合得到的就是「接下来要验的那张」。
-      //   不能用“新出现的 id”去找：同一集合已有卡时 store 会**复用**那张卡，
-      //   聚合面板里根本不会多出新的 id（返值里才有它）。
-      if (!card?.id) {
-        ElMessage.warning('未能归约出可验证的卡片，原因见上方提示')
-        return
-      }
-      panel.clearSelection()
-      panel.setSelected(card.id, true)
+    const card = await aggregateCards()
+    // ★ 聚合得到的就是「接下来要验的那张」。
+    //   不能用“新出现的 id”去找：同一集合已有卡时 store 会**复用**那张卡，
+    //   聚合面板里根本不会多出新的 id（返值里才有它）。
+    if (!card?.id) {
+      ElMessage.warning('未能归约出可验证的卡片，原因见上方提示')
+      return
     }
+    panel.clearSelection()
+    panel.setSelected(card.id, true)
   }
   await batchVerify()
 }
@@ -932,6 +929,10 @@ async function batchVerify() {
   const t0 = performance.now()
   batchRunning.value = true
   batchResult.value = null
+  // ★★ 结果面板只在**同一块地方**显示一个：开始验证就把上一次的分解结果收掉。
+  //   不互斥的话，两个结果会各占一行，而第 2 行是 `1fr` —— 中间会凭空多出
+  //   一大片空白，看上去像“验证结果没加载完”。（用户 2026-10-20）
+  disaggResult.value = null
   try {
     const items = cards.map((c) => ({
       indices: c.indices,
@@ -1284,6 +1285,8 @@ async function confirmDisagg() {
   }
   disaggRunning.value = true
   disaggResult.value = null
+  // ★ 与验证结果互斥（见 `batchVerify` 里的同一句注释）。
+  batchResult.value = null
   try {
     const { data } = await evidenceApi.disagg({
       I: c.indices,
@@ -1336,9 +1339,7 @@ onMounted(() => {
         <el-button v-if="panel.selectedIds.length" link @click="panel.clearSelection()">取消选择</el-button>
         <span class="toolbar-right"><DetailToggle /></span>
       </div>
-      <p class="sweep-hint text-3">
-        在卡片区域按住拖动可连续选择；从已选中的卡片起拖则连续取消。
-      </p>
+
       <details class="note-collapse">
         <summary>说明</summary>
         <p class="note">
@@ -1471,7 +1472,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <div v-if="batchResult" class="panel mt-3">
+    <div v-if="batchResult" class="panel">
       <h4 class="sec-title">批量验证结果</h4>
       <!-- 批量验证的结论由服务端给出（`/api/verify` / `/api/query`），客户端不独立复算。
            界面按结论本身着色：通过为成功色，未通过为错误色。 -->
@@ -1518,7 +1519,7 @@ onMounted(() => {
       <StageTimeline v-if="batchResult.timings" :timings="batchResult.timings" :total-ms="batchTotalMs" class="mt-2" />
     </div>
 
-    <div v-if="disaggResult" class="panel mt-3">
+    <div v-if="disaggResult" class="panel">
       <h4 class="sec-title">分解结果</h4>
       <div class="text-2" style="font-size: 13px">
         原证据覆盖 {{ blockText(disaggCard, disaggResult.source_indices || []) }}，
@@ -1747,7 +1748,10 @@ onMounted(() => {
   display: grid;
   grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
   grid-template-rows: auto 1fr;
-  gap: 12px;
+  /* ★ 2026-10-20：行间不留缝（用户）—— 否则“批量验证结果”与“分解结果”之间
+     会叠出 grid 的 12px + 各自 mt-3 的 12px。列间仍保留 12px（左右两栏）。 */
+  row-gap: 0;
+  column-gap: 12px;
   align-items: start;
 }
 /* 所有“面板”默认落在左栏（功能那块在第 1 行，结果面板依次往下排） */
@@ -1933,13 +1937,19 @@ onMounted(() => {
   max-height: 34vh;
   overflow: auto;
 }
-/* 右栏下：验证结果占满剩余高度（第 2 行为 1fr），内容多时在面板内滚动。
+/* 右栏下：结果面板（批量验证 / 分解）—— 同一个位置只坐一个。
    注意结果面板是 agg-wrap 的直接子元素（agg-side 只包住了功能面板与卡片列表），
-   所以不能与上面合并成一条选择器；align-self 取 stretch 才能跳开外层的 align-items: start。 */
+   所以不能与上面合并成一条选择器。
+   ★ 2026-10-20：`align-self` 从 stretch 改成 start —— 之前它被 stretch 到第二行
+     （`1fr`）的全部高度，结论只有两行时下面挂着一大片面板底色，看着像还没加载完。
+   ★ 2026-10-20 第二处：两个结果都钉在 `grid-row: 2`（同一个格子），并且 JS 侧
+     做了互斥 —— 之前它们各占一行，第二个被推到自动生成的第三行，中间那一整行
+     `1fr` 的剩余高度就空在那里。 */
 .agg-wrap > .panel {
   grid-column: 2;
+  grid-row: 2;
   min-width: 0;
-  align-self: stretch;
+  align-self: start;
   min-height: 0;
   max-height: 100%;
   overflow: auto;

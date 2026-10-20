@@ -19,7 +19,7 @@
  * - 替换 / 追加 / 删除（三种写操作都显示 timings；置零是替换页上的一个小按钮）。
  * - 解密预览（**浏览器本地解密 + 本地验证**；结果在十六进制大弹框里看，按分块底色区分）。
  */
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
@@ -50,6 +50,8 @@ import HashText from '../../../components/common/HashText.vue'
 import BlockMatrix from '../../../components/chart/BlockMatrix.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import LockTag from '../../../components/security/LockTag.vue'
+import HexViewer from '../../../components/security/HexViewer.vue'
+import { buildHexBlocks } from '../../../utils/hexview.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -218,126 +220,19 @@ const decodePreview = computed(() => {
 })
 
 /**
- * 十六进制视图的数据：按 `layout` 的明文长度把整份 hex 切回分块，再按 16 字节一行。
+ * 十六进制视图的数据：交给 `utils/hexview.js` 统一切块（与上传文件页同一份实现）。
  *
- * ★ 为什么按 `plain_len` 切而不是固定 1 KB：最后一个分块通常不满一块，
- *   而且分块大小是上传时定的（`file.block_size`），这里只信每块登记的长度。
- * ★★ 但**回滚演示**时得用“这次真实解出来多长”（`decryptResult.blockLens`）：
- *   服务端交回的是旧版本那一块，它的长度与**当前**账目可以不同（比如 1024 → 22）。
- *   按当前账目切就会把旧那块截短、把剩下的字节顶到下一块去，整份视图错位。
- * ★ 累计偏移以**全文**为坐标（不是块内偏移），这样翻到第 N 块时能直接读出
- *   该字节在文件里的位置 —— 与改块页的序号口径一致（界面 1 起，偏移 0 起）。
+ * ★ 为什么按 `plain_len` 切、回滚时为什么用 `blockLens`、偏移为什么是全文坐标，
+ *   都在那个模块的头注释里 —— 这里只负责把它要的四样东西取出来。
  */
-const hexBlocks = computed(() => {
-  const hex = decryptResult.value?.hex
-  const rows = [...(file.value?.layout || [])].sort((a, b) => a.block_idx - b.block_idx)
-  if (!hex || !rows.length) return []
-  const total = decryptResult.value.bytes || hex.length / 2
-  const replayed = new Set(decryptResult.value.replayedBlocks || [])
-  // 本次真实长度（按块号查）；没有就退回账目上的长度。
-  const realLen = new Map((decryptResult.value.blockLens || []).map((x) => [x.idx, x.len]))
-  const out = []
-  let cursor = 0
-  rows.forEach((b, i) => {
-    // ★ 最后一块吃掉剩余字节：万一长度与解出的明文有出入，
-    //   也不能把尾巴露在视图外面。
-    const own = realLen.has(b.block_idx) ? realLen.get(b.block_idx) : (b.plain_len || 0)
-    const len = i === rows.length - 1 ? Math.max(own, total - cursor) : own
-    const slice = hex.slice(cursor * 2, (cursor + len) * 2)
-    const rws = []
-    for (let off = 0; off < slice.length / 2; off += 16) {
-      const lineHex = slice.slice(off * 2, (off + 16) * 2)
-      const cells = []
-      const ascii = []
-      for (let j = 0; j + 1 < lineHex.length; j += 2) {
-        const byte = parseInt(lineHex.slice(j, j + 2), 16)
-        cells.push({ hex: lineHex.slice(j, j + 2).toUpperCase(), zero: byte === 0 })
-        const printable = byte >= 0x20 && byte <= 0x7e
-        ascii.push({ ch: printable ? String.fromCharCode(byte) : '.', dot: !printable })
-      }
-      rws.push({
-        off,
-        offHex: (cursor + off).toString(16).toUpperCase().padStart(8, '0'),
-        cells,
-        ascii,
-      })
-    }
-    out.push({
-      idx: b.block_idx,
-      len,
-      offsetHex: cursor.toString(16).toUpperCase().padStart(8, '0'),
-      rows: rws,
-      replayed: replayed.has(b.block_idx),
-      // 相邻分块色相至少差 40°（黄金角推进），避免两块颜色看着一样。
-      hue: (i * 47) % 360,
-    })
-    cursor += len
-  })
-  return out
-})
-
-/* ---------------------------------------------------------------------------
-   十六进制视图的书签栏
-   ---------------------------------------------------------------------------
-   一个分块一枚书签，颜色与那一块的左色条 / 标题一致（同一串色相，见 `hexBlocks`）。
-   目的很具体：块多时整份视图有几千行，靠滚轮拖很久；这里给一条能一眼看全的索引。
---------------------------------------------------------------------------- */
-const hexWrap = ref(null)
-/** 当前点亮的分块序号（0 起）；-1 = 还没定。 */
-const activeBlock = ref(-1)
-/** 分块序号 → 该块的 DOM（`v-for` 里的函数 ref 登记）。 */
-const blockEls = new Map()
-
-function setBlockEl(el, idx) {
-  if (el) blockEls.set(idx, el)
-  else blockEls.delete(idx)
-}
-
-/** 点书签：只滚容器，不连带滚页面 / 弹框。 */
-function jumpToBlock(idx) {
-  const wrap = hexWrap.value
-  const el = blockEls.get(idx)
-  if (!wrap || !el) return
-  const offset = el.getBoundingClientRect().top - wrap.getBoundingClientRect().top
-  wrap.scrollTo({ top: wrap.scrollTop + offset - 6, behavior: 'smooth' })
-  activeBlock.value = idx
-}
-
-/**
- * 滚到哪儿就把哪一枚点亮：取「顶边已经越过容器顶」的**序号最大**的那一块。
- *
- * ★ 按块的边界算而不是按滚动比例算 —— 块高不一样（最后一块往往不满），
- *   按比例算会和实际看到的那一块对不上。
- * ★ 不能依赖 `blockEls` 的迭代顺序（Map 记的是插入顺序，重渲染后不保证升序），
- *   所以取最大值而不是“最后一个命中的”。
- * ★ 滚动事件很密（128 块时一次要量 128 个盒子），用 rAF 合并到一帧一次。
- */
-let scrollRaf = 0
-function syncActiveBlock() {
-  if (scrollRaf) return
-  scrollRaf = requestAnimationFrame(() => {
-    scrollRaf = 0
-    const wrap = hexWrap.value
-    if (!wrap) return
-    const line = wrap.getBoundingClientRect().top + 8
-    let cur = -1
-    for (const [idx, el] of blockEls) {
-      if (idx > cur && el.getBoundingClientRect().top <= line) cur = idx
-    }
-    if (cur >= 0) activeBlock.value = cur
-  })
-}
-
-// 每次开框都从第 1 块看起，并点亮第一枚书签（弹框是 destroy-on-close，内容会重建）。
-watch(
-  [decryptOpen, () => hexBlocks.value.length],
-  async ([open, len]) => {
-    if (!open || !len) return
-    await nextTick()
-    if (hexWrap.value) hexWrap.value.scrollTop = 0
-    activeBlock.value = hexBlocks.value[0]?.idx ?? -1
-  },
-  { immediate: true },
+const hexBlocks = computed(() =>
+  buildHexBlocks({
+    hex: decryptResult.value?.hex,
+    layout: file.value?.layout,
+    total: decryptResult.value?.bytes,
+    realLen: decryptResult.value?.blockLens,
+    replayed: decryptResult.value?.replayedBlocks,
+  }),
 )
 
   // ---- 改块前“看旧内容”：明文 + **本地锚定校验** ----
@@ -575,7 +470,7 @@ async function doModify() {
     //   让下一次解密变成"重新见证"，而不是默默把新 δ 收下。
     dropDeltaAnchor(id.value)
     oldInfo.value = null
-    ElMessage.success(`已替换第 ${humanIdx(idx)} 个分块；当前为第 ${data.version} 版（本地锚已更新）`)
+    ElMessage.success(`已替换第 ${humanIdx(idx)} 个分块；当前为第 ${data.version} 版`)
     dropDecryptResult()
     await load()
   } catch {
@@ -1459,62 +1354,8 @@ onMounted(load)
           description="右侧 ASCII 栏里的「.」既可能是真的句点，也可能是不可打印字节 —— 请以十六进制栏为准。"
         />
 
-        <div class="hx-main">
-          <!--
-            ★ 书签栏（用户 2026-10-18）：一个分块一枚，颜色与该块的左色条 / 标题同色，
-              点一下就滚到那一块。块多的时候（128 块 ≈ 8000+ 行）靠滚轮拖很久，
-              这里给一条索引；它自己也能滚，且滚到哪儿就亮哪一枚。
-          -->
-          <div v-if="hexBlocks.length > 1" class="hx-rail" aria-label="分块书签">
-            <button
-              v-for="b in hexBlocks"
-              :key="b.idx"
-              type="button"
-              class="hx-tab"
-              :class="{ 'is-now': b.idx === activeBlock }"
-              :style="{ '--hx-hue': String(b.hue) }"
-              :title="`第 ${b.idx + 1} 块 · ${b.len} 字节 · 偏移 0x${b.offsetHex}`"
-              @click="jumpToBlock(b.idx)"
-            >
-              {{ b.idx + 1 }}
-            </button>
-          </div>
-          <div ref="hexWrap" class="hx-wrap" @scroll.passive="syncActiveBlock">
-          <div
-            v-for="b in hexBlocks"
-            :key="b.idx"
-            :ref="(el) => setBlockEl(el, b.idx)"
-            class="hx-block"
-            :style="{ borderLeftColor: `hsl(${b.hue} 62% 55%)` }"
-          >
-            <div class="hx-head" :style="{ color: `hsl(${b.hue} 58% 30%)` }">
-              第 {{ b.idx + 1 }} 块
-              <span class="hx-sep">·</span>
-              {{ b.len }} 字节
-              <span class="hx-sep">·</span>
-              <span class="mono">偏移 0x{{ b.offsetHex }}</span>
-              <span v-if="b.replayed" class="hx-replay">服务端返回的是旧版本</span>
-            </div>
-            <div class="hx-body">
-              <div v-for="r in b.rows" :key="r.off" class="hx-row">
-                <span class="hx-off">{{ r.offHex }}</span>
-                <span class="hx-bytes">
-                  <span
-                    v-for="(c, i) in r.cells"
-                    :key="i"
-                    class="hx-c"
-                    :class="{ 'hx-zero': c.zero }"
-                  >{{ c.hex }}</span>
-                </span>
-                <span class="hx-ascii">
-                  <span v-for="(ch, i) in r.ascii" :key="i" :class="{ 'hx-dotc': ch.dot }">{{ ch.ch }}</span>
-                </span>
-              </div>
-            </div>
-          </div>
-          <p v-if="!hexBlocks.length" class="text-2" style="font-size: 13px">没有可展示的分块。</p>
-          </div>
-        </div>
+        <!-- 分块十六进制视图：书签栏 + 每块一卡（与上传文件页共用同一组件）。 -->
+        <HexViewer :blocks="hexBlocks" />
 
         <details class="note-collapse">
           <summary>说明</summary>
@@ -1857,114 +1698,4 @@ onMounted(load)
 .hx-verdict.bad { background: rgba(214, 69, 69, 0.1); border-color: rgba(214, 69, 69, 0.45); color: #c94a4a; }
 .hx-verdict-k { font-size: 12.5px; opacity: 0.75; margin-right: 2px; }
 .hx-sep { opacity: 0.35; }
-
-/* 左书签栏 + 右十六进制视图。书签颜色由 `--hx-hue` 控制，与块的左色条同源。
-   ★ 2026-10-19：整块改成**浅色**（用户：论文里建议不要深色背景的截图），
-     颜色全部走主题变量，深色主题下自然变回深底。 */
-.hx-main {
-  display: flex;
-  gap: 10px;
-  margin-top: 10px;
-  align-items: stretch;
-}
-.hx-rail {
-  flex: 0 0 auto;
-  width: 54px;
-  max-height: 58vh;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg-raised);
-  scrollbar-width: thin;
-}
-.hx-tab {
-  flex: 0 0 auto;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  border-left: 3px solid hsl(var(--hx-hue) 62% 45%);
-  border-radius: 4px;
-  background: hsl(var(--hx-hue) 55% 92%);
-  color: hsl(var(--hx-hue) 58% 32%);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, transform 0.12s;
-}
-.hx-tab:hover {
-  background: hsl(var(--hx-hue) 62% 86%);
-  color: hsl(var(--hx-hue) 65% 24%);
-  transform: translateX(2px);
-}
-.hx-tab:focus-visible {
-  outline: 2px solid hsl(var(--hx-hue) 70% 50%);
-  outline-offset: 1px;
-}
-.hx-tab.is-now {
-  background: hsl(var(--hx-hue) 62% 88%);
-  color: hsl(var(--hx-hue) 68% 24%);
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px hsl(var(--hx-hue) 55% 60%);
-}
-
-.hx-wrap {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-height: 58vh;
-  overflow: auto;
-  padding: 10px 8px 4px 0;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg-raised);
-}
-.hx-block {
-  margin: 0 0 10px 8px;
-  border-left: 3px solid #4a7fb5;
-  border-radius: 6px;
-  background: var(--bg-panel);
-  overflow: hidden;
-}
-.hx-block:nth-child(even) { background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-page)); }
-.hx-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 5px 10px;
-  font-size: 12.5px;
-  font-weight: 600;
-  background: color-mix(in srgb, var(--text-1) 4%, transparent);
-  border-bottom: 1px solid var(--line);
-}
-.hx-replay { margin-left: auto; font-size: 12px; font-weight: 500; color: #b45309; }
-.hx-body { padding: 6px 10px 8px; }
-.hx-row {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr) 176px;
-  gap: 10px;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.75;
-}
-.hx-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.hx-off { color: var(--text-3); }
-.hx-bytes { display: flex; flex-wrap: wrap; }
-.hx-c { width: 1.95em; text-align: center; color: var(--text-1); }
-.hx-zero { color: var(--text-3); opacity: .6; }
-.hx-ascii {
-  color: var(--text-2);
-  padding-left: 10px;
-  border-left: 1px solid var(--line);
-  letter-spacing: 0.5px;
-  word-break: break-all;
-}
-.hx-dotc { color: var(--text-3); opacity: .6; }
-@media (max-width: 900px) {
-  .hx-row { grid-template-columns: 74px minmax(0, 1fr); }
-  .hx-ascii { display: none; }
-}
 </style>

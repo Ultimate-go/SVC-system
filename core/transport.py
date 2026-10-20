@@ -56,6 +56,9 @@ class WriteError(TransportError):
 
     :param failures: ``[{"node": "node-2", "reason": "..."}]``
     :param op: ``"append"`` / ``"update"`` / ``"delete"``（出错的写路径名）
+    :param undo_failed: 已经跟上、但**撤回也失败**的节点（每条一句原因）。
+        ★ 非空意味着节点上可能真的留下了孤儿段 —— 那种情况只能手工清理
+          （``scripts/_node_forget_stray.py``），所以必须让调用方看得见。
     """
 
     def __init__(
@@ -63,10 +66,17 @@ class WriteError(TransportError):
         message: str,
         failures: "Sequence[dict]",
         op: str = "append",
+        undo_failed: "Sequence[str]" = (),
     ) -> None:
         super().__init__(message)
         self.failures: list[dict] = [dict(f) for f in failures]
         self.op = op
+        self.undo_failed: list[str] = [str(x) for x in undo_failed]
+
+    @property
+    def rolled_back(self) -> bool:
+        """已经跟上的那些节点是否都**确认退回**了（没有残留孤儿）。"""
+        return not self.undo_failed
 
     @property
     def nodes(self) -> list[str]:
@@ -388,45 +398,63 @@ class LocalTransport:
         #   交换只在传输层发生，store 不用管。
         idx_of = {g: i for i, g in enumerate(delta_new.positions)}
         off = int(delta_old.offset)
-        for nid in self.node_ids:
-            seg = tuple(idx_of[g] for g in assignments.get(nid, ()))
-            state = self.states.get(nid)
+        # ★★ 已经跟上的节点要能**退回**：协调者随后会回退登记表（位置不回收），
+        #   如果节点侧不退，那批 offset 就成了永远没人认领的孤儿，
+        #   而启动闸是拿「节点上的 offset 集合」与协调者账目整体比的 ——
+        #   孤儿会让下一次启动直接被拒。快照在两个失败点上都会用到。
+        applied: list[tuple[str, NodeState, dict | None, bool]] = []
+        try:
+            for nid in self.node_ids:
+                seg = tuple(idx_of[g] for g in assignments.get(nid, ()))
+                state = self.states.get(nid)
+                was_created = state is None
+                if was_created:
+                    state = NodeState(nid, self.session)
+                snap = state.snapshot(off)
+                # ★ 先登记再改动：失败可能发生在 adopt_empty 之后、absorb 之中，
+                #   那台节点同样需要退回 —— 所以“已改动清单”必须在第一处变更
+                #   之前就把它记上，而不是等整段成功。
+                applied.append((nid, state, snap, was_created))
+                if not state.has_view(off):
+                    # 这份文件还没参与过：从空视图起步（π_∅ = (U_n, C_n)）。
+                    # ★ 这里用 ``delta_new`` 而不是 ``delta_old``：紧接着的
+                    #   ``absorb`` 会把 ``current.delta.C`` 当成“**新**承诺”来用，
+                    #   π_∅ 必须与它配套。
+                    # ★ 也不要在这里重建 NodeState —— 那样会把该节点参与过的
+                    #   别的文件的视图一起丢掉（一台节点同时存着好几份文件的数据）。
+                    state.adopt_empty(delta_new)
+                else:
+                    try:
+                        state.adapt(off, op_delta, witness, delta_new)
+                    except NodeRejected as exc:
+                        raise TransportError(f"{nid} 拒绝更新：{exc}") from exc
+                    if state.delta_of(off) != delta_new:
+                        # 节点自己算出来的摘要必须与协调者算的逐位相同 ——
+                        # 两条路径（apply_update vs push_update）的交叉验证
+                        raise TransportError(
+                            f"{nid} 自己算出的摘要与协调者不一致："
+                            f"{state.delta_of(off)!r} vs {delta_new!r}"
+                        )
 
-            if state is None:
-                state = NodeState(nid, self.session)
-            if not state.has_view(off):
-                # 这份文件还没参与过：从空视图起步（π_∅ = (U_n, C_n)）。
-                # ★ 这里用 ``delta_new`` 而不是 ``delta_old``：紧接着的
-                #   ``absorb`` 会把 ``current.delta.C`` 当成“**新**承诺”来用，
-                #   π_∅ 必须与它配套。
-                # ★ 也不要在这里重建 NodeState —— 那样会把该节点参与过的
-                #   别的文件的视图一起丢掉（一台节点同时存着好几份文件的数据）。
-                state.adopt_empty(delta_new)
-            else:
-                try:
-                    state.adapt(off, op_delta, witness, delta_new)
-                except NodeRejected as exc:
-                    raise TransportError(f"{nid} 拒绝更新：{exc}") from exc
-                if state.delta_of(off) != delta_new:
-                    # 节点自己算出来的摘要必须与协调者算的逐位相同 ——
-                    # 两条路径（apply_update vs push_update）的交叉验证
-                    raise TransportError(
-                        f"{nid} 自己算出的摘要与协调者不一致："
-                        f"{state.delta_of(off)!r} vs {delta_new!r}"
-                    )
-
-            nb = blobs.get(nid)
-            state.absorb(
-                delta_old=delta_old,
-                new_positions=tuple(op_delta.K),
-                assigned=seg,
-                values_all=tuple(op_delta.F_new),
-                blobs={idx_of[g]: ct for g, ct in nb.items()} if nb else None,
-                delta_new=delta_new,
-            )
-            if not state.check(off):
-                raise TransportError(f"{nid} 更新后本地视图不合法")
-            self.states[nid] = state
+                nb = blobs.get(nid)
+                state.absorb(
+                    delta_old=delta_old,
+                    new_positions=tuple(op_delta.K),
+                    assigned=seg,
+                    values_all=tuple(op_delta.F_new),
+                    blobs={idx_of[g]: ct for g, ct in nb.items()} if nb else None,
+                    delta_new=delta_new,
+                )
+                if not state.check(off):
+                    raise TransportError(f"{nid} 更新后本地视图不合法")
+                self.states[nid] = state
+        except BaseException:
+            # 倒序退回（与写入顺序相反：先撤最后动过的那台）。
+            for nid, state, snap, was_created in reversed(applied):
+                state.restore_snapshot(off, snap)
+                if was_created and not state.offsets:
+                    self.states.pop(nid, None)
+            raise
 
     def apply_update(
         self,

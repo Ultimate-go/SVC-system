@@ -36,7 +36,7 @@
 | 后端 `backend/` | FastAPI + SQLAlchemy 2 + SQLite（WAL）+ PyJWT + bcrypt |
 | 节点 `node_service/` | 独立进程的 HTTP 服务，每台节点一套独立 SQLite |
 | 前端 `frontend/` | Vue 3 + Vite + Pinia + Element Plus；自实现 SM2 / SM3 / SM4 / PBKDF2 |
-| 测试 | Node 自带 `node --test`（162 条）；验收脚本 8 份 + 静态自检 4 份 |
+| 测试 | Node 自带 `node --test`（162 条）；验收脚本 9 份 + 静态自检 4 份 |
 
 ---
 
@@ -79,8 +79,11 @@ python -X utf8 scripts/start_all.py --demo
 | 账号 | 角色 | 用途 |
 |---|---|---|
 | `admin` | 管理员 | 用户 / 存储节点 / 审计 / 初始化与系统自检 |
-| `zhangsan` | 普通用户 | 上传自有文件；验证全部、解密自持 |
-| `wangwu` | 普通用户 | 演示"验证不受限、解密受限" |
+| `system1` | 普通用户 | 上传自有文件；验证全部、解密自持 |
+| `system2` | 普通用户 | 演示"验证不受限、解密受限" |
+
+> 内置账号在建库时创建。旧库里的 `zhangsan` / `wangwu` 不能原地改名（`owner` 参与块身份派生素数），
+> 要换成新账号请执行一次 `重置并启动.cmd`。
 
 ---
 
@@ -130,7 +133,7 @@ npm --prefix frontend test
 当前 **16 个测试文件、162 条用例**，覆盖：密码学与 Python 逐字节对齐、异步 KDF 等价性、
 本地 δ 锚、422 文案还原、输入校验上限、切块阶梯同表、体积估算上界、时间显示、文案安全承诺等。
 
-### 7.2 八份可离线验收脚本（不启服务）
+### 7.2 九份可离线验收脚本（不启服务）
 
 ```powershell
 python -X utf8 scripts/verify_identity_primegen.py
@@ -141,6 +144,7 @@ python -X utf8 scripts/verify_node_wire.py
 python -X utf8 scripts/verify_fault_drill.py
 python -X utf8 scripts/verify_incremental_agg.py
 python -X utf8 scripts/verify_segment_ladder.py
+python -X utf8 scripts/verify_write_rollback.py
 ```
 
 ### 7.3 四项静态自检

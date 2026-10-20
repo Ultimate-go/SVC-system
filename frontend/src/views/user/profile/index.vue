@@ -251,7 +251,12 @@ onMounted(() => {
       <StageTimeline v-if="changeTimings" :timings="changeTimings" :total-ms="changeElapsed" class="mt-3" />
       <details class="note-collapse">
         <summary>说明</summary>
-        <p class="note">修改口令会重新生成并保存密钥</p>
+        <p class="note">
+          修改口令<strong>不会</strong>重新生成密钥，也<strong>不会</strong>影响已上传的文件：
+          浏览器用新口令把<strong>同一把 SM2 私钥</strong>重新封装一遍 ——
+          私钥本体与公钥都不变，所以旧文件照旧可解密，不需要重传任何数据。
+          上传新密文时，服务端会再次检验秘钥。
+        </p>
       </details>
     </div>
 

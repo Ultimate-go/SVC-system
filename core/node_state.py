@@ -240,6 +240,56 @@ class NodeState:
         )
         self._blobs[off] = {int(k): bytes(v) for k, v in (blobs or {}).items()}
 
+    def snapshot(self, offset: int) -> dict | None:
+        """给一次写操作拍快照 —— 失败时用它把这份视图**原样恢复**。
+
+        :returns: ``None`` 表示"这次写之前本节点根本没有这份视图"，
+            撤销时应当整段丢弃（不是恢复成空视图）。
+
+        ★ 密文必须**复制**：``_blobs_of`` 返回的是内部字典，
+          ``absorb`` 会往里写，拿引用当快照等于没拍。
+        ★ ``delta`` / ``st`` 是不可变 dataclass，直接存引用即可。
+        """
+        off = int(offset)
+        view = self._views.get(off)
+        if view is None:
+            return None
+        return {
+            "delta": view.delta,
+            "st": view.st,
+            "I": tuple(view.I),
+            "FI": tuple(view.FI),
+            "blobs": dict(self._blobs.get(off, {})),
+        }
+
+    def restore_snapshot(self, offset: int, snap: dict | None) -> None:
+        """把 :meth:`snapshot` 的产物覆写回去（``None`` = 整段丢弃）。
+
+        只用于**撤销一次没推完的写**，不校验任何东西：快照来自本对象自己，
+        不是外部输入。
+        """
+        off = int(offset)
+        if snap is None:
+            self.discard_view(off)
+            return
+        self._views[off] = LocalView(
+            delta=snap["delta"],
+            st=snap["st"],
+            I=tuple(snap["I"]),
+            FI=tuple(snap["FI"]),
+        )
+        self._blobs[off] = {int(k): bytes(v) for k, v in snap["blobs"].items()}
+
+    def discard_view(self, offset: int) -> None:
+        """把一份视图与它的密文整个摘掉 —— 语义是「这次写从未发生」。
+
+        ★ 与 ``n = 0`` 的空视图不同：空视图仍占着 ``offset`` 这个位置，
+          启动闸会拿它和协调者的账比对；这里是要让节点**退回没有这段**的状态。
+        """
+        off = int(offset)
+        self._views.pop(off, None)
+        self._blobs.pop(off, None)
+
     def adopt_empty(self, delta: Digest) -> None:
         """采用一个空视图（第一次被指派任务时的起点）。
 

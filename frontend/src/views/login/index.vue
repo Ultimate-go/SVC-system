@@ -388,7 +388,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .scanline { position: absolute; inset: 0; opacity: .22; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.018) 4px); }
 .bg-word { position: absolute; top: 0; left: var(--left); color: rgba(120, 190, 255, .14); font-size: 13px; letter-spacing: .28em; white-space: nowrap; animation: word-rise 18s linear infinite; animation-delay: var(--delay); }
 
-.login-shell { position: relative; z-index: 1; width: min(1080px, 100%); min-height: 560px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(330px, .85fr); align-items: center; gap: clamp(48px, 9vw, 120px); padding: 48px 32px; }
+.login-shell { position: relative; z-index: 1; width: min(1080px, 100%); min-height: 560px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(330px, .85fr); align-items: center; gap: clamp(40px, 7vw, 96px); padding: 48px 32px; }
 .brand-stage { position: absolute; z-index: 2; top: 50%; left: 50%; width: max-content; max-width: calc(100% - 32px); text-align: center; transform: translate(-50%, -50%); transition: opacity .6s ease, transform .8s cubic-bezier(.2,.8,.2,1); }
 .brand-stage.is-complete { opacity: 0; transform: translate(-50%, calc(-50% - 150px)); pointer-events: none; }
 .terminal-line { display: flex; gap: 12px; margin-bottom: 24px; color: rgba(183, 209, 231, .52); font-size: 13px; letter-spacing: .1em; }
@@ -403,13 +403,13 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .project-intro { grid-column: 1; max-width: 560px; opacity: 0; transform: translateY(28px); transition: opacity .65s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
 .project-intro.is-visible { opacity: 1; transform: translateY(0); }
 .intro-tag { margin-bottom: 16px; color: #47d9c1; font-size: 13px; letter-spacing: .18em; }
-.project-intro h2 { margin: 0 0 16px; color: #e6edf7; font-size: clamp(22px, 3vw, 31px); font-weight: 500; line-height: 1.4; }
-.project-intro p { margin: 0 0 19px; color: #9aadc1; font-size: 13px; line-height: 1.8; }
-.project-intro ul { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; color: #cbd8e5; font-size: 13px; }
+.project-intro h2 { margin: 0 0 18px; color: #e6edf7; font-size: clamp(22px, 3vw, 31px); font-weight: 500; line-height: 1.42; }
+.project-intro p { margin: 0 0 20px; color: #9aadc1; font-size: 13px; line-height: 1.95; }
+.project-intro ul { display: flex; flex-direction: column; gap: 11px; margin: 0; padding: 0; list-style: none; color: #cbd8e5; font-size: 13px; }
 .project-intro li { display: flex; align-items: center; gap: 9px; }
 .intro-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #43e4bf; box-shadow: 0 0 9px rgba(67, 228, 191, .75); }
 
-.login-panel { position: relative; width: 100%; max-width: 390px; justify-self: end; padding: 34px 32px 26px; opacity: 0; transform: translateY(24px) scale(.98); background: rgba(7, 15, 27, .78); border: 1px solid rgba(104, 185, 228, .22); box-shadow: 0 24px 80px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(16px); transition: opacity .7s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
+.login-panel { position: relative; width: 100%; max-width: 390px; justify-self: end; padding: 30px 30px 16px; opacity: 0; transform: translateY(24px) scale(.98); background: rgba(7, 15, 27, .78); border: 1px solid rgba(104, 185, 228, .22); box-shadow: 0 24px 80px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(16px); transition: opacity .7s ease, transform .75s cubic-bezier(.2,.8,.2,1); }
 .login-panel.is-visible { opacity: 1; transform: translateY(0) scale(1); }
 .panel-corner { position: absolute; width: 18px; height: 18px; border-color: #43dcbf; border-style: solid; }
 .corner-top { top: -1px; right: -1px; border-width: 1px 1px 0 0; }
@@ -418,9 +418,9 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #43e4bf; box-shadow: 0 0 0 4px rgba(67,228,191,.1), 0 0 14px #43e4bf; }
 .eyebrow, .field-label { margin: 0; color: #47d9c1; font-size: 13px; letter-spacing: .16em; }
 .panel-heading h2 { margin: 6px 0 0; font-size: 25px; font-weight: 500; letter-spacing: .04em; }
-.card-sub { margin: 19px 0 26px; color: #8ca4bb; font-size: 13px; }
+.card-sub { margin: 16px 0 22px; color: #8ca4bb; font-size: 13px; }
 .login-alert { margin-bottom: 18px; }
-.form { display: flex; flex-direction: column; gap: 10px; }
+.form { display: flex; flex-direction: column; gap: 9px; }
 .field-label { margin-top: 5px; color: #7894ac; font-size: 13px; }
 .submit { width: 100%; height: 44px; margin-top: 9px; border: 0; letter-spacing: .08em; }
 .submit-arrow { margin-left: 12px; font-size: 17px; }
@@ -457,7 +457,7 @@ const FLOATING_WORDS = ['SECURE', 'VERIFIABLE', 'INTEGRITY', 'COMMITMENT', 'CRYP
 .busy-percent { flex: 0 0 auto; min-width: 32px; color: #6f8ba0; font-size: 13px; text-align: right; }
 .busy-enter-active, .busy-leave-active { transition: opacity .22s ease, transform .22s ease; }
 .busy-enter-from, .busy-leave-to { opacity: 0; transform: translateY(-5px); }
-.panel-footer { margin: 24px 0 0; color: rgba(139, 166, 187, .55); font-size: 13px; letter-spacing: .1em; }
+.panel-footer { margin: 18px 0 0; color: rgba(139, 166, 187, .55); font-size: 13px; letter-spacing: .1em; }
 /* 等待时留着位置、只隐掉（见模板里的注释） */
 .panel-footer.is-away { visibility: hidden; }
 .panel-footer span { color: #43e4bf; margin-right: 6px; }

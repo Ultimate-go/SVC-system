@@ -57,6 +57,26 @@ CREATE TABLE IF NOT EXISTS blobs (
 );
 """
 
+#: 状态行 upsert（:meth:`NodeDB.save_state` 与 :meth:`NodeDB.apply_change` 共用）。
+_STATE_UPSERT = (
+    "INSERT INTO state(offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
+    "                  I_json, FI_json, identity, chunks_json) "
+    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(offset) DO UPDATE SET "
+    "  delta_U = excluded.delta_U, delta_C = excluded.delta_C, "
+    "  delta_n = excluded.delta_n, S_I = excluded.S_I, "
+    "  Lambda_I = excluded.Lambda_I, I_json = excluded.I_json, "
+    "  FI_json = excluded.FI_json, identity = excluded.identity, "
+    "  chunks_json = excluded.chunks_json"
+)
+
+#: 密文 upsert（同上）。
+_BLOB_UPSERT = (
+    "INSERT INTO blobs(offset, local_index, ciphertext) VALUES(?, ?, ?) "
+    "ON CONFLICT(offset, local_index) DO UPDATE SET "
+    "  ciphertext = excluded.ciphertext"
+)
+
 
 class NodeDB:
     """一个节点的本地库。所有方法都上锁 —— uvicorn 的同步路由跑在线程池里。"""
@@ -177,15 +197,7 @@ class NodeDB:
         """
         with self._lock:
             self._conn.execute(
-                "INSERT INTO state(offset, delta_U, delta_C, delta_n, S_I, Lambda_I, "
-                "                  I_json, FI_json, identity, chunks_json) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(offset) DO UPDATE SET "
-                "  delta_U = excluded.delta_U, delta_C = excluded.delta_C, "
-                "  delta_n = excluded.delta_n, S_I = excluded.S_I, "
-                "  Lambda_I = excluded.Lambda_I, I_json = excluded.I_json, "
-                "  FI_json = excluded.FI_json, identity = excluded.identity, "
-                "  chunks_json = excluded.chunks_json",
+                _STATE_UPSERT,
                 (
                     int(offset),
                     str(delta.U),
@@ -226,11 +238,97 @@ class NodeDB:
             return
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO blobs(offset, local_index, ciphertext) VALUES(?, ?, ?) "
-                "ON CONFLICT(offset, local_index) DO UPDATE SET "
-                "  ciphertext = excluded.ciphertext",
+                _BLOB_UPSERT,
                 [(int(offset), int(i), sqlite3.Binary(ct)) for i, ct in blobs.items()],
             )
+
+    def apply_change(
+        self,
+        offset: int,
+        *,
+        delta=None,
+        st=None,
+        I=None,
+        FI=None,
+        upsert_blobs: dict[int, bytes] | None = None,
+        delete_indices: Iterable[int] | None = None,
+        replace_blobs: bool = False,
+        drop_state: bool = False,
+    ) -> int:
+        """把「状态行 + 密文」的改动**放进同一个事务**里落盘。
+
+        ★★★ 为什么必须是一个事务：连接是 ``isolation_level=None``（每条 SQL 自动提交），
+          于是 ``save_state`` 与 ``save_blobs`` 之间有一个撕裂窗口：
+
+          * ``state`` 已是新 ``n``、密文却还缺新块 ⇒ 启动闸看到
+            「下标与密文对不上」，**拒绝启动**；
+          * ``mod`` 撕裂则是「δ 新、密文旧」⇒ 本地验证失败，
+            之后每次更新都 409（节点自己停在旧密文上）。
+
+          两条路径的现场都极难归因：进程看起来正常，重启才炸。
+
+        :param drop_state: 整段摘掉（撤销一次没推完的写 / ``del`` 删空）。
+            为真时只删 ``state`` 与该 offset 的全部密文，其余参数忽略。
+        :param replace_blobs: 先删该 offset 的**全部**密文再写 ``upsert_blobs``
+            （撤销时恢复旧快照用）。
+        :param delete_indices: 要真删的局部块号（``del`` / ``drop``）。
+        :returns: 实际删掉的密文行数
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                if drop_state:
+                    cur.execute("DELETE FROM state WHERE offset = ?", (int(offset),))
+                    cur.execute("DELETE FROM blobs WHERE offset = ?", (int(offset),))
+                    removed = int(cur.rowcount or 0)
+                else:
+                    if delta is None or st is None or I is None or FI is None:
+                        raise ValueError(
+                            "apply_change 需要 delta / st / I / FI（除非 drop_state=True）"
+                        )
+                    cur.execute(
+                        _STATE_UPSERT,
+                        (
+                            int(offset),
+                            str(delta.U),
+                            str(delta.C),
+                            int(delta.n),
+                            str(st.S_I),
+                            str(st.Lambda_I),
+                            json.dumps(list(I)),
+                            json.dumps(list(FI)),
+                            str(getattr(delta, "identity", "") or ""),
+                            json.dumps([
+                                [int(a), int(b)]
+                                for a, b in getattr(delta, "chunks", ()) or ()
+                            ]),
+                        ),
+                    )
+                    removed = 0
+                    if replace_blobs:
+                        cur.execute("DELETE FROM blobs WHERE offset = ?", (int(offset),))
+                        removed += int(cur.rowcount or 0)
+                    if upsert_blobs:
+                        cur.executemany(
+                            _BLOB_UPSERT,
+                            [
+                                (int(offset), int(i), sqlite3.Binary(ct))
+                                for i, ct in upsert_blobs.items()
+                            ],
+                        )
+                    want = [int(i) for i in (delete_indices or ())]
+                    if want:
+                        cur.executemany(
+                            "DELETE FROM blobs WHERE offset = ? AND local_index = ?",
+                            [(int(offset), i) for i in want],
+                        )
+                        removed += int(cur.rowcount or 0)
+                cur.execute("COMMIT")
+            except BaseException:
+                cur.execute("ROLLBACK")
+                raise
+        return removed
 
     def delete_blobs(self, offset: int, indices: Iterable[int]) -> int:
         """删掉若干下标的密文（交回 ``RmvStorage`` / 应用 ``del`` 之后必须真删）。

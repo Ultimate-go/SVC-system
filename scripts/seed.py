@@ -19,8 +19,8 @@
 用户名          角色
 ============  ==========
 ``admin``     管理员
-``zhangsan``  用户
-``wangwu``    用户
+``system1``   用户
+``system2``   用户
 ============  ==========
 
 ★ 建账号时会**顺手给每个人生成一对 SM2 密钥**，并把私钥用他的登录口令
@@ -29,8 +29,8 @@
 * 每个人上传文件时，块密钥是用**他自己的公钥**封的 —— 只有他能解密；
 * **验证不受限**：任何人都能验证任何块（那条路径根本不碰密钥）。
 
-``--demo`` 灌的都是一句话能说清的：``zhangsan`` 的病历本（4 份，
-演示分块与"只有所有者能读"）+ ``wangwu`` 的私人笔记。
+``--demo`` 灌的都是一句话能说清的：``system1`` 的病历本（4 份，
+演示分块与"只有所有者能读"）+ ``system2`` 的私人笔记。
 
 .. note::
 
@@ -60,17 +60,17 @@ DEMO_PASSWORD = "vds12345"
 
 USERS: list[tuple[str, str, str]] = [
     ("admin", "admin", "管理员"),
-    ("zhangsan", "user", "张三"),
-    ("wangwu", "user", "王五"),
+    ("system1", "user", "系统用户 01"),
+    ("system2", "user", "系统用户 02"),
 ]
 
 #: 演示文件：``(所有者, 文件名, 内容)``。
 DEMO_FILES: list[tuple[str, str, bytes]] = [
-    ("zhangsan", "病例本-基础信息", b"[basic] name=zhangsan sex=M age=41\n" * 40),
-    ("zhangsan", "病例本-内科", b"[internal] dx=hypertension rx=amlodipine\n" * 60),
-    ("zhangsan", "病例本-骨科", b"[ortho] fx=left-radius cast=6w\n" * 45),
-    ("zhangsan", "病例本-多块", b"[part-A] " * 50 + b"[part-B] " * 45),
-    ("wangwu", "会议纪要", b"[notes] 2026-09-25 review of VDS demo\n" * 30),
+    ("system1", "病例本-基础信息", b"[basic] name=system1 sex=M age=41\n" * 40),
+    ("system1", "病例本-内科", b"[internal] dx=hypertension rx=amlodipine\n" * 60),
+    ("system1", "病例本-骨科", b"[ortho] fx=left-radius cast=6w\n" * 45),
+    ("system1", "病例本-多块", b"[part-A] " * 50 + b"[part-B] " * 45),
+    ("system2", "会议纪要", b"[notes] 2026-09-25 review of VDS demo\n" * 30),
 ]
 
 
@@ -139,6 +139,21 @@ def main() -> int:
     print(f"[users] 新建: {created or '（无）'}")
     print(f"[users] 已存在跳过: {skipped or '（无）'}")
     print(f"[users] 演示口令统一为: {DEMO_PASSWORD}")
+
+    # ★ 旧内置账号（2026-10-20 之前叫 zhangsan / wangwu）不能就地改名：
+    #   ``owner`` 参与**块身份 → 素数**的派生，改名会让旧证据与旧块全部对不上。
+    #   所以这里只报警，并给出唯一干净的路：整套重建。
+    legacy_found = []
+    with db.session() as s:
+        for old in ("zhangsan", "wangwu"):
+            if s.query(UserRow).filter_by(username=old).one_or_none() is not None:
+                legacy_found.append(old)
+    if legacy_found:
+        print(
+            f"[users] ⚠ 库里还有旧内置账号 {', '.join(legacy_found)}（旧名的文件 owner 也还是旧名）。\n"
+            "        内置账号现在叫 system1 / system2；旧账号不能原地改名（owner 参与块身份派生素数）。\n"
+            "        要清掉旧数据并换成新账号：python scripts/start_all.py --reset"
+        )
 
     # ★ 给每个用户生成密钥对：**公钥入库，私钥用他的登录口令包好再入库**。
     #

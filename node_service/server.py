@@ -82,6 +82,10 @@ class NodeRuntime:
         self._lock = threading.RLock()
         self.session: GlobalSession | None = None
         self.state: NodeState | None = None
+        #: ``offset -> append 之前的快照``（``None`` = 之前没有这份视图）。
+        #: 只在一次 append 与其后的撤销之间有意义；进程重启就丢，
+        #: 而撤销就发生在同一个请求序列里（协调者拿到失败后立即发）。
+        self._append_undo: dict[int, dict | None] = {}
         self._reload()
 
     # -- 启动 / 收下公开参数 ------------------------------------------------
@@ -292,6 +296,19 @@ class NodeRuntime:
                     f"n={delta_old.n} —— 它漏掉了一次更新，需要重新同步",
                 )
 
+            # ★★ 拍快照必须在**任何状态变更之前**：协调者可能只推完了一部分节点，
+            #   随后会调 ``/node/discard`` 让本节点退回“这次写没发生”的样子。
+            #   没有这份快照，节点上那份新数据就成了永远没人认领的孤儿 ——
+            #   而启动闸是拿「节点有的 offset 集合」与协调者账目整体比的，
+            #   孤儿会让**下一次启动直接被拒**。
+            self._append_undo[off] = self.state.snapshot(off)
+            # ★ 成功写完的快照不一定还有人要（只有“这次写失败”才会来撤）。
+            #   不限制的话，节点存多少份文件就要多背一份密文副本；
+            #   这里只留最近 64 份 —— 真需要撤但快照已被挤掉时，
+            #   ``/node/discard`` 回 409，协调者会把“撤回不完整”报出来。
+            while len(self._append_undo) > 64:
+                self._append_undo.pop(next(iter(self._append_undo)), None)
+
             try:
                 if not self.state.has_view(off):
                     # 这份文件还没参与过：从空视图起步（π_∅ = (U_n, C_n)）
@@ -329,21 +346,76 @@ class NodeRuntime:
                     "应用更新后本地视图不合法 —— 拒绝落库",
                 )
 
-            # 落库：状态整行覆写（这份文件一行），密文只写新增的
-            self.db.save_state(
+            # 落库：状态行与本次新增密文**同一个事务** —— 撕裂窗口的后果见
+            # :meth:`NodeDB.apply_change` 的头注释（启动闸拒绝 / 后续更新 409）。
+            self.db.apply_change(
                 off,
                 delta=self.state.delta_of(off),
                 st=self.state.st_of(off),
                 I=self.state.I_of(off),
                 FI=self.state.FI_of(off),
+                upsert_blobs=blobs,
             )
-            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
                 "n": self.state.delta_of(off).n,
                 "held": len(self.state.I_of(off)),
                 "span": self.state.describe(offset=off)["span"],
+            }
+
+    def discard(self, payload: dict) -> dict:
+        """撤销**最近一次 append**（协调者写失败时调）。
+
+        语义是“这次写从未发生”：
+
+        * append 前本节点**没有**这份视图 → 整段摘掉（内存 + 库里 state 行与密文）；
+        * append 前**有** → 用快照原样覆写（``replace_blobs`` 把新块删干净再写回旧的）。
+
+        ★ 为什么节点要配合撤销，而不是让协调者“下次覆盖”：
+          ``offset`` 永远不会被重用（段不回收），所以那批数据没有任何后续写
+          会覆盖它；而启动闸比的是「节点上的 offset 集合」与协调者账目，
+          多出来的孤儿会让集群**再也起不来**。
+        ★ 幂等边界：快照只保留最近一次 append。重复撤销返回 409（说明已经没有
+          可撤销的东西），而不是默默成功 —— 静默成功会掩盖“协调者重复调用”。
+        """
+        with self._lock:
+            self._need_session()
+            assert self.state is not None
+            off = int(payload.get("offset", -1))
+            if off not in self._append_undo:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"本节点没有 offset={off} 的可撤销快照（可能已撤销，或进程重启过）",
+                )
+            snap = self._append_undo.pop(off)
+            if snap is None:
+                self.state.discard_view(off)
+                self.db.apply_change(off, drop_state=True)
+                return {
+                    "ok": True,
+                    "node_id": self.node_id,
+                    "offset": off,
+                    "restored": False,
+                    "note": "这一份视图是本次写刚建的，已整段摘掉",
+                }
+            self.state.restore_snapshot(off, snap)
+            self.db.apply_change(
+                off,
+                delta=self.state.delta_of(off),
+                st=self.state.st_of(off),
+                I=self.state.I_of(off),
+                FI=self.state.FI_of(off),
+                replace_blobs=True,
+                upsert_blobs=dict(snap["blobs"]),
+            )
+            return {
+                "ok": True,
+                "node_id": self.node_id,
+                "offset": off,
+                "restored": True,
+                "n": self.state.delta_of(off).n,
+                "held": len(self.state.I_of(off)),
             }
 
     def update(self, payload: dict) -> dict:
@@ -417,15 +489,15 @@ class NodeRuntime:
                     "应用更新后本地视图不合法 —— 拒绝落库",
                 )
 
-            # 落库：状态整行覆写（C 变了），密文按 (offset, 局部块号) upsert
-            self.db.save_state(
+            # 落库：状态行（C 变了）与新密文**同一个事务**（理由同 append）。
+            self.db.apply_change(
                 off,
                 delta=self.state.delta_of(off),
                 st=self.state.st_of(off),
                 I=self.state.I_of(off),
                 FI=self.state.FI_of(off),
+                upsert_blobs=blobs,
             )
-            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
@@ -487,14 +559,14 @@ class NodeRuntime:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST, f"交回失败：{exc}"
                 ) from exc
-            self.db.save_state(
+            removed = self.db.apply_change(
                 off,
                 delta=self.state.delta_of(off),
                 st=self.state.st_of(off),
                 I=self.state.I_of(off),
                 FI=self.state.FI_of(off),
+                delete_indices=out["dropped"],
             )
-            removed = self.db.delete_blobs(off, out["dropped"])
             return {**out, "node_id": self.node_id, "removed": removed}
 
     def adopt(self, payload: dict) -> dict:
@@ -552,15 +624,15 @@ class NodeRuntime:
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     "接收后本地视图不合法 —— 拒绝落库",
                 )
-            # 状态整行覆写（I / F_I 都变大了），密文只写新收的这几段
-            self.db.save_state(
+            # 状态行（I / F_I 都变大了）与新收的密文**同一个事务**。
+            self.db.apply_change(
                 off,
                 delta=self.state.delta_of(off),
                 st=self.state.st_of(off),
                 I=self.state.I_of(off),
                 FI=self.state.FI_of(off),
+                upsert_blobs=blobs,
             )
-            self.db.save_blobs(off, blobs)
             return {
                 "ok": True,
                 "node_id": self.node_id,
@@ -616,7 +688,8 @@ class NodeRuntime:
                     status.HTTP_400_BAD_REQUEST, f"拒绝删除更新：{exc}"
                 ) from exc
             # （apply_delete 内部已经做完"节点自己算的摘要 == 协调者给的"这道交叉校验）
-            removed = self.db.delete_blobs(off, gone)
+            # ★ 删密文与写状态**必须同一个事务**：先删后写若在中间崩，
+            #   会出现「state 旧、密文缺」—— 启动闸会拒，而且看起来像数据损坏。
             # ★ 整段被删光（n = 0）时，apply_delete 已经把这一段**整个摘掉**了 ——
             #   这时绝不能再 delta_of / I_of / describe 去读它（那几个都按 off 查，
             #   段没了就是 KeyError，表现成 /node/delete 回 500，而协调者只知道
@@ -624,7 +697,7 @@ class NodeRuntime:
             #   该做的是**跟着把它从库里删掉**：协调者那边本来就是直接删行的，
             #   两边对"现在有哪些段"必须一致，否则节点重启时就分叉了。
             if not self.state.has_view(off):
-                self.db.delete_state(off)
+                removed = self.db.apply_change(off, drop_state=True)
                 return {
                     "ok": True,
                     "node_id": self.node_id,
@@ -635,12 +708,13 @@ class NodeRuntime:
                     "dropped": list(gone),
                     "note": "这一段已被删空，节点已把它整个摘掉",
                 }
-            self.db.save_state(
+            removed = self.db.apply_change(
                 off,
                 delta=self.state.delta_of(off),
                 st=self.state.st_of(off),
                 I=self.state.I_of(off),
                 FI=self.state.FI_of(off),
+                delete_indices=gone,
             )
             return {
                 "ok": True,
@@ -822,6 +896,11 @@ def create_node_app(node_id: str, data_dir: str | Path, *, token: str) -> FastAP
     @app.post("/node/append")
     def append(payload: dict, request: Request):
         return rt(request).append(payload)
+
+    @app.post("/node/discard")
+    def discard_route(payload: dict, request: Request):
+        """撤销最近一次 append（协调者写失败时调）—— 见 :meth:`NodeRuntime.discard`。"""
+        return rt(request).discard(payload)
 
     @app.post("/node/update")
     def update(payload: dict, request: Request):

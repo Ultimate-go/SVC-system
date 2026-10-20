@@ -378,6 +378,7 @@ class HttpTransport:
         免得"测试里发的东西"和"生产里发的东西"长得不一样。
         """
         failures: list[dict] = []
+        ok_nodes: list[str] = []
         # ★ 两套下标：``assignments`` / ``blobs`` 的键是**全局位置号**（协调者记账用它），
         #   而节点侧用的是**文件内局部块号**。转换只在这一层做
         #   （与 LocalTransport 逐字一致，否则两条路径会惄惄分叉）。
@@ -394,18 +395,34 @@ class HttpTransport:
             )
             try:
                 self._post(nid, "/node/append", payload)
+                ok_nodes.append(nid)
             except TransportError as exc:
                 failures.append({"node": nid, "reason": str(exc)})
 
         if failures:
-            # ★ 一次追加只要有一台没跟上，全网就处于不一致状态 ——
+            # ★★ 已经跟上的节点必须**退回**（协调者马上会回退登记表，而位置不回收）：
+            #   不退的话那批 offset 就成了永远没人认领的孤儿，
+            #   启动闸比的是「节点上的 offset 集合」，孤儿会让集群再也起不来。
+            off = int(delta_old.offset)
+            undo_failed: list[str] = []
+            for nid in ok_nodes:
+                try:
+                    self._post(nid, "/node/discard", {"offset": off})
+                except TransportError as exc:
+                    undo_failed.append(f"{nid}：{exc}")
+            # ★ 一次追加只要有一台没跟上，全网就不一致 ——
             #   必须让调用方知道，而不是当作成功。
-            raise WriteError(
+            msg = (
                 "有节点没能跟上这次更新（全网现在不一致）：\n  "
-                + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures),
-                failures,
-                "append",
+                + "\n  ".join(f"{f['node']}：{f['reason']}" for f in failures)
             )
+            if undo_failed:
+                msg += (
+                    "\n  ⚠ 已跟上节点的**撤回也没成功**，那边可能留下孤儿段：\n    "
+                    + "\n    ".join(undo_failed)
+                    + "\n    可用 scripts/_node_forget_stray.py 手工清理。"
+                )
+            raise WriteError(msg, failures, "append", undo_failed)
 
     def apply_update(
         self,

@@ -7,11 +7,13 @@
  * - 文件列表：owner / file_key / 块数 / 大小 / 版本 / 验证 / 两把锁；
  *   「验证」是一个**可点的按钮**：当场取凭证、用公开的 δ 验一次，弹窗给结论，
  *   证明刚上传的文件现在就能自证未被篡改。
- *   行级操作直接摆在「操作」列：**详情 / 入池（已在聚合面板里就是刷新）/ 试解密**。
+ *   行级操作直接摆在「操作」列：**详情 / 入池（已在聚合面板里就是刷新）/ 解密**。
  *   —— 「详情」「入池」不信**点文件标识**去猜（太隐蔽）。
- * - 「试解密」不置灰：点下去才看到后端真的拒了你（演示亮点）。
+ * - 「解密」只在 `can_decrypt` 为真的行上出现：整份取回密文，在浏览器里解封块密钥、
+ *   SM4 解密并重算分量，结果直接铺成**十六进制视图**（010 Editor 风格）供人看内容。
+ *   不能解密的行只摆一个锁标签 —— 不给会必然报错的按钮。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, shallowRef, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { filesApi } from '../../../api/files'
@@ -38,6 +40,8 @@ import LockTag from '../../../components/security/LockTag.vue'
 import StageTimeline from '../../../components/security/StageTimeline.vue'
 import ProcessDialog from '../../../components/security/ProcessDialog.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
+import HexViewer from '../../../components/security/HexViewer.vue'
+import { buildHexBlocks, bytesToHexLower } from '../../../utils/hexview.js'
 import Icon from '../../../components/icons/Icon.vue'
 
 const auth = useAuthStore()
@@ -737,6 +741,20 @@ function resetUpload() {
   if (fileRef.value) fileRef.value.clearFiles()
 }
 
+/**
+ * 解密结果的十六进制视图（010 Editor 风格）。
+ *
+ * ★ 为什么不再用消息框只报「文件 / 解密 N 字节 / 本地验证通过」：
+ *   那三行回答不了“解出来到底是什么”。列表页的「解密」是整份取回，
+ *   手里已经有完整明文，直接铺开给人看即可，不必再让人跳去详情页。
+ * ★ `verify` 保留弹框顶部一行结论 —— 内容能看见，但“验证是否通过”仍要明说：
+ *   两份东西回答的是不同问题（解出了什么 / 这是不是当初那一版）。
+ * ★★ 用 `shallowRef` 而不是 `ref`：`plain` 是 `Uint8Array`，深度代理会把它包成
+ *   Proxy，而 TypedArray 的方法在 Proxy 上会抛“不兼容的接收者”（内部槽不可代理）。
+ */
+const decryptOpen = ref(false)
+const decryptInfo = shallowRef(null)
+
 async function tryDecrypt(file, retried = false) {
   // ★★ 默认模型下**服务端不持有私钥**（`server_key=false`）——
   //    `/api/files/{id}/decrypt`（服务端解密）会回
@@ -787,20 +805,32 @@ async function tryDecrypt(file, retried = false) {
       trustedDelta: getDeltaAnchorFor(file.id, file.content_digest),
     })
     const len = opened.plain.length
-    // ★ 结论只摆两行，**不再**展开钉扎、也不再弹“开头 48 字节”的第二条提示：
-    //   要看内容与细节，去「详情」页（那里有解密预览、本地验证与回滚锚）。
-    // ★ 消息框的 `.el-message-box__message` 没有 white-space 规则（实测 EP 2.x
-    //   只有 `min-width:0;margin:0`），`\n` 会被折成空格 ⇒ 靠 customClass 挂上
-    //   `white-space: pre-line`（见 <style> 里的 :global 那一段）。
-    const verifyLine = opened.verify.ok
-      ? '本地验证：解密通过，文件内容查看[详情]'
-      : `本地验证：未通过 —— ${opened.verify.message}`
-    await ElMessageBox.alert(
-      // \u3000 是全角空格：pre-line 会把连续半角空格折成一个，分不开“文件”与“解密”。
-      `文件：${file.file_key}\u3000解密：${len} 字节\n${verifyLine}`,
-      '解密结果',
-      { confirmButtonText: '关闭', customClass: 'vds-decrypt-box' },
-    )
+    // ★ 2026-10-20：解密结果改成**直接铺开整份内容**（十六进制 + ASCII，010 Editor 风格）。
+    //   以前这里只弹两行摘要（文件 / 字节数 / 本地验证），要真正看内容还得跳详情页 ——
+    //   而列表页这次本来就是整份取回，明文已经在手里了。
+    // ★ 验证结论仍然要摆：内容看得见 ≠ 这份内容可信，两件事分开说。
+    // ★★ 分块账目只在详情接口里（列表行不带 `layout`）：为了左边的分块书签，
+    //   这里再取一次详情；取不到就退化成“整份一块”，不影响看内容。
+    let layout = file.layout
+    if (!layout?.length) {
+      try {
+        const { data: detail } = await filesApi.detail(file.id)
+        layout = detail?.layout || []
+      } catch {
+        layout = []
+      }
+    }
+    decryptInfo.value = {
+      name: file.file_key,
+      size: len,
+      verify: opened.verify,
+      blocks: buildHexBlocks({
+        hex: bytesToHexLower(opened.plain),
+        layout: layout?.length ? layout : [{ block_idx: 0, plain_len: len }],
+        total: len,
+      }),
+    }
+    decryptOpen.value = true
     // 解出来了就把之前记下的失败状态抹掉（节点恢复后重试成功，这一行就该恢复正常）。
     clearBroken(file)
   } catch (e) {
@@ -1155,7 +1185,7 @@ onMounted(load)
               <el-input-number v-model="uploadForm.segmentBytes" :min="status?.segment_bytes_min || 64" :max="status?.segment_bytes_max || 1048576" :step="64" />
             </div>
             <div v-else-if="uploadForm.splitMode === 'by_count'" class="mono">
-              <span class="text-2">切成几块：</span>
+              <span class="text-2">分块数量：</span>
               <el-input-number v-model="uploadForm.blockCount" :min="1" :max="maxBlockCount" />
             </div>
 
@@ -1165,7 +1195,7 @@ onMounted(load)
             </div>
 
             <div class="nodes-pick">
-              <span class="text-2">存到哪几台：</span>
+              <span class="text-2">选择存储节点：</span>
               <el-checkbox-group v-model="uploadForm.pickedNodes">
                 <el-checkbox v-for="n in nodes" :key="n.node_id" :value="n.node_id" :disabled="n.unreachable">
                   <span class="mono">{{ n.node_id }}</span>
@@ -1424,6 +1454,42 @@ onMounted(load)
         <el-button type="primary" :loading="verifyBusy" @click="runVerify(verifyTarget)">再验一次</el-button>
       </template>
     </el-dialog>
+
+    <!--
+      行级「解密」：整份明文直接铺成十六进制视图（010 Editor 风格）。
+      ★ 为什么用弹框而不是消息框：消息框装不下几千行，也没有滚动区。
+      ★ 校验结论单独一行摆在上方 —— 「解出了什么」与「这是不是当初那一版」
+        是两个问题，不能因为内容看得见就把后者省掉。
+    -->
+    <el-dialog
+      v-model="decryptOpen"
+      width="1120px"
+      top="4vh"
+      append-to-body
+      destroy-on-close
+      :title="decryptInfo ? `解密结果 · ${decryptInfo.name}` : '解密结果'"
+    >
+      <template v-if="decryptInfo">
+        <div class="hx-verdict" :class="decryptInfo.verify?.ok ? 'ok' : 'bad'">
+          <span class="hx-verdict-k">验证结果</span>
+          <b>{{ decryptInfo.verify?.ok ? '通过' : '不通过' }}</b>
+          <span class="hx-sep">·</span>
+          <span class="mono">{{ decryptInfo.size }} 字节</span>
+          <template v-if="!decryptInfo.verify?.ok">
+            <span class="hx-sep">·</span>
+            <span>{{ decryptInfo.verify?.message }}</span>
+          </template>
+        </div>
+        <p class="hx-note">
+          左侧是字节偏移，中间是十六进制，右侧是 ASCII 栏
+          —— 「.」既可能是真的句点，也可能是不可打印字节，以十六进制栏为准。
+        </p>
+        <HexViewer :blocks="decryptInfo.blocks" />
+      </template>
+      <template #footer>
+        <el-button @click="decryptOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1550,20 +1616,47 @@ onMounted(load)
   margin-left: 6px;
 }
 
-/* ---------- 试解密结果消息框：让 \n 真的换行 ----------
-   Element Plus 的 `.el-message-box__message` 只有 min-width:0;margin:0，
-   没有 white-space 规则 ⇒ 默认 normal 会把 `\n` 折成一个空格（实测）：
-   “文件：… 解密：… 本地验证：…” 就挤成一行。这里补 pre-line。
-   消息框是 teleport 到 body 的，所以必须用 :global()，否则样式挂不上去。 */
-:global(.vds-decrypt-box .el-message-box__message) {
-  white-space: pre-line;
-  line-height: 1.7;
+/* ---------- 行级「解密」弹窗：十六进制视图上方的一行结论 ---------- */
+.hx-verdict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+.hx-verdict.ok {
+  background: rgba(35, 160, 110, 0.1);
+  border-color: rgba(35, 160, 110, 0.45);
+  color: #2f9e6f;
+}
+.hx-verdict.bad {
+  background: rgba(214, 69, 69, 0.1);
+  border-color: rgba(214, 69, 69, 0.45);
+  color: #c94a4a;
+}
+.hx-verdict-k {
+  margin-right: 2px;
+  font-size: 12.5px;
+  opacity: 0.75;
+}
+.hx-sep {
+  opacity: 0.35;
+}
+.hx-note {
+  margin: 8px 2px 10px;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 
 /* ---------- 行级「可验证」弹窗：一句结论 + 几行公开量 ---------- */
 .vq-body {
   min-height: 92px;
-}.vq-headline {
+}
+.vq-headline {
   display: flex;
   align-items: center;
   gap: 8px;

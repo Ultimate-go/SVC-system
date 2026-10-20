@@ -47,7 +47,7 @@ from sqlalchemy import select  # noqa: E402
 
 FAILURES: list[str] = []
 PASSWORD = "vds12345"
-OWNER = "zhangsan"
+OWNER = "system1"
 SEG = 256
 BLOCK = b"A" * SEG
 
@@ -104,7 +104,7 @@ print(f"        n_max = {settings.n_max}, 块大小范围 "
       f"{settings.segment_bytes_min}~{settings.segment_bytes_max}")
 with db.session() as s:
     s.add(UserRow(username=OWNER, pwd_hash=hash_password(PASSWORD),
-                  role="user", display_name="张三"))
+                  role="user", display_name="系统用户 01"))
     s.commit()
 check("生成用户密钥对", mgr.ensure_user_key(OWNER, PASSWORD))
 
