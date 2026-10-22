@@ -65,7 +65,7 @@ export const useAggregateStore = defineStore('aggregate', {
      * ★ 已作废的卡片 id 集合。
      *
      * 判据是 **δ 指纹**，不是 n：上传让 n 变，而**替换 / 置零 / 追加 / 删除**
-     * 只改 C（在合并向量上）**不改全局位置总数 n** —— 所以只比 n 是抓不住改块的。
+     * 只改 C（在合并向量上）**不改全局位置总数 n** —— 所以只比 n 是抓不住替换的。
      *
      *   正确的判据是：**这张卡覆盖的每一份文件，它当时的指纹与现在的比** ——
      *   任一份变了就说明这份文件动过了，这张卡上的证据跟着作废。
@@ -88,7 +88,7 @@ export const useAggregateStore = defineStore('aggregate', {
         }
         if (decided) continue
         // 兜底：老卡没存 files（或 status 没拉到）时，只能退回长度对比 ——
-        // 它抓不住改块，但总比什么都不判强。
+        // 它抓不住替换，但总比什么都不判强。
         if (typeof state.currentN === 'number' && typeof c.n === 'number') {
           if (c.n !== state.currentN) out.add(c.id)
         }

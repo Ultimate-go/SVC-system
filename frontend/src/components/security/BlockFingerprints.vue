@@ -20,7 +20,7 @@ const props = defineProps({
   values: { type: Array, default: () => [] },
   //: 可选：下标 → 它属于哪个文件的哪一块（/api/query 的 refs）。
   refs: { type: Array, default: () => [] },
-  //: 最多列多少行（1024 块的证据铺出来太长，超了就截断并说明）。
+  //: 最多列多少行（1024 块的证据铺出来太长，超了就删除并说明）。
   limit: { type: Number, default: 256 },
   //: 指纹显示多少位十六进制。
   len: { type: Number, default: 24 },

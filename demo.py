@@ -20,7 +20,7 @@ from dataclasses import dataclass
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from core import L, VectorStore, new_session  # noqa: E402
+from core import L, SEGMENT_BYTES, VectorStore, new_session  # noqa: E402
 from core.keywrap import (  # noqa: E402
     KeyWrapIntegrityError,
     block_aad,
@@ -81,7 +81,7 @@ def payload(nbytes: int, tag: int) -> bytes:
 def fp_of(store, file_id: tuple[str, str]) -> str:
     """δ 指纹：``sha256("U:C:n")[:12]`` —— 与后端 / 界面**同一把尺子**。
 
-    ★ 为什么需要它：改块**不改变 n**，却会改变承诺 C。所以“看 n 没变就以为
+    ★ 为什么需要它：替换**不改变 n**，却会改变承诺 C。所以“看 n 没变就以为
       证据还行”是错的 —— 界面上的作废判据用的就是这个指纹。
     """
     d = store.delta_of(*file_id)
@@ -262,7 +262,7 @@ def main() -> int:
     print(f"  总耗时 {t.take():.1f} ms")
 
     # -- 5b. 更新：三条路径 -----------------------------------------------
-    sub("5b. 更新：改一块 / 追加 / 截断 —— 代价只与改动量相关")
+    sub("5b. 更新：改一块 / 追加 / 删除 —— 代价只与改动量相关")
     tgt = ("system1", "case-内科")
     # 先记下“别人”的指纹：一整套更新跑完要证明它们一个字节没变。
     others = [("lisi", "report-A"), ("system2", "note")]
@@ -302,7 +302,7 @@ def main() -> int:
     with t:
         K, _rec_tr = store.truncate(*tgt, n_ap - d_after.n)
     n_tr = store.delta_of(*tgt).n
-    print(f"  截断回原块数：块数 {n_ap} → {n_tr}，删掉下标 {list(K)}　{t.take():.0f} ms")
+    print(f"  删除回原块数：块数 {n_ap} → {n_tr}，删掉下标 {list(K)}　{t.take():.0f} ms")
 
     untouched = all(fp_of(store, k) == fp_before[k] for k in others)
     print(f"  别的文件在整段更新里**一个字节没动**：{untouched} ✓")
@@ -487,7 +487,10 @@ def main() -> int:
 
         return store.read(owner, fkey, indices, key_of=key_of)
 
-    want = payload(2500, 2500 % 251)
+    # ★ 第 5b 节改过这份文件（首块换成 900 B → 追加 2600 B → 截断回 3 块），
+    #   所以期望值是「改动后的首块 + 没被触碰的后两块」，不是上传时的 2500 B。
+    orig = payload(2500, 2500 % 251)
+    want = payload(900, 71) + orig[SEGMENT_BYTES:]
     sub("8a. 本人读自己的文件")
     data = try_read("system1", "system1", "case-内科")
     print(f"  system1 → case-内科：{len(data)} 字节，逐字节一致 = {data == want}")
@@ -518,7 +521,7 @@ def main() -> int:
     seg2 = 1
     part = try_read("system1", "system1", "case-内科", [seg2])
     print(f"  取到 {len(part)} 字节（segment_bytes = {store.segment_bytes}）"
-          f"，等于原文对应段 = {part == want[store.segment_bytes:2 * store.segment_bytes]}")
+          f"，等于原文对应段 = {part == orig[store.segment_bytes:2 * store.segment_bytes]}")
 
     sub("8e. 把封好的块密钥改一个字节 —— 连所有者自己也解不开了")
     ct0 = key_cts[("system1", "case-内科")][0]

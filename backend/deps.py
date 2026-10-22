@@ -72,7 +72,7 @@ def current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
 
     # ★ 这张令牌被作废了吗（安全审计 I1）：`logout` 之后它必须**真的**不能用，
-    #   否则“退出登录”只挡住了解密，而上传/改块/删除照样能发。
+    #   否则“退出登录”只挡住了解密，而上传/替换/删除照样能发。
     if mgr.is_token_revoked(claims):
         raise ApiError(
             status.HTTP_401_UNAUTHORIZED,

@@ -10,7 +10,7 @@
 * 文件长度不是块大小整数倍时，**用零补齐**到整数块。
   这是工程上的选择，不是论文的要求；补齐后 :math:`n` 会略大于
   :math:`\\lceil |\\text{file}| / \\text{block\\_bytes} \\rceil`。
-  反向拼接时由调用方凭原始长度截断。
+  反向拼接时由调用方凭原始长度删除。
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def split_bytes(data: bytes, block_bytes: int) -> list[int]:
 def join_blocks(blocks, block_bytes: int, total_bytes: int | None = None) -> bytes:
     """把块拼回字节串。
 
-    :param total_bytes: 原始文件长度。给了就在末尾截断，
+    :param total_bytes: 原始文件长度。给了就在末尾删除，
                         以去掉 :func:`split_bytes` 补的零。
     """
     if block_bytes <= 0:

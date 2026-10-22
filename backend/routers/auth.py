@@ -240,7 +240,7 @@ def logout(
     if creds is not None and creds.credentials:
         mgr.forget_key(creds.credentials)
         # ★ 同时把这张令牌**作废**（安全审计 I1）：只丢私钥挡得住“解密”，
-        #   却挡不住**写操作**（上传 / 改块 / 追加 / 截断 / 删除只校验令牌）。
+        #   却挡不住**写操作**（上传 / 替换 / 追加 / 删除 / 删除只校验令牌）。
         #   所以“退出登录”必须让这张令牌真的不能用。
         mgr.revoke_token(creds.credentials)
     audit(db, user.username, "logout", ok=True)

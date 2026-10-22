@@ -822,7 +822,7 @@ onMounted(loadFiles)
       <div class="query-form">
         <template v-if="!advancedMode">
           <!-- ★ 下拉里只显示**文件标识**（与上面拉取列表的芯片同一口径）：
-               “名字（所有者，N 块）”在窄下拉里偺被截断，反而更看不清。 -->
+               “名字（所有者，N 块）”在窄下拉里偺被删除，反而更看不清。 -->
           <el-select v-model="verifyFileId" placeholder="选择文件标识" style="width: 240px" filterable>
             <el-option
               v-for="f in allFiles"

@@ -165,9 +165,9 @@ def set_scale(blocks: int, files: int, nodes: int) -> None:
 #: 操作名 -> 友好中文名。路由里记录时用它统一命名。
 ACTION_NAMES = {
     "upload": "上传",
-    "modify": "改块",
+    "modify": "替换",
     "append": "追加",
-    "truncate": "截断",
+    "truncate": "删除",
     "delete": "删除文件",
     "query": "查询",
     "query_files": "多文件查询",

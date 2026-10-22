@@ -257,7 +257,7 @@ function enrichUploadSteps(data, detail, evidence) {
       ...(delta ? [{ k: '$C$', v: decHead16(delta.C) }] : []),
       ...(delta ? [{ k: '$U$', v: decHead16(delta.U) }] : []),
     ],
-    // 用户要求：逐块列 4 行；块更多的加一个省略标识（不无声截断）。
+    // 用户要求：逐块列 4 行；块更多的加一个省略标识（不无声删除）。
     '分发至存储节点': [
       ...layout.slice(0, 4).map((b, i) => ({
         k: `第 ${i + 1} 块`,
@@ -424,7 +424,7 @@ async function askPlan() {
   try {
     const size = selectedFile.value.size
     // ★ 同时问**两档口径**（接口里的 prefer）：顾问自己的规则只有「块数最少」
-    //   （对 ≤1 MiB 的文件必然建议 1 块）与「改块粒度最细」两条。
+    //   （对 ≤1 MiB 的文件必然建议 1 块）与「替换粒度最细」两条。
     //   只问一条、再把那一句当圣旨摆出来，就是之前那个「建议共 1 块」的观感来源 ——
     //   那不是错，是**单一口径被当成了结论**。两档一起给，取舍摆在用户面前。
     const [fewest, finer] = await Promise.all([

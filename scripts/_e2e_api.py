@@ -1,4 +1,4 @@
-"""接口层端到端（打真的 8000 端口）—— 上传 / 改块 / 追加 / 截断 / 检索 /
+"""接口层端到端（打真的 8000 端口）—— 上传 / 替换 / 追加 / 删除 / 检索 /
 批量验证 / 增量聚合与分解 / 存储证明 / 故障演练，一条一条走下来。
 
 ★ 为什么要有它（而不是只靠那几个 ``verify_*.py``）：
@@ -147,8 +147,8 @@ if r.status_code == 200:
           json.dumps(_b, ensure_ascii=False)[:200])
 
 
-section("3. 改块 / 追加 / 截断（三种更新都要推给每台节点）")
-# 改块 0 → 'Z'*512；末尾追加 'Q'*512。于是期望的明文是：
+section("3. 替换 / 追加 / 删除（三种更新都要推给每台节点）")
+# 替换 0 → 'Z'*512；末尾追加 'Q'*512。于是期望的明文是：
 #     "Z"*512 + DATA1[512:] + "Q"*512
 EXPECT1 = b"Z" * 512 + DATA1[512:] + b"Q" * 512
 r = c.patch(
@@ -157,7 +157,7 @@ r = c.patch(
     json={"op": "modify", "block_idx": 0,
           "data_b64": base64.b64encode(b"Z" * 512).decode()},
 )
-check("★ PATCH 改块 200", r.status_code == 200, show(r, 300))
+check("★ PATCH 替换 200", r.status_code == 200, show(r, 300))
 
 r = c.patch(
     f"/api/files/{FID}",
@@ -170,7 +170,7 @@ r = c.patch(
     f"/api/files/{FID2}", headers=H_USER,
     json={"op": "truncate", "drop_blocks": 1},
 )
-check("★ PATCH 截断 200", r.status_code == 200, show(r, 300))
+check("★ PATCH 删除 200", r.status_code == 200, show(r, 300))
 
 r = c.get("/api/nodes", headers=H_USER)
 rep2 = r.json()
@@ -221,7 +221,7 @@ check("GET /api/admin/fault-drill 200", r.status_code == 200, show(r, 200))
 base = r.json()
 check("演练前没有故障节点", not base.get("down") and not base.get("destroyed"),
       json.dumps(base, ensure_ascii=False)[:200])
-# ★ 基线要在**演练前这一刻**取（上面已经改块+追加过了，块数不再是上传时的 6）。
+# ★ 基线要在**演练前这一刻**取（上面已经替换+追加过了，块数不再是上传时的 6）。
 BLOCKS_PRE = c.get(f"/api/files/{FID}", headers=H_USER).json().get("block_count")
 
 r = c.get("/api/nodes", headers=H_USER)

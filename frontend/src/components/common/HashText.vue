@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 指纹显示单元：界面显示截断值，悬浮显示完整值。
+ * 指纹显示单元：界面显示删除值，悬浮显示完整值。
  *
  * 用法与 `PubKeyFingerprint.vue` 一致（均使用原生 `title` 提示与 BigInt），
  * 本组件更通用：任何十进制的群元素均可显示。
@@ -50,7 +50,7 @@ const tip = computed(() => {
   font-size: 13px;
   color: var(--accent);
   cursor: help;
-  /* 提示中给出完整值，因此短串允许截断显示。 */
+  /* 提示中给出完整值，因此短串允许删除显示。 */
   word-break: break-all;
 }
 .hash-text .lbl {

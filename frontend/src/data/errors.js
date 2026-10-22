@@ -114,7 +114,7 @@ export const ERROR_TEXT = {
   'files.bad_nodes': () =>
     'nodes 传了但没有一个有效的机器名（应当是逗号分隔，如 node-1,node-2）',
   'files.truncate_missing_drop': () =>
-    'op=truncate 必须提供 drop_blocks（需截断的末尾分块数）',
+    'op=truncate 必须提供 drop_blocks（需删除的末尾分块数）',
   'files.not_owner_modify': () =>
     '仅文件所有者可以改写该文件：改写需要重新封装块密钥，' +
     '与上传属于同一权限级别（管理员亦不具备该权限）。\n' +

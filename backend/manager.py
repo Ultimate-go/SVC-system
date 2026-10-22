@@ -401,7 +401,7 @@ class StoreManager:
             db.commit()
 
     def user_public_key(self, username: str):
-        """取用户的 SM2 公钥点 —— 上传/改块/追加时用它封块密钥。"""
+        """取用户的 SM2 公钥点 —— 上传/替换/追加时用它封块密钥。"""
         with self.db.session() as db:
             row = self._user_row(db, username)
             if not row.pub_key:
@@ -474,7 +474,7 @@ class StoreManager:
     #
     # ★ 为什么需要它：JWT 是**无状态**的 —— 签出去就收不回来。于是
     #   “退出登录”以前只能丢掉内存里的私钥（那挡住了**解密**），
-    #   却挡不住**写操作**：上传 / 改块 / 追加 / 截断 / 删除只校验令牌，
+    #   却挡不住**写操作**：上传 / 替换 / 追加 / 删除 / 删除只校验令牌，
     #   而令牌在 TTL（12 小时）内一直有效。令牌一旦泄露，
     #   受害者“退出登录”完全无法止损。
     #
@@ -667,7 +667,7 @@ class StoreManager:
     def delta_fingerprint(self, file_id: tuple[str, str]) -> str:
         """某份文件当前 δ 的短指纹（12 位十六进制）: ``sha256("U:C:n")[:12]``。
 
-        为什么必须有它、而不能只看 ``n``：**改块不改变 n，却会改变承诺 C**
+        为什么必须有它、而不能只看 ``n``：**替换不改变 n，却会改变承诺 C**
         （见 :meth:`modify_block`）。证据是 δ 的函数，所以"n 没变"**不等于**
         "证据还有效"。界面要回答"这张卡作废没有"，只能按指纹判。
 
@@ -1020,7 +1020,7 @@ class StoreManager:
 
         .. important::
 
-           它是 **upsert**，不是纯插入。改块改的是**已有**下标，
+           它是 **upsert**，不是纯插入。替换改的是**已有**下标，
            而 ``node_blobs`` 的主键是 ``(node_id, global_index)`` ——
            拿 ``db.add`` 去写就会直接撞主键。
 
@@ -1062,7 +1062,7 @@ class StoreManager:
         for i in indices:
             gidx = int(i)
             # ★ 每一份副本都要落库。只写主副本的话，重启后别的副本拿到的
-            #   还是旧密文 —— 改块时尤其致命（验证会当场因本端算出的分量
+            #   还是旧密文 —— 替换时尤其致命（验证会当场因本端算出的分量
             #   与承诺不符而失败）。
             for nid in store.replicas_of(gidx):
                 ct = snap[nid]["blobs"][gidx]
@@ -1311,7 +1311,7 @@ class StoreManager:
 
                **这个值是逐文件记的**（``files.segment_bytes``）。所以它是
                “这份文件的形状”而不是“当时那个全局配置” —— 以后改部署默认值
-               不会把老文件弄坏，改块与追加也都按这份文件自己的值走。
+               不会把老文件弄坏，替换与追加也都按这份文件自己的值走。
 
         :param nodes: **这份文件只往哪几台机器上摊**（手动指定分发）。
             ``None`` = 全部机器。校验在 :meth:`core.store.VectorStore._resolve_pool`：
@@ -1482,7 +1482,7 @@ class StoreManager:
             try:
                 store.modify(owner, file_key, block_idx, data, key_sink=sink)
             except WriteError:
-                # 一台没跟上就是全网不一致，且改块不能“重来一次”（重来会换新密钥、新密文，
+                # 一台没跟上就是全网不一致，且替换不能“重来一次”（重来会换新密钥、新密文，
                 # 已经跟上的节点会当场拒）。方案约定：写失败即作废。
                 raise
             except (KeyError, IndexError) as exc:
@@ -1503,13 +1503,13 @@ class StoreManager:
     #   旧版本到底算谁的（协调者库还是存储节点）没有清楚的归属，而为了“能回退”
     #   就得在协调者库里多存一份**完整本体**（密文 + IV + 块密钥密文）——
     #   那既多一份副本，也让“密文只在节点上”这句没法再讲。
-    #   现在只保留“当前版本”：改块/置零之后旧版本就真的没了。
+    #   现在只保留“当前版本”：替换/置零之后旧版本就真的没了。
     # -------------------------------------------------------------------
 
     def zero_block(self, owner: str, file_key: str, block_idx: int) -> dict:
         r"""把第 ``block_idx`` 块的内容换成**等长的全 0 字节**。
 
-        它**不是删除**，是改块（论文 §8.2 的 ``op = mod``）：块仍在向量里、
+        它**不是删除**，是替换（论文 §8.2 的 ``op = mod``）：块仍在向量里、
         仍占原来那个下标、仍占节点存储，``n`` 不变；变的只有内容、
         该位置的承诺分量、以及版本号（+1）。
 
@@ -1518,10 +1518,10 @@ class StoreManager:
           上传时切好的，等长一定不会越界（``modify`` 里有"不超过单块上限"
           与"不能为空"两道校，等长全 0 两道都天然满足）。
 
-        ★ 为什么**复用** :meth:`modify_block` 而不是另写一套：改块这条路
+        ★ 为什么**复用** :meth:`modify_block` 而不是另写一套：替换这条路
           （重新加密 → 算新分量 → 推给全网 → 重新封装密钥 → 写库）
           只能有一份定义。两份的结果就是"一条把账收干净、另一条漏一半"，
-          而那是最难查的一类偏差。零清与改块**唯一**的区别只是"写什么内容"。
+          而那是最难查的一类偏差。零清与替换**唯一**的区别只是"写什么内容"。
 
         :returns: 与 :meth:`modify_block` 同构（``global_index`` / ``block_idx``
             / ``plain_len`` / ``version``）。
@@ -1667,7 +1667,7 @@ class StoreManager:
            **只有最后写进向量的那份文件才删得动尾巴**；换成新坐标
            （块身份派生素数）后每份文件各占一段，这条束缚**已不存在** ——
            后面压着别人后写的块也照样删得动。
-           实测：一份写在前面、后面又写过别的文件的文件，截断返回 200。
+           实测：一份写在前面、后面又写过别的文件的文件，删除返回 200。
            所以**能否删除与写入顺序无关**，界面上也就不该再提那条旧限制。
 
         .. important::
@@ -1685,7 +1685,7 @@ class StoreManager:
             store = self._require()
             rec = store.files.get((owner, file_key))
             if rec is None:
-                raise NotFound(f"文件 {owner}/{file_key} 不存在（截断只能作用于已有文件）")
+                raise NotFound(f"文件 {owner}/{file_key} 不存在（删除只能作用于已有文件）")
 
             # ① 先读库：拿 file_id（落库要按它删块行），顺便校验块数
             with self.db.session() as db:
@@ -1734,7 +1734,7 @@ class StoreManager:
                                 NodeBlobRow.global_index.in_(doomed)
                             )
                         )
-                    # 版本号 +1：与改块/追加同一语义 —— 旧证据（含增量聚合与分解里的卡）作废
+                    # 版本号 +1：与替换/追加同一语义 —— 旧证据（含增量聚合与分解里的卡）作废
                     frow.version += 1
                     frow.block_count = cur.block_count
                     frow.total_bytes = cur.total_bytes
@@ -2209,7 +2209,7 @@ class StoreManager:
                 raise OutOfRange(
                     f"分解所得证据未通过验证：{report.message}\n"
                     f"  最可能的原因是「这份证据是在旧的 δ 上取的」——\n"
-                    f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让"
+                    f"  上传会让全局块数 n 变、替换会让承诺 C 变，两者都会让"
                     f"之前取到的证据失效。\n"
                     f"  另一个可能是这张卡的 S_I/Lambda_I 与 indices 不是"
                     f"同一次取的（或者被改过）。\n"
@@ -2401,7 +2401,7 @@ class StoreManager:
                     f"合并所得证据未通过验证：{report.message}\n"
                     f"  最可能的原因是两份证据**不在同一个 δ 上**"
                     f"（其中一份是在旧版本上取的）——\n"
-                    f"  上传会让全局块数 n 变、改块会让承诺 C 变，两者都会让此前的证据失效。\n"
+                    f"  上传会让全局块数 n 变、替换会让承诺 C 变，两者都会让此前的证据失效。\n"
                     f"  请把两份都重新取一次（当前 n = {_fd.n}）。"
                 )
 
@@ -2769,12 +2769,12 @@ class StoreManager:
     def replay_arm(self, owner: str, file_key: str, block_idx: int, *, on: bool) -> dict:
         """打开 / 关闭「回滚演示」：让 ``/cipher`` 对这块交回**旧版本**。
 
-        ★ 演示顺序（重要）：**先开开关，再改块**。
+        ★ 演示顺序（重要）：**先开开关，再替换**。
           开开关时存下来的是“**当时**那一块的密文”，而开关的含义就是
           “以后对这块都交回这一份”。所以：
 
           1. 开开关（存下现在这版）
-          2. 改块（这一块变成新版）
+          2. 替换（这一块变成新版）
           3. 解密 → 服务器交回第 1 步存的那份（= 改之前的）→ 验证不通过
           4. 关开关 → 恢复正常
 
@@ -2811,7 +2811,7 @@ class StoreManager:
                     db.commit()
                 return {"on": False, "block_idx": block_idx}
 
-            # 存“当前”这一版（在还没改块之前调，它就等于“改之前那一版”）。
+            # 存“当前”这一版（在还没替换之前调，它就等于“改之前那一版”）。
             pack = store.cipher_of(owner, file_key, [block_idx])
             blk = pack["blocks"][0]
             key_cts = self._blocks_of(owner, file_key)
@@ -3338,7 +3338,7 @@ class StoreManager:
         """★ 把故障名单翻译成**业务后果**：哪些块、哪些文件现在出问题。
 
         这是整个演练最有价值的一块 —— 光说"n1 掉线了"没有用，要回答的是
-        「**所以我还能不能验证 / 改块 / 聚合**」。
+        「**所以我还能不能验证 / 替换 / 聚合**」。
 
         * ``lost_blocks``：**每一份副本**都在故障名单里的块。多副本也救不回来，
           那个块再也验不了、解不开（**永久损毁才可能到这里**；掉线的话数据

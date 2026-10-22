@@ -105,7 +105,7 @@ def check_invalidate(bad: list[str]) -> None:
 
 #: 写操作点 -> 该处必须调 ``invalidate_node_report()``。
 WRITE_SITES = (
-    ("apply_update(", "上传 / 改块推送"),
+    ("apply_update(", "上传 / 替换推送"),
     ("apply_append(", "追加推送"),
     ("self.transport.drop(", "删除（先丢下标）"),
     ("apply_delete(", "删除推送"),

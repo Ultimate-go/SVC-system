@@ -95,8 +95,8 @@ def main() -> int:
         #   （``StoreManager._verify_nodes_at_startup``）。★ 2026-10-16 实测踩到过：
         #   用 ``seed.py --reset`` 修不好，得整套重来。
         #
-        #   这里**故意不去删**那些目录：本脚本可能正跑在“节点进程活着”的手动流程里
-        #   （见 docs/复现指南.md），替用户删节点数据不是它的职责。只在真存在
+        #   这里**故意不去删**那些目录：本脚本可能正跑在“节点进程活着”的手动流程里，
+        #   替用户删节点数据不是它的职责。只在真存在
         #   陈旧节点账目时把话说清楚，并给出唯一正确的补救命令。
         stale = sorted(
             d.name for d in (ROOT / "nodes").glob("node-*") if (d / "node.db").exists()

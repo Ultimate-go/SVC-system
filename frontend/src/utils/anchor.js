@@ -73,7 +73,7 @@ export function getAnchor(fileId, blockIdx) {
  * :param sha256: 明文的 SHA-256（十六进制）—— 判据本体
  * :param version: 记锚时文件的版本号（用于解释"期间有别的改动"）
  * :param deltaFp: 记锚时本文件的 δ 指纹（回滚检测用）
- * :param source: 人类可读的来源（"上传"/"改块"/"清零"…），界面要显示它
+ * :param source: 人类可读的来源（"上传"/"替换"/"清零"…），界面要显示它
  */
 export function setAnchor(fileId, blockIdx, { sha256, version = null, deltaFp = null, bytes = null, source = '' }) {
   const all = readAll();
@@ -81,7 +81,7 @@ export function setAnchor(fileId, blockIdx, { sha256, version = null, deltaFp = 
   const prev = all[key];
   // ★★ 记住**上几个版本**的明文哈希。
   //
-  //   为什么要留历史：服务器完全可能把“改块**前**的那份密文”再交回来
+  //   为什么要留历史：服务器完全可能把“替换**前**的那份密文”再交回来
   //   （缓存、回滚、或者干脆是恶意）。只留当前一份哈希的话，我们能说出的
   //   最多是“这和我最后一次见到的不同”—— 而拿到旧数据的人真正需要知道的
   //   是「**它就是我改之前那一版**」，那是**完全不同性质**的一句话：

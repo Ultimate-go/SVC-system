@@ -11,7 +11,7 @@
    节点侧落进 ``node_state.delta_identity``；
 2. **模拟重启** —— 丢掉全部内存对象，只留那个 ``.db`` 文件，重新
    ``bootstrap()``，确认重建出来的 δ 仍带身份、``check()`` 仍然全绿；
-3. **重启之后继续写** —— 改块 / 追加 / 跨文件检索，全部要通。
+3. **重启之后继续写** —— 替换 / 追加 / 跨文件检索，全部要通。
    （这一条才是真正的把关：光"读得出来"不够，更新路径还依赖
    节点那边算出的 ``e_i`` 与协调者一致。）
 
@@ -167,11 +167,11 @@ check("★ 重启后仍能解密 f2", read_bytes(mgr2, OWNER, "f2", sk2) == PLAI
 section("3. 重启之后继续写：更新路径也依赖正确坐标")
 
 mgr2.modify_block(OWNER, "f1", 1, b"C" * SEG)
-check("重启后改块：身份未丢",
+check("重启后替换：身份未丢",
       store2.delta_of(OWNER, "f1").identity == make_identity(OWNER, "f1"))
 expect = BLOCK + b"C" * SEG + BLOCK + BLOCK
-check("重启后改块：明文正确", read_bytes(mgr2, OWNER, "f1", sk2) == expect)
-check("重启后改块：check() 全绿", mgr2.check() == [], str(mgr2.check()[:2]))
+check("重启后替换：明文正确", read_bytes(mgr2, OWNER, "f1", sk2) == expect)
+check("重启后替换：check() 全绿", mgr2.check() == [], str(mgr2.check()[:2]))
 
 mgr2.append_to_file(OWNER, "f1", b"D" * SEG)
 check("重启后追加：n = 5", store2.delta_of(OWNER, "f1").n == 5)

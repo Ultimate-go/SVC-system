@@ -12,13 +12,13 @@ export const filesApi = {
   detail: (id, withElements = false) =>
     api.get(`/api/files/${id}`, withElements ? { params: { elements: 1 } } : undefined),
   // ★ silent：上传的 503（部分节点没跟上）由上传页用弹框单独呈现，
-  //   拦截器就别再弹一个被截断的红色 toast 了。
+  //   拦截器就别再弹一个被删除的红色 toast 了。
   upload: (formData) => api.post('/api/files', formData, { silent: true }),
   patch: (id, body) => api.patch(`/api/files/${id}`, body),
   /**
    * 把某一**块**的内容换成**等长的全 0 字节**（只有所有者）。
    *
-   * ★ 它走的是 ``op = zero``，而 ``zero`` 在服务端就是**改块**（论文的
+   * ★ 它走的是 ``op = zero``，而 ``zero`` 在服务端就是**替换**（论文的
    *   ``op = mod``）—— 所以：块仍在（下标不变、仍占存储、``n`` 不变）、
    *   完整性照样验证通过，只是内容换了、版本号 +1。
    *   长度用这一块**原来的长度**（不重新切块），所以 ``total_bytes`` 不变。
@@ -56,7 +56,7 @@ export const filesApi = {
    * 打开后服务器**真的**开始对这块交回旧密文（后续 /cipher 里换掉），
    * 于是客户端自算的分量对不上当前基准，**验证不通过**。
    *
-   * ★ 演示顺序：**先** on=true（存下当前这版）→ **再**改块 → **然后**解密。
+   * ★ 演示顺序：**先** on=true（存下当前这版）→ **再**替换 → **然后**解密。
    * :param id: 文件 id
    * :param blockIdx: 文件内的第几块（0 起算）
    * :param on: true 打开演示，false 恢复正常

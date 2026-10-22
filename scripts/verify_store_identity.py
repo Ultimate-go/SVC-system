@@ -5,7 +5,7 @@
 ``svc`` 与会话层成立；这一关把它接进真实业务流，并逐项确认：
 
 * 新建的摘要**带身份**（``Digest.identity`` 非空）；
-* 上传 / 改块 / 追加 / 截断 / 删除之后，身份**一路传得下去**；
+* 上传 / 替换 / 追加 / 删除 / 删除之后，身份**一路传得下去**；
 * 读回明文、``commit`` 自检（``authoritative_digest``）、全面自检（``check``）
   三项全部与改造前**同样通过**；
 * 跨文件聚合（``universe_for`` 那条路）在新坐标下照样成立。
@@ -93,14 +93,14 @@ check("全面自检 check() 无问题", store.check() == [], str(store.check()[:
 print(f"        （3 块上传耗时 {t_up:.2f}s，含首次素数派生）")
 
 
-section("2. 改块 / 追加：身份必须一路带下去")
+section("2. 更新 / 追加：身份必须一路带下去")
 
 store.modify(*F1, 1, B1X)
-check("改块后 n 不变", store.delta_of(*F1).n == 3)
-check("★ 改块后身份仍在", ident_of(F1) == ID1)
-check("改块后读回正确", store.read(*F1) == B0 + B1X + B2)
-check("改块后 cipher_of 验证通过", ok_verify(store.cipher_of(*F1)["verify"]))
-check("改块后 self-check 通过", store.authoritative_digest(F1) == store.delta_of(*F1))
+check("替换后 n 不变", store.delta_of(*F1).n == 3)
+check("★ 替换后身份仍在", ident_of(F1) == ID1)
+check("替换后读回正确", store.read(*F1) == B0 + B1X + B2)
+check("替换后 cipher_of 验证通过", ok_verify(store.cipher_of(*F1)["verify"]))
+check("替换后 self-check 通过", store.authoritative_digest(F1) == store.delta_of(*F1))
 
 store.append(*F1, B3 + B4)  # +2 块
 check("追加后 n = 5", store.delta_of(*F1).n == 5, f"n={store.delta_of(*F1).n}")
@@ -138,15 +138,15 @@ check("★ 合并向量的素数 = 各文件自己的素数（按位置对齐）
       [crn.crs.primegen.get(i) for i in range(len(P))] == [prime_at[p] for p in P])
 
 
-section("4. 截断 / 删除：身份仍要保住")
+section("4. 删除 / 删除：身份仍要保住")
 
 K, _ = store.truncate(*F1, 2)
-check("截断返回了末尾 2 块", len(K) == 2)
-check("截断后 n = 3", store.delta_of(*F1).n == 3, f"n={store.delta_of(*F1).n}")
-check("★ 截断后身份仍在", ident_of(F1) == ID1)
-check("截断后读回正确", store.read(*F1) == B0 + B1X + B2)
-check("截断后 cipher_of 验证通过", ok_verify(store.cipher_of(*F1)["verify"]))
-check("截断后 check() 无问题", store.check() == [], str(store.check()[:2]))
+check("删除返回了末尾 2 块", len(K) == 2)
+check("删除后 n = 3", store.delta_of(*F1).n == 3, f"n={store.delta_of(*F1).n}")
+check("★ 删除后身份仍在", ident_of(F1) == ID1)
+check("删除后读回正确", store.read(*F1) == B0 + B1X + B2)
+check("删除后 cipher_of 验证通过", ok_verify(store.cipher_of(*F1)["verify"]))
+check("删除后 check() 无问题", store.check() == [], str(store.check()[:2]))
 
 dropped, files_gone = store.delete_from(*F2)
 check("删除 f2 后它不在 files 里", F2 not in store.files)

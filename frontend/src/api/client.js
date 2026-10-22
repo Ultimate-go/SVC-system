@@ -92,7 +92,7 @@ api.interceptors.response.use(
     }
 
     // ★ ``silent``：调用方自己会把这条错误**完整**呈现出来（比如用对话框显示
-    //   后端那段好几句的中文解释），拦截器就别再弹一个被截断的 toast 了。
+    //   后端那段好几句的中文解释），拦截器就别再弹一个被删除的 toast 了。
     //   典型场景：改服务器台数时的 409（后端在 detail 里列了哪几块要搬、
     //   哪几块搬不动、该怎么办）。见 api/deploy.js。
     if (err.config?.silent) return Promise.reject(err)

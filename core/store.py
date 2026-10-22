@@ -26,10 +26,11 @@
 所以本类在**单进程**与**多进程**两种部署下跑的是同一份代码，区别只在
 注入的 :class:`~core.transport.NodeTransport`。
 
-因为没有"每个文件一条向量"这回事，所以：
+于是每份文件各有自己的摘要 δ：
 
-* 全系统**只有一份摘要 δ** —— 任何用户都能验证任意位置（验证不受限）；
-* 一个证据可以**横跨多个文件** —— 只要下标集合覆盖到那几个文件就行。
+* **一份文件一条 δ** —— 任何用户都能验证任意位置（验证不受限）；
+* 证据在**同一份文件内**产生；跨文件取证时按「合并位置集」重算一份，
+  所以一个证据仍然可以**横跨多个文件**（见 :meth:`universe_for`）。
 
 一条验证线：分量由验证方**自己从密文算**
 ----------------------------------------
@@ -38,7 +39,7 @@
 
     验证方**不采用节点声称的分量** —— 它拿回来的密文段**自己算**
     ``F_i := vector_element(c_i)``，再拿这组自己算出来的值去跑承诺验证
-    （:func:`svc.verify` 的两步校验，对着全局 δ）。
+    （:func:`svc.verify` 的两步校验，对着**该文件**的 δ）。
 
 于是承诺验证的结论就是**唯一且完整**的正确性保证，不需要另设一层"密文与
 分量对不对得上"的自检：
@@ -104,7 +105,7 @@ DEFAULT_NODE_IDS: tuple[str, ...] = ("node-1", "node-2", "node-3", "node-4")
 #:   代价随文件数增长（实测 7 份文件时 1.5~3 s）。而设备页 / 总览页 / 块分布图
 #:   往往在几百毫秒内连续问好几遍（页头 + 列表 + 详情），每一遍都重算没有意义。
 #:
-#: ★★ 它只挡**重复读**，不挡写：任何改变节点持有情况的操作（上传 / 改块 /
+#: ★★ 它只挡**重复读**，不挡写：任何改变节点持有情况的操作（上传 / 替换 /
 #:   追加 / 删除 / 换 CRS / 故障演练）都走 :meth:`VectorStore.invalidate_node_report`
 #:   把缓存直接丢掉，所以“刚传的块看不到”这类陈旧不会发生。
 #:   1.5 s 只够合并同一屏内的重复请求，短到即使有遗漏也来不及积成事故。
@@ -379,7 +380,7 @@ class VectorStore:
         ★ 它与设计 B 的 ``n`` 不是一回事：那边 ``n`` 既是“块数”又是“向量长度”，
         两者恒等；新方案里每份文件各有自己的长度，所以这里的 ``n`` 只是
         “一共存了多少块”。而 :attr:`registry.next_offset` 才是“位置用到了哪”
-        —— 它更大，因为废弃的段（删文件、截断留下的空洞）**永不回收**。
+        —— 它更大，因为废弃的段（删文件、删除留下的空洞）**永不回收**。
         """
         return self.registry.total_blocks()
 
@@ -389,7 +390,7 @@ class VectorStore:
 
         ★★ 别用 ``range(self.n)`` 代替它 —— 那是这套系统里最容易踩的一处：
         :attr:`n` 是“**块数**”（各文件块数之和），而全局下标是**位置号**。
-        段一旦被废弃（删文件、截断留下的空洞）就永不回收，
+        段一旦被废弃（删文件、删除留下的空洞）就永不回收，
         于是 ``next_offset`` 会大于 ``n``，位置号里有洞。
 
         拿 ``range(n)`` 当下标会遇到洞 ⇒ :meth:`replicas_of` 抛
@@ -408,7 +409,7 @@ class VectorStore:
     def replicas_of(self, global_index: int) -> tuple[str, ...]:
         """这个下标**全部**的持有者，**主副本在前**。
 
-        没有副本时退化成 ``(主副本,)`` —— 所以调用方（如改块时要推给谁）
+        没有副本时退化成 ``(主副本,)`` —— 所以调用方（如替换时要推给谁）
         不需要分“开没开副本”两种情况。
         """
         got = self._replicas.get(global_index)
@@ -465,7 +466,7 @@ class VectorStore:
         if key is None:
             raise KeyError(
                 f"全局位置 {global_index} 不属于任何文件"
-                f"（要么从未分配，要么是删文件/截断留下的空洞 —— 段永不回收）"
+                f"（要么从未分配，要么是删文件/删除留下的空洞 —— 段永不回收）"
             )
         owner, file_key = key
         pos = self.registry.positions_of(owner, file_key)
@@ -488,7 +489,7 @@ class VectorStore:
             if key is None:
                 raise KeyError(
                     f"全局位置 {g} 不属于任何文件"
-                    f"（要么从未分配，要么是删文件/截断留下的空洞 —— 段永不回收）"
+                    f"（要么从未分配，要么是删文件/删除留下的空洞 —— 段永不回收）"
                 )
             out.setdefault(key, []).append(int(g))
         return {k: tuple(sorted(v)) for k, v in out.items()}
@@ -661,7 +662,7 @@ class VectorStore:
         所以也不需要按块大小重新切。
 
         :param key_sink: 同 :meth:`upload`，``key_sink(块号, 新密钥, 新 IV)``。
-            改块必然产生**新的**块密钥（旧密钥连同旧密文一起作废），
+            替换必然产生**新的**块密钥（旧密钥连同旧密文一起作废），
             调用方必须**重新封装**它（现在就是拿所有者的 SM2 公钥再封一次）
             —— 否则新内容连所有者自己也解不开。
         :returns: ``(新 IV, 新明文长度)``；调用方拿它更新自己那份账目
@@ -692,7 +693,7 @@ class VectorStore:
             raise ValueError(
                 f"这一块有 {len(plaintext)} 字节，超过单块上限 {rec.segment_bytes} "
                 f"—— 块的大小是上传时切好的（这份文件切的是 {rec.segment_bytes} 字节），"
-                f"改块只换内容、不重新切；需要更多空间请重新上传"
+                f"替换只换内容、不重新切；需要更多空间请重新上传"
             )
 
         gidx = rec.indices[block_idx]
@@ -713,7 +714,7 @@ class VectorStore:
         op_delta = UpdateDelta(op="mod", K=(block_idx,), F_new=(v_new,))
         # 推送方只要出 S_K，而 S_K 与谁发起无关（K 不在 I 里时退回直接模幂，
         # 见 vds.updates._S_K），所以协调者用空视图占位即可 ——
-        # 它**不需要**持有这一块，也就不必为了一次改块把明文调进来。
+        # 它**不需要**持有这一块，也就不必为了一次替换把明文调进来。
         with stage("承诺更新"):
             pushed = push_update(
                 self.session,
@@ -725,7 +726,7 @@ class VectorStore:
                 #   协调者手里本来就有全部分量的值（``_vals_of``），直接给一个
                 #   ``I = range(n)`` 的节点，``outside`` 为空、``Λ_I`` 一个字都
                 #   不用动 —— 这在数学上也正是对的：``Λ_I`` 只含
-                #   :math:`i \notin I` 的值，改块**不该**碰到它。
+                #   :math:`i \notin I` 的值，替换**不该**碰到它。
                 #
                 #   （原注释说“推送方只要出 S_K，用空视图占位即可”只对一半：
                 #     ``_S_K`` 那条“K ⊆ I 走 disagg、否则退回直接模幂”的分支确实
@@ -746,7 +747,7 @@ class VectorStore:
         context = {
             # ★ 显式标出操作种类（与 :meth:`_append` 同理）：缺它是靠"缺省就是
             #   add"猜的，而"失败后要不要退登记表"这类判据一旦靠猜就会错。
-            #   改块**不动长度、也不分配位置**，所以它绝不能被当成 add。
+            #   替换**不动长度、也不分配位置**，所以它绝不能被当成 add。
             "kind": "mod",
             "file_id": key,
             "delta_new": pushed.delta,
@@ -768,7 +769,7 @@ class VectorStore:
                 )
         except TransportError as exc:
             # ★ 与 _append 完全同理（见那边的注释）：一台没跟上，全网就不一致。
-            #   而改块比追加**更不能**“重来一次” —— 重来会生成新的块密钥与新的
+            #   而替换比追加**更不能**“重来一次” —— 重来会生成新的块密钥与新的
             #   密文，已经跟上的那几台会当场拒（它们算出的摘要已经是新值）。
             #   而且上面那行 ``key_sink`` 已经把**新**密钥交出去了，
             #   所以“回滚”也无从谈起。方案约定：写失败即作废 ——
@@ -790,7 +791,7 @@ class VectorStore:
     ) -> FileRecord:
         """在文件**末尾追加**一段 —— 只新增块，已有的块一个字节都不动。
 
-        与 :meth:`modify` 是同一条纪律的两种用法：改块只换**一块**、追加只加
+        与 :meth:`modify` 是同一条纪律的两种用法：替换只换**一块**、追加只加
         **末尾几块**，两者都不重新切、不重新分发旧块，所以代价都只与
         "动了多少"成正比，与文件本身多大无关。
 
@@ -811,7 +812,7 @@ class VectorStore:
 
            **追加不回头填上一块的空位。** 上一块宁可只写半截，也不去补它 ——
            因为"补上一块"本质是一次 :meth:`modify`（要换密钥、要重推密文），
-           那样"追加"就变成了"改块 + 追加"，代价与语义都变味了。
+           那样"追加"就变成了"替换 + 追加"，代价与语义都变味了。
 
            代价是**会留一点空隙**（最后一块不满一整段）。读取时块按序拼接，
            内容一个字节都不会错，所以这只是空间利用率的问题、不是正确性问题。
@@ -1013,7 +1014,7 @@ class VectorStore:
             if context.get("kind", "add") == "add":
                 # ★★ 这次写**永远不会完成**，但登记表**已经分配过**这批位置了。
                 #    不退回去的话，协调者手里就留下"有位置、没分量"的脏账，
-                #    之后任何要读值的操作（改块 / 自检 / 一次性承诺复核）都会以
+                #    之后任何要读值的操作（替换 / 自检 / 一次性承诺复核）都会以
                 #    ``KeyError: <位置号>`` 收场 —— 那是最难归因的一类故障，
                 #    而且看上去像是"向量本身坏了"。
                 #
@@ -1025,7 +1026,7 @@ class VectorStore:
         self._absorb_pushed(context)
 
     # -------------------------------------------------------------------
-    # 截断（删掉末尾若干块）
+    # 删除（删掉末尾若干块）
     # -------------------------------------------------------------------
 
     def truncate(
@@ -1063,7 +1064,7 @@ class VectorStore:
         key = (owner, file_key)
         rec = self.files.get(key)
         if rec is None:
-            raise KeyError(f"文件 {owner}/{file_key} 不存在（截断只能作用于已有文件）")
+            raise KeyError(f"文件 {owner}/{file_key} 不存在（删除只能作用于已有文件）")
         try:
             drop = int(drop_blocks)
         except (TypeError, ValueError):
@@ -1314,7 +1315,7 @@ class VectorStore:
         删块时必须跟着抹掉 —— "已经删掉的数据还留着一把钥匙"是删除语义的反面。
 
         ★ 提成钩子（而不是在 :class:`PlainKeyStore` 里覆写 ``truncate``）是为了让
-        收尾只写一份：截断的落库与抹密钥都在 ``_settle`` 里，覆写公有方法
+        收尾只写一份：删除的落库与抹密钥都在 ``_settle`` 里，覆写公有方法
         会把这两件事拆到两个地方。
         """
         return None
@@ -1342,7 +1343,7 @@ class VectorStore:
     def _absorb_pushed(self, p: Mapping) -> None:
         r"""**写推成功之后**统一的那一套账。
 
-        追加 / 改块 / 清零 / 恢复四条写路径都调它 —— 收尾只有**一条路**：
+        追加 / 替换 / 清零 / 恢复四条写路径都调它 —— 收尾只有**一条路**：
         本次写推成功了才落库；没成功就退回登记表，当作从未发生。
 
         ``p`` 就是 :meth:`_append` / :meth:`modify` 留下的那份 context：
@@ -1372,7 +1373,7 @@ class VectorStore:
     def _absorb_deleted(self, p: Mapping) -> None:
         r"""**删除推成功后**的那一套账 —— 与 :meth:`_absorb_pushed` 并列。
 
-        与“追加/改块”的差别只有一处方向：那边是把 ``K`` 上的分量**加进来**，
+        与“追加/替换”的差别只有一处方向：那边是把 ``K`` 上的分量**加进来**，
         这边是把它们连同 ``_holder`` / ``_replicas`` 里的名字一起**抹掉**。
 
         ``on_success`` 的调用时机与理由与那边完全一致（**账目推进之后**才调，
@@ -1545,6 +1546,12 @@ class VectorStore:
         # 把缺的也塞进 F_Q / 证据里就是伪造（那样验出来的“通过”毫无意义）。
         if missing:
             Q = tuple(i for i in Q if i not in missing)
+            # ★ 分组必须**跟着一起收缩**。否则 :meth:`_prove` 的单文件分支会把
+            #   未收缩的 ``groups[file_id]``（含已确认不可达的位置）交给
+            #   :meth:`_certs_for`，那里又会为这些块抛「没有服务器覆盖位置」——
+            #   于是 ``allow_partial=True`` 在单文件路径上整条失效：
+            #   用户拿到的是 400，而不是带 ``missing`` 的部分结果。
+            groups = self._group_by_file(Q)
 
         # 证据的生成与验证放到 :meth:`_prove`：单文件走“节点凭证聚合”，
         # 跨文件走“合并位置集重算”（下面各算完 valmap / F_Q 再调）。
@@ -1672,8 +1679,15 @@ class VectorStore:
         Q = as_index_set(indices)
         if not Q:
             raise ValueError("下标集合不能为空")
-        if Q[-1] >= self.n:
-            raise ValueError(f"下标 {Q[-1]} 超出当前向量长度 {self.delta.n}")
+        # ★ 上界只能用「位置号分配到哪」(``registry.next_offset``)，
+        #   **不能**用 ``self.n`` —— 那是各文件块数之和，段永不回收，
+        #   所以 next_offset 更大、位置号里还有洞（见 :attr:`indices` 的说明）。
+        #   原来的 ``self.delta.n`` 更是个不存在的属性（本类只有 ``deltas``），
+        #   一旦执行就是 AttributeError。
+        if Q[-1] >= self.registry.next_offset:
+            allocated = self.registry.next_offset
+            hint = "还没有分配过任何位置" if allocated == 0 else f"只分配到 {allocated - 1}"
+            raise ValueError(f"下标 {Q[-1]} 超出已分配的位置（{hint}）")
         groups = self._group_by_file(Q)
         if len(groups) != 1:
             # 凭证聚合（agg）要求各凭证的下标两两不交、而且属于**同一份文件**
@@ -1815,8 +1829,6 @@ class VectorStore:
         * 要补齐那一半，只能**知道合并集里所有块的值**、在合并向量上重开
           （见 :meth:`_prove_merged`）。因此这条路的代价是
           O(Σ_f |f|) 次大指数模幂，**与你要验几块无关** —— 只跟涉及文件的总位置数有关。
-
-        实测拆解与曲线见 ``docs/开发与验收记录.md`` 第四节。
         """
         if len(groups) == 1:
             file_id = next(iter(groups))
@@ -2564,7 +2576,7 @@ class VectorStore:
     def invalidate_node_report(self) -> None:
         """丢掉 :meth:`node_report` 的短 TTL 缓存。
 
-        ★★ **任何改变节点持有情况的操作都要调它**（上传 / 改块 / 追加 /
+        ★★ **任何改变节点持有情况的操作都要调它**（上传 / 替换 / 追加 /
            删除 / 换 CRS / 故障演练）。TTL 只是合并同一屏内的重复读，
            不是“允许写完之后还看到旧数据”。
         """
@@ -2643,7 +2655,7 @@ def _full_holder(
     **空向量**承诺一次」：``specialize(crs, 0)`` 的 ``U_0`` 就是 ``g``，
     ``commit(crs_0, []).C`` 就是 ``1``。
 
-    实测：这样算出的新摘要与「对截断后的向量重新做一次 :func:`svc.commit`」
+    实测：这样算出的新摘要与「对删除后的向量重新做一次 :func:`svc.commit`」
     **逐位相同**，而且它的 ``check_local_view()`` 为真 —— 它确实是一个合法本地
     视图，不是硬凑的数。（原来这条断言由 ``scripts/verify_version_restore.py``
     顺带核对；那个脚本随「回退到上一版」功能一起删除，结论不受影响。）
@@ -2775,7 +2787,7 @@ class PlainKeyStore(VectorStore):
         box = self._plain_keys.get((owner, file_key))
         if box is None:
             raise KeyError(
-                f"内存里没有 {owner}/{file_key} 的块密钥 —— 改块要换掉那一块的钥匙，"
+                f"内存里没有 {owner}/{file_key} 的块密钥 —— 替换要换掉那一块的钥匙，"
                 f"得先有地方放；PlainKeyStore 不上库，所以重启/重建之后就没法改了"
             )
         return super().modify(

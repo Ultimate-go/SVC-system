@@ -10,7 +10,7 @@
 | 场景                          | 应当发生什么                     |
 +===============================+==================================+
 | 掉线 1 台（可恢复）           | 读/验证/聚合**照常**（副本救场） |
-|                               | 写（改块/追加/删）**会失败**     |
+|                               | 写（替换/追加/删）**会失败**     |
 |                               | 恢复之后一切如初                 |
 +-------------------------------+----------------------------------+
 | 永久损毁 1 台（不可逆）       | 业务靠副本**仍然可用**           |
@@ -159,7 +159,7 @@ check("★ 聚合检索**照常**通过", bool(store.query(list(pos_all)).ok))
 
 hit_read, msg1 = raises(lambda: store.modify(OWNER, FILE_KEY, 0, b"X" * BLK),
                         TransportError)
-check("★ 改块**会失败**（广播写打不到掉线的那台）", hit_read, msg1.split("\n")[0][:90])
+check("★ 替换**会失败**（广播写打不到掉线的那台）", hit_read, msg1.split("\n")[0][:90])
 check("失败信息里说清了是「故障演练」", "故障演练" in msg1)
 
 hit_add, msg2 = raises(lambda: store.append(OWNER, FILE_KEY, b"Y" * BLK),
@@ -179,7 +179,7 @@ check("掉线期间密文没被动过（承诺仍对得上）",
 ft.restore()
 print(f"        {victim} 已恢复")
 ok, why = no_raise(lambda: store.modify(OWNER, FILE_KEY, 0, b"X" * BLK))
-check("★ 恢复后：改块成功", ok, why)
+check("★ 恢复后：替换成功", ok, why)
 check("★ 恢复后：明文更新正确", store.read(OWNER, FILE_KEY) == b"X" * BLK + PLAIN[BLK:])
 check("恢复后：自检重新全绿", store.check() == [], str(store.check()[:3]))
 check("恢复后：演练名单清空", ft.faulty() == set())
@@ -246,9 +246,9 @@ check("★ 报错里列清了「谁持多少块、谁联系不上」", "联系�
 #   所以**做过这两条之后就别再断言"读得出明文"了** —— 那是替身的局限，
 #   不是核心的问题（真系统的块密钥封好后只在成功时落库，第 5 节验证过）。
 kind, m = raises(lambda: store3.modify(OWNER, FILE_KEY, 1, b"Z" * BLK), Exception)
-check("★ 改块失败", kind, m.split("\n")[0][:90])
+check("★ 替换失败", kind, m.split("\n")[0][:90])
 kind, m = raises(lambda: store3.truncate(OWNER, FILE_KEY, 1), Exception)
-check("★ 截断失败", kind, m.split("\n")[0][:90])
+check("★ 删除失败", kind, m.split("\n")[0][:90])
 check("★★ 故障期间数据始终没被动过（快照逐位相同）", snapshot(_inner) == snap3)
 
 # ★★ 与前一版的**关键差别**：恢复之后一切如初 —— 因为整个演练从不删数据。
@@ -263,7 +263,7 @@ check("★ 恢复后承诺验证通过", store3.cipher_of(OWNER, FILE_KEY)["veri
 check("★ 恢复后聚合通过", bool(store3.query(list(pos3)).ok))
 check("★ 恢复后自检全绿", store3.check() == [], str(store3.check()[:3]))
 ok3, why3 = no_raise(lambda: store3.modify(OWNER, FILE_KEY, 1, b"Z" * BLK))
-check("★ 恢复后改块也通", ok3, why3[:80])
+check("★ 恢复后替换也通", ok3, why3[:80])
 
 
 # ===========================================================================
@@ -343,7 +343,7 @@ check("影响面够前端拼出「多副本救场」那句",
 #    与 PlainKeyStore（密钥一生成就塞内存）不同，所以这一条只能在真系统上验。
 wok, wwhy = raises(lambda: mgr.modify_block("alice", "mid", 0, b"Q" * _settings.segment_bytes),
                    Exception)
-check("掉线时改块失败", wok, wwhy[:80])
+check("掉线时替换失败", wok, wwhy[:80])
 sk_m = mgr.unseal_user_key("alice", "vds12345")
 ok, why = no_raise(lambda: mgr.read_plain("alice", "mid", sk_m))
 check("★ 写失败**不会**弄坏已存数据（块密钥只在成功时落库）", ok, why[:90])
@@ -565,7 +565,7 @@ section("8. ★ 跨进程：故障节点必须**真的**联系不上（否则写
 # ★★ 这一条盯的是**第三个**坑（本轮实测发现）：
 #    演练只在协调者这一侧标记"不可达"，而节点进程**还活着** ——
 #    内层不包一层，就会照常把更新推过去、还拿到 200，于是写入**成功**，
-#    面板承诺的「改块 / 追加 / 截断 会被拦下」是假的，
+#    面板承诺的「替换 / 追加 / 删除 会被拦下」是假的，
 #    也没法验证"失败清单确实点到了那几台"。
 class _CrossProc:
     """模仿 ``HttpTransport``：所有请求都过 ``_request``，广播写逐台收集失败。"""

@@ -21,7 +21,7 @@
 本脚本因此死盯三件事：
 
 1. **线格式**（``_delta_dict`` / ``_delta_in``）必须带 ``identity``；
-2. **跨进程真写一遍**：上传 / 改块 / 追加 / 截断 / 检索 / 自检；
+2. **跨进程真写一遍**：上传 / 替换 / 追加 / 删除 / 检索 / 自检；
 3. **节点重启之后还能写** —— ``identity`` 也要落进节点自己的 ``node.db``，
    否则"重启后一切正常，下一次更新才炸"。
 
@@ -251,12 +251,12 @@ check("★ 各节点的视图都合法", store.check() == [], str(store.check()[
 
 
 # ---------------------------------------------------------------------------
-section("2. 改块 / 追加 / 第二份文件 / 跨文件检索")
+section("2. 替换 / 追加 / 第二份文件 / 跨文件检索")
 
 store.modify(*F1, 1, b"X" * SEG)
-check("改块后 n 不变", store.delta_of(*F1).n == 3)
-check("改块后读回正确", store.read(*F1) == BLOCK + b"X" * SEG + BLOCK)
-check("改块后身份仍在", store.delta_of(*F1).identity == ID1)
+check("替换后 n 不变", store.delta_of(*F1).n == 3)
+check("替换后读回正确", store.read(*F1) == BLOCK + b"X" * SEG + BLOCK)
+check("替换后身份仍在", store.delta_of(*F1).identity == ID1)
 
 store.append(*F1, BLOCK * 2)
 check("追加后 n = 5", store.delta_of(*F1).n == 5, f"n={store.delta_of(*F1).n}")
@@ -307,7 +307,7 @@ check("重启后各节点仍能报告自己的视图",
       all(r.get("valid") for r in report), str([r.get("valid") for r in report]))
 
 store.modify(*F1, 0, b"Y" * SEG)
-check("★ 重启后改块成功（identity 没丢）", store.read(*F1) == b"Y" * SEG + b"X" * SEG + BLOCK * 3)
+check("★ 重启后替换成功（identity 没丢）", store.read(*F1) == b"Y" * SEG + b"X" * SEG + BLOCK * 3)
 store.append(*F1, BLOCK)
 check("★ 重启后追加成功", store.delta_of(*F1).n == 6, f"n={store.delta_of(*F1).n}")
 check("★ 重启后各节点自检无问题", store.check() == [], str(store.check()[:2]))
@@ -315,14 +315,14 @@ check("重启后 f2 仍然读得出来", store.read(*F2) == PLAIN2)
 
 
 # ---------------------------------------------------------------------------
-section("4. 截断 / 老库自动迁移")
+section("4. 删除 / 老库自动迁移")
 
 # F2 是最后上传的，尾部那几块属于它 —— 只有"排在向量末尾"的文件删得动尾巴。
 K, _rec = store.truncate(*F2, 1)
-check("截断退回被删的下标", tuple(K) == (pos2[-1],), repr(K))
-check("截断后 f2 的 n = 1", store.delta_of(*F2).n == 1, f"n={store.delta_of(*F2).n}")
-check("截断后 f2 读回正确", store.read(*F2) == PLAIN2[:SEG])
-check("★ 截断后各节点自检无问题", store.check() == [], str(store.check()[:2]))
+check("删除退回被删的下标", tuple(K) == (pos2[-1],), repr(K))
+check("删除后 f2 的 n = 1", store.delta_of(*F2).n == 1, f"n={store.delta_of(*F2).n}")
+check("删除后 f2 读回正确", store.read(*F2) == PLAIN2[:SEG])
+check("★ 删除后各节点自检无问题", store.check() == [], str(store.check()[:2]))
 
 # 老库（state 表没有那两列）必须能被自动补列，而不是整台机器起不来。
 old_dir = DATA_DIR / "node-old"

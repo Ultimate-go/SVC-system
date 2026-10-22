@@ -435,10 +435,10 @@ function singleBlockLine(card) {
 }
 
 /**
- * 「完整标题」按钮只在**标题真会被截断**时才给。
+ * 「完整标题」按钮只在**标题真会被删除**时才给。
  *
  * ★ 单文件卡的标题就是一个文件名，hover 就能看全，再放一个按钮是多余的（用户口径）；
- *   多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会长到要被截断。
+ *   多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会长到要被删除。
  */
 function needFullTitle(card) {
   return !isSingleFileCard(card) && cardTitle(card).length > 24
@@ -1389,14 +1389,14 @@ onMounted(() => {
              勾选由整卡点击驱动，这个复选框只显示选中态。 -->
         <div class="card-row card-head">
           <el-checkbox :model-value="panel.selectedIds.includes(card.id)" @click.prevent>
-            <!-- 挂 `title`：标题被省略号截断后，hover 仍能看到全称。 -->
+            <!-- 挂 `title`：标题被省略号删除后，hover 仍能看到全称。 -->
             <span class="card-title mono" :title="cardTitle(card)">{{ isSingleFileCard(card) ? singleTitle(card) : cardTitle(card) }}</span>
           </el-checkbox>
           <span v-if="isSingleFileCard(card) && singleOwner(card)" class="card-owner text-3">
             持有者：{{ singleOwner(card) }}
           </span>
           <!-- 单文件卡的标题就是文件名，hover 能看全，不给按钮；
-               多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会被截断。 -->
+               多文件卡那种“来源：a 第 1-3 块；b 第 4-9 块”才会被删除。 -->
           <el-button
             v-if="needFullTitle(card)"
             link
@@ -1689,7 +1689,7 @@ onMounted(() => {
 }
 /* ★ 卡片标题**单行省略**（用户反馈）：跨文件卡的标题可以很长，例如
    「聚合：test_10KB 第 0-10 块；test_20KB 第 0-19 块；test_50KB 第 0-49 块」——
-   不截断的话它会把 grid 的列**撑开**，压到右边相邻的那张卡上。
+   不删除的话它会把 grid 的列**撑开**，压到右边相邻的那张卡上。
 
    ★★ 关键是给 grid / flex 的子项 `min-width: 0`：不加这一条，
    `text-overflow: ellipsis` **根本不生效** —— 子项的默认 `min-width` 是 `auto`，
